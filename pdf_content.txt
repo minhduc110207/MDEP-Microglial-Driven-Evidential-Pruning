@@ -1,0 +1,335 @@
+Báo cáo Đề xuất Nghiên cứu
+Cắt tỉa Bằng chứng Định hướng Microglia (MDEP)
+thông qua Hệ thống Đa tác nhân Nhận thức Bất định
+Tổng hợp từ nội dung đề tài
+Ngày 8 tháng 5 năm 2026
+T óm tắt nội dung
+Sự phát triển vũ bão của các hệ thống học sâu đã thiết lập những tiêu chuẩn hiệu năng
+mới cho hàng loạt tác vụ nhận thức của trí tuệ nhân tạo. Tuy nhiên, rào cản lớn nhất đối
+với việc triển khai các mô hình này trong những lĩnh vực rủi ro cao như y tế hay xe tự lái
+vẫn là sự thiếu hụt khả năng định lượng bất định một cách đáng tin cậy. Các mạng nơ-ron
+truyền thống thường mắc phải hiện tượng tự tin thái quá, trong khi học sâu bằng chứng
+(Evidential Deep Learning – EDL) nổi lên như một hướng tiếp cận đột phá nhờ khả năng
+mô hình hóa trực tiếp bất định nhận thức và bất định nội tại chỉ qua một lần truyền thuận.
+Dẫu vậy, các kiến trúc EDL hiện tại vẫn là các mạng tĩnh, dẫn tới việc lãng phí tham
+số để hấp thụ “bằng chứng rác” từ các đặc trưng nhiễu. Song song với đó, các phương pháp
+huấn luyện mạng thưa động (Dynamic Sparse Training – DST) lại hoàn toàn mù mờ trước
+tín hiệu bất định và thường gặp khủng hoảng tối ưu trên không gian rời rạc. Báo cáo này
+đề xuất khung lý thuyếtMicroglial-Driven Evidential Pruning(MDEP), trong đó tương tác
+giữa Microglia và Astrocyte được số hóa thành một hệ tối ưu hóa kiến trúc đa tác nhân.
+Thông qua nới lỏng liên tục bằng điểm số tiềm ẩn, xấp xỉ Taylor bậc một và Smoothed
+Straight-Through Estimator, MDEP điều khiển quá trình cắt tỉa và mọc mới kết nối dựa
+trên đạo hàm của sự bất định. Dưới góc nhìn xấp xỉ ngẫu nhiên có chệch, đề tài hướng tới
+các đảm bảo toán học về hội tụ hình thái và kháng sập lớp. Khi kết hợp với chuẩn thưa
+NVIDIA 2:4 và hàm suy hao Evidential Focal Loss (EFL) được đề xuất riêng cho dữ liệu
+siêu mất cân bằng, MDEP hứa hẹn mang lại một mô hình vượt trội về định lượng bất định,
+khả năng kháng nhiễu và tăng tốc phần cứng thực tế.
+1 Bối cảnh nghiên cứu và động cơ đề tài
+Học sâu hiện đạt thành tích rất cao trên nhiều bài toán nhận dạng, phân loại và ra quyết định.
+Tuy nhiên, các mô hình mạng nơ-ron sâu truyền thống thường sinh ra dự đoán có độ tự tin
+cao ngay cả khi đầu vào nhiễu, lệch miền dữ liệu hoặc nằm ngoài phân phối huấn luyện. Đây
+là một điểm yếu nghiêm trọng trong các ứng dụng có rủi ro cao, nơi sai số không chỉ làm giảm
+hiệu năng mà còn có thể dẫn đến hậu quả lâm sàng hoặc an toàn nghiêm trọng.
+Trong bối cảnh đó, định lượng bất định (Uncertainty Quantification – UQ) trở thành một yêu
+cầu trung tâm. EDL cung cấp một lựa chọn hấp dẫn nhờ biểu diễn đầu ra dưới dạng bằng
+chứng và tham số hóa phân phối Dirichlet, qua đó tách bạch được bất định nhận thức và bất
+định nội tại với chi phí suy luận thấp. Dù vậy, EDL hiện vẫn chủ yếu dựa trên các mạng tĩnh,
+chưa tận dụng được khả năng tự tái cấu trúc để loại bỏ các thành phần hấp thụ “bằng chứng
+rác” từ nhiễu.
+1
+Ở chiều ngược lại, các phương pháp mạng thưa động (Dynamic Sparse Training – DST) như
+RigL hay SNIP cho thấy tiềm năng giảm chi phí tính toán bằng việc cắt tỉa và tái sinh kết nối
+trong quá trình huấn luyện. Tuy nhiên, các phương pháp này gần như chỉ dựa vào độ lớn trọng
+số hoặc gradient mất mát, mà không xét đến tín hiệu bất định. Hệ quả là mô hình có thể duy
+trì những kết nối đang “ghi nhớ nhiễu” và vô tình khuếch đại các dự đoán sai nhưng rất tự tin.
+Đề tài MDEP được đề xuất nhằm lấp khoảng trống giữa hai hướng nghiên cứu trên: kết hợp
+sức mạnh của EDL trong biểu diễn bất định với tính thích nghi cấu trúc của DST để tạo ra
+một mô hình vừa thưa, vừa ổn định, vừa đáng tin cậy.
+2 Bối cảnh và tuyên bố vấn đề
+2.1 Điểm mù của các thuật toán cắt tỉa và mạng thưa động
+Trong nỗ lực giảm chi phí lưu trữ và tính toán, các kỹ thuật DST như RigL hay SNIP đã chứng
+minh rằng việc cắt và mọc kết nối liên tục có thể duy trì hiệu năng với số tham số thấp hơn
+đáng kể. Tuy nhiên, các phương pháp này tồn tại một điểm mù hệ thống: chúng gần như không
+có khả năng nhận thức sự bất định. Trong môi trường dữ liệu chứa nhiễu, một trọng số có độ
+lớn cao chưa chắc phản ánh tri thức hữu ích mà có thể chỉ là dấu hiệu cho việc mô hình đang
+ghi nhớ nhiễu cục bộ. Khi thuật toán ưu tiên giữ lại những trọng số như vậy, nó vô tình bảo vệ
+các nơ-ron gây ra dự đoán sai nhưng lại rất tự tin.
+2.2 Sự tĩnh tại cấu trúc của học sâu bằng chứng
+EDL giải quyết vấn đề tự tin thái quá bằng cách tham số hóa phân phối Dirichlet trên không
+gian bằng chứng. Dù các biến thể hiện đại nhưI-EDL đã khắc phục được hạn chế về bất định
+nhận thức không triệt tiêu, hệ sinh thái EDL nhìn chung vẫn mắc kẹt trong trạng thái “tĩnh tại
+cấu trúc”. Khi dữ liệu chứa nhiễu hoặc tín hiệu mơ hồ, một mạng tĩnh buộc phải sử dụng thêm
+tham số để ghi nhớ các đặc trưng không đáng tin nhằm tiếp tục giảm hàm mất mát. Trong ngữ
+cảnh này, MDEP được định vị như một kiến trúc trực giao, đóng vai trò “người dọn dẹp cấu
+trúc” để các hàm suy hao bằng chứng có thể hoạt động trên một hình thái mạng thưa và sạch
+hơn.
+2.3 Rào cản phần cứng và khủng hoảng tối ưu rời rạc
+Phần lớn các nghiên cứu DST tạo ra sự thưa thớt phi cấu trúc nên không mang lại tốc độ suy
+luận thực tế đáng kể trên GPU. Đồng thời, việc tối ưu trực tiếp trên mặt nạ nhị phân{0,1}
+thường phá vỡ luồng gradient, đặc biệt khi mạng trở nên cực thưa, từ đó dẫn đến nguy cơ sập
+lớp nếu dữ liệu huấn luyện chứa nhiễu cực đoan hoặc tín hiệu bất ổn.
+2.4 Giới hạn của sự tương đồng sinh học
+Cần nhấn mạnh rằng MDEP không phải là một mô hình mô phỏng sinh học theo nghĩa mạng
+nơ-ron gai. Tương tác Microglia–Astrocyte trong đề tài chỉ được sử dụng như một phép loại
+suy định tuyến thuật toán. Thay vì mô phỏng tín hiệu điện hóa phụ thuộc hoạt động, MDEP
+ánh xạ các tín hiệu “chăm sóc” và “điều phối” này thành các đạo hàm thống kê của bất định
+2
+nội tạiu a và bất định nhận thứcu e, bảo đảm tương thích hoàn toàn với đồ thị tính toán lan
+truyền ngược trong học sâu hiện đại.
+Từ các vấn đề trên, câu hỏi nghiên cứu trung tâm là:liệu có thể xây dựng một khung cắt tỉa
+động nhận thức bất định, vừa có bảo đảm toán học, vừa tận dụng được tăng tốc phần cứng, đồng
+thời nâng cao độ tin cậy của mô hình trên dữ liệu nhiễu và mất cân bằng hay không?
+3 Mục tiêu nghiên cứu
+Mục tiêu tổng quát của đề tài là xây dựng và kiểm chứng một khung cắt tỉa bằng chứng định
+hướng Microglia, cho phép tối ưu đồng thời cấu trúc mạng, hiệu năng dự đoán, độ tin cậy định
+lượng bất định và hiệu quả tính toán thực tế.
+Các mục tiêu cụ thể gồm:
+•Thiết lập đảm bảo toán học cho quá trình tối ưu cấu trúc bằng nới lỏng liên tục và lý thuyết
+xấp xỉ ngẫu nhiên có chệch.
+•Định hình khung tối ưu hóa đa tác nhân, trong đó Microglia và Astrocyte là hai tác nhân
+giải tích cùng hướng tới cực tiểu hóa sai số định cỡ.
+•Giải quyết nghịch lý bất định cục bộ bằng cách áp dụng Smoothed STE để tính toán đạo
+hàm bất định nhận thức theo từng nơ-ron.
+•Đề xuất hàm Evidential Focal Loss nhằm xử lý các bộ dữ liệu siêu mất cân bằng như ISIC
+2024 mà vẫn bảo toàn hình học của phân phối Dirichlet.
+•Tích hợp ràng buộc thưa có cấu trúc NVIDIA 2:4 và chiến lược cập nhật khấu hao để tăng
+tính khả thi trên phần cứng.
+4 Cơ sở lý thuyết
+4.1 Nền tảng Học sâu bằng chứng
+Trong EDL, đầu ra của mạng không được hiểu trực tiếp là xác suất lớp mà là một véc-tơ bằng
+chứng không âme=f(x,W)≥0. Từ đó ta xây dựng tham số Dirichlet:
+α=e+ 1, S=
+KX
+c=1
+αc.
+Hai đại lượng bất định cốt lõi được dùng trong đề tài bao gồm:
+ue = K
+S
+cho bất định nhận thức, và
+ua =−
+KX
+c=1
+αc
+S (ψ(S+ 1)−ψ(α c + 1))
+3
+cho bất định nội tại, vớiψ(·)là hàm digamma.
+Ý nghĩa thực tiễn của biểu diễn này là tổng bằng chứngScàng lớn thì mô hình càng tự tin;
+ngược lại, khiSthấp, bất định nhận thức sẽ cao. Đây chính là nền tảng để MDEP sử dụng tín
+hiệu bất định như một tiêu chí tái cấu trúc mạng.
+4.2 Dẫn xuất tác nhân từ lựa chọn mô hình Bayes
+MDEP diễn giải hành vi cắt tỉa của Microglia như một dạng lựa chọn mô hình Bayes gần đúng
+trên không gian cấu trúc. Việc loại bỏ một liên kếtw ij không chỉ tương đương với giảm số tham
+số, mà còn là hành động tối ưu độ phức tạp của mô hình trong nghĩa năng lượng tự do biến
+phân. Nhờ vậy, MDEP có thể được xem như một cơ chế xấp xỉ suy luận Bayes trên không gian
+topology mà không cần phụ thuộc vào lấy mẫu Monte Carlo đắt đỏ.
+4.3 Nới lỏng liên tục và định lý hội tụ xấp xỉ có chệch
+Không thể áp dụng trực tiếp tối ưu hóa liên tục lên mặt nạ nhị phânM ij ∈ {0,1}. Vì vậy,
+MDEP duy trì ma trận điểm số tiềm ẩn liên tụcS∈R d×d và suy ra mặt nạ nhị phân theo:
+M (t)
+ij =H
+
+S(t)
+ij −τ t
+
+.
+Thách thức quan trọng nằm ở chỗ việc cập nhậtSthông qua Smoothed STE tạo ra một ước
+lượng gradient có chệch. Do đó, định lý Robbins–Monro cổ điển không còn áp dụng trực tiếp.
+Đề tài sử dụng khuôn khổ xấp xỉ ngẫu nhiên có chệch, trong đó độ chệch giảm dần nhờ lịch
+trình ủ nhiệtγ t →0theo thời gian. Khi kết hợp với chuỗi tốc độ họcζ t thỏa mãn
+X
+t
+ζt =∞,
+X
+t
+ζ 2
+t <∞,
+và ngưỡng độngτ t →τ f inal theo lịch trình cosine, ta kỳ vọng không gian trạng tháiS (t) hội tụ;
+kéo theo đó là sự hội tụ hình thái của mặt nạ nhị phânM (t).
+Ngoài ra, dưới phân phối khởi tạo Erd ˝os–Rényi–Kernel và cơ chế bù trừ của Astrocyte, xác suất
+để một lớplbị cắt tỉa hoàn toàn được khống chế bởi cận:
+P
+X
+Ml = 0
+
+≤exp
+ 
+−Ω(Nl)
+
+,
+qua đó cung cấp một đảm bảo lý thuyết cho khả năng kháng sập lớp trong quá trình tìm kiếm
+cấu trúc.
+5 Đề xuất phương pháp MDEP
+5.1 Ý tưởng tổng thể
+MDEP mô hình hóa tương tác giữa Microglia và Astrocyte như một hệ đa tác nhân trên đồ thị
+tính toán của mạng nơ-ron. Trong đó:
+4
+•Microgliađảm nhiệm vai trò phát hiện và loại bỏ các liên kết có giá trị thấp đối với cả
+hiệu năng dự đoán lẫn khả năng nhận thức nhiễu.
+•Astrocyteđảm nhiệm vai trò khảo sát các vùng bất định nhận thức cục bộ cao, từ đó định
+hướng mọc lại các kết nối cần thiết để phục hồi hoặc tăng cường dung lượng biểu diễn.
+Toàn bộ quá trình hướng tới cực tiểu hóa hàm mục tiêu tổng quát:
+J= ECE +λ·FLOPs,
+trong đó thành phần thứ nhất đo sai số định cỡ, còn thành phần thứ hai phản ánh chi phí tính
+toán.
+5.2 Tác nhân Microglia: tiêu chí cắt tỉa nhận thức bất định
+Trong không gian dữ liệu y tế, nhiều đặc trưng mang thông tin mạnh lại thường xuất hiện ở các
+vùng có bất định nội tại rất cao. Nếu tiêu chí xếp hạng được định nghĩa bằng phép trừ tuyến
+tính giữa các tín hiệu, hiện tượng triệt tiêu độ lớn có thể xảy ra và khiến hệ thống cắt nhầm
+các kết nối quan trọng. Vì vậy, điểm số cắt tỉa của Microglia được tái định nghĩa thành phép
+cộng của hai vai trò sau, kết hợp chuẩn hóa trên từng lớp:
+C(t)
+ij = Norm
+wij
+∂LEDL
+∂wij
+
+
++β·Norm
+wij
+∂ua
+∂wij
+
+
+.
+Hàm này mang ý nghĩa rằng một liên kết cần được bảo vệ nếu nó đóng góp lớn vào việc giảm
+sai số dự đoán hoặc đóng góp lớn vào việc mô hình hóa nhận thức nhiễu của ảnh. Chỉ những
+liên kết cóC ij thấp nhất, tức gần như vô ích ở cả hai phương diện, mới bị loại bỏ.
+Để kiểm soát chi phí tính toán, đạo hàm củau a không được tính ở mọi mini-batch mà chỉ trong
+các chu kỳ cập nhật cấu trúc cách nhau∆Tbước. Tại mỗi lần cập nhật như vậy, quá trình
+truyền ngược chỉ cần chạy trên một mini-batch đại diện. Nhờ chiến lược khấu hao này, chi phí
+bổ sung của MDEP tiệm cận mức của RigL nhưng giàu thông tin bất định hơn.
+5.3 Tác nhân Astrocyte: bất định nhận thức cục bộ và tăng trưởng kết nối
+Astrocyte được thiết kế để phản ứng với các vùng mà mô hình còn thiếu hiểu biết. Vìu e =K/S
+là một hàm khả vi toàn cục, đề tài xác định bất định nhận thức cục bộ tại nơ-ronicủa lớpl
+bằng:
+u(node)
+e,i =
+
+∂ue
+∂a(l)
+i
+ .
+Việc tính gradient này đòi hỏi luồng truyền ngược đi qua cả các liên kết đang “ngủ đông”, tức
+là mộtdense gradient pass. Để tránh nhiễu gradient mạnh của STE nguyên bản trong mạng
+cực thưa, đề tài áp dụng Smoothed Straight-Through Estimator:
+∂Mij
+∂Sij
+≈σ ′(Sij/γ),
+vớiγlà nhiệt độ được ủ giảm dần theo thời gian.
+5
+Tiềm năng mọc mới của một kết nối được xác định theo:
+G(t)
+ij = Norm
+
+u(node)
+e,i
+
+×Norm
+
+∂LEDL
+∂wij
+
+
+.
+Những vị trí cóG ij cao nhất sẽ được ưu tiên kích hoạt trở lại, giúp mạng phân bổ dung lượng
+vào các vùng còn bất định nhưng có tiềm năng cải thiện rõ rệt đối với chất lượng dự đoán.
+5.4 Ràng buộc phần cứng và động lực huấn luyện
+Một điểm thực dụng của đề tài là mọi cập nhật cấu trúc đều phải tuân thủ nghiêm ngặt chuẩn
+thưa NVIDIA 2:4, nghĩa là trong mỗi nhóm bốn trọng số liền kề chỉ giữ lại đúng hai trọng số.
+Điều này tăng khả năng chuyển hóa sự thưa thớt về mặt thuật toán thành tăng tốc thực tế
+trên GPU hiện đại.
+Quá trình huấn luyện gồm hai pha chính:
+•W arm-up:mạng ban đầu học ở chế độ đặc và tĩnh trong khoảng 15–20% số epoch để các
+tín hiệu bất định trở nên có nghĩa.
+•Dynamic sparsity:sau pha khởi động, mạng được cắt tỉa và tái sinh dần theo lịch trình
+cosine, hướng đến hình thái thưa chuẩn 2:4.
+6 Đảm bảo lý thuyết kỳ vọng
+Đề tài đặt trọng tâm mạnh vào tính chặt chẽ toán học, trong đó các bảo đảm về hội tụ hình
+thái và chống sập lớp đã được tích hợp trực tiếp vào phần cơ sở lý thuyết và thiết kế phương
+pháp. Về bản chất, MDEP không chỉ là một heuristic cắt tỉa dựa trên tín hiệu bất định, mà là
+một khung tối ưu hóa cấu trúc được xây dựng trên nới lỏng liên tục, gradient có chệch giảm
+dần và cơ chế bù trừ giữa hai tác nhân để duy trì khả năng lan truyền gradient trong quá trình
+học.
+7 Đề xuất Evidential Focal Loss cho dữ liệu mất cân bằng
+Đối với các bộ dữ liệu y tế cực mất cân bằng như ISIC 2024, việc kết hợp trực tiếp Focal
+Loss tiêu chuẩn với EDL chứa đựng một nghịch lý toán học nghiêm trọng. Nếu dùng trọng số
+(1−ˆpc)γ để tác động trực tiếp lên lượng bằng chứng, phân phối Dirichlet của lớp thiểu số có
+thể bị ép ngược về gần prior, làm tổng bằng chứngSgiảm mạnh và gây bùng nổ bất định nhận
+thức. Khi đó, mô hình có xu hướng trả lời “tôi không biết” thay vì thật sự học được cách nhận
+diện lớp hiếm.
+Để khắc phục, đề tài đề xuấtEvidential Focal Loss(EFL):
+LEF L =
+KX
+c=1
+(1−ˆpc)γ L(c)
+I-EDL ,ˆp c = αc
+S .
+6
+Điểm cốt lõi của EFL là hệ số focal chỉ tác động lên hàm mất mát chứ không bóp méo trực
+tiếp không gian bằng chứng. Nhờ đó, EDL vẫn duy trì được cấu trúc Dirichlet hợp lệ, trong khi
+gradient dành cho các mẫu khó và lớp hiếm được tăng cường một cách có kiểm soát.
+8 Kế hoạch thực nghiệm và đánh giá
+Để kiểm chứng giả thuyết nghiên cứu, đề tài đề xuất một giao thức đánh giá nhấn mạnh đồng
+thời hiệu năng, độ tin cậy và chi phí tính toán.
+8.1 Các mô hình đối chuẩn
+Nhóm đối chuẩn dự kiến bao gồm:
+•các phương pháp DST tiêu biểu như RigL và SNIP;
+•các phương pháp cắt tỉa Bayes như Variational Dropout vàL 0 Regularization;
+•các biến thể EDL tĩnh để đánh giá lợi ích thuần túy của tối ưu hình thái.
+8.2 Thước đo đánh giá
+Các chỉ số đánh giá không chỉ tập trung vào độ chính xác mà còn bao gồm cả độ tin cậy và
+hiệu quả tính toán:
+•Balanced Accuracy;
+•Macro-AUROC;
+•ECE và đặc biệt là Minority-ECE cho nhóm bệnh lý thiểu số;
+•Training FLOPs/MACs và khả năng tăng tốc thực tế trên phần cứng hỗ trợ chuẩn 2:4.
+Những thước đo này được lựa chọn nhằm tránh tình trạng hiệu năng của lớp đa số che lấp thất
+bại của mô hình trên các lớp bệnh lý hiếm, vốn là trọng tâm đánh giá trong bối cảnh y tế.
+8.3 Nghiên cứu cắt lớp
+Thiết kế ablation study gồm ba cấu hình:
+•MDEP-PruneOnly:loại Astrocyte để đo tác động khi chỉ cắt tỉa mà không có mọc bù.
+•MDEP-GrowOnly:loại Microglia để đánh giá mức tăng bất định và nguy cơ học vẹt
+nhiễu.
+•MDEP đầy đủ:kiểm chứng hiệu quả cộng hưởng giữa hai tác nhân.
+7
+9 Đóng góp khoa học kỳ vọng
+Nếu thực hiện thành công, đề tài có thể tạo ra các đóng góp nổi bật sau:
+Đóng góp 1.Đề xuất một khung cắt tỉa động mới có nhận thức bất định, kết nối hai dòng nghiên cứu
+EDL và DST vốn đang tương đối tách rời.
+Đóng góp 2.Xây dựng một cơ chế tối ưu hóa đa tác nhân có thể diễn giải được, trong đó vai trò cắt
+tỉa và tăng trưởng được tách biệt rõ ràng theo bản chất tín hiệu bất định.
+Đóng góp 3.Bổ sung cơ sở lý thuyết về hội tụ cấu trúc dưới gradient có chệch và cận xác suất chống
+sập lớp.
+Đóng góp 4.Đưa ra hàm EFL phù hợp cho dữ liệu y tế siêu mất cân bằng, qua đó tăng tính thực dụng
+của EDL trong môi trường lâm sàng.
+Đóng góp 5.Đảm bảo khả năng triển khai phần cứng bằng chuẩn thưa có cấu trúc, vượt qua hạn chế
+thường gặp của thưa thớt phi cấu trúc.
+10 Lộ trình triển khai đề tài
+Đề tài được định hướng triển khai trong 24 tháng theo các giai đoạn sau:
+Giai đoạn Nội dung công việc chính
+Tháng 1–4 Hoàn thiện dẫn xuất toán học cho Smoothed STE, EFL và cơ chế
+đạo hàm bất định cục bộ trên PyTorch.
+Tháng 5–9 Xây dựng khung đa tác nhân MDEP, tích hợp lịch cập nhật khấu
+hao và ràng buộc thưa NVIDIA 2:4.
+Tháng 10–13 Tối ưu siêu tham số nhưβ,γvà các lịch trình học; triển khai nghiên
+cứu cắt lớp.
+Tháng 14–18 Đối chuẩn trên dữ liệu lâm sàng, đặc biệt là ISIC 2024, với các chỉ
+số Macro-AUROC và Minority-ECE.
+Tháng 19–24 Hoàn thiện mã nguồn mở, chuẩn bị báo cáo tổng kết và nộp bài
+báo khoa học.
+11 Kết luận
+MDEP là một đề xuất có tính mới ở giao điểm của ba hướng nghiên cứu quan trọng: định lượng
+bất định, tối ưu hóa cấu trúc mạng và tăng tốc phần cứng. Khác với các phương pháp cắt tỉa
+truyền thống vốn chỉ quan tâm đến độ lớn tham số, MDEP sử dụng trực tiếp tín hiệu bất định
+để quyết định nên loại bỏ hay phục hồi kết nối nào. Đồng thời, đề tài không dừng ở mức ý
+tưởng heuristic mà còn đặt ra mục tiêu chứng minh hội tụ và chống sập lớp dưới khuôn khổ
+xấp xỉ ngẫu nhiên có chệch.
+Về mặt ứng dụng, đề tài đặc biệt phù hợp với các bài toán y tế nơi độ tin cậy của mô hình quan
+trọng không kém độ chính xác. Nếu được kiểm chứng thực nghiệm thành công, MDEP có thể
+trở thành một nền tảng đáng chú ý cho thế hệ mô hình học sâu vừa gọn nhẹ, vừa có khả năng
+tự nhận biết mức độ không chắc chắn của chính mình.
+8
+Từ khóa
+Học sâu bằng chứng; định lượng bất định; mạng thưa động; Microglia; Astrocyte; Evidential
+Focal Loss; NVIDIA 2:4 sparsity; dữ liệu y tế mất cân bằng.
+9
