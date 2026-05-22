@@ -159,3 +159,9 @@ $RECYCLE.BIN/
 *.onnx
 checkpoint/
 logs/
+
+# Local research and debug files
+debug_nan.py
+mdep_fixes_summary.md
+mdep_research_report.html
+pdf_content.txt
