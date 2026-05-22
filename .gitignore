@@ -165,3 +165,5 @@ debug_nan.py
 mdep_fixes_summary.md
 mdep_research_report.html
 pdf_content.txt
+main_pdf_extracted.txt
+*.pdf
