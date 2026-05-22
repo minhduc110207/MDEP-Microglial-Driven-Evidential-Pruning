@@ -83,21 +83,29 @@ def get_isic_dataloader(batch_size=32):
         X = torch.randn(100, 3, 224, 224)
         Y = torch.randint(0, 2, (100,)) # Binary classification for ISIC
         dataset = TensorDataset(X, Y)
-        return DataLoader(dataset, batch_size=batch_size, shuffle=True), 2
+        return DataLoader(dataset, batch_size=batch_size, shuffle=True), 2, torch.ones(2)
         
     dataset = ISICDataset(csv_file=csv_path, image_dir=image_dir, transform=transform)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, prefetch_factor=2)
     
     # ISIC is binary (benign vs malignant)
     num_classes = 2 
-    return dataloader, num_classes
+    df = pd.read_csv(csv_path)
+    class_counts = df['target'].value_counts().sort_index()
+    total = len(df)
+    import math
+    cw_raw = [math.sqrt(total / class_counts.get(c, 1)) for c in range(num_classes)]
+    majority_weight = cw_raw[0]
+    cw = torch.tensor([w / majority_weight for w in cw_raw], dtype=torch.float32)
+    
+    return dataloader, num_classes, cw
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Initialize dataloader first to get the correct number of classes
-    dataloader, num_classes = get_isic_dataloader(batch_size=32)
+    dataloader, num_classes, class_weights = get_isic_dataloader(batch_size=32)
     
     # 1. Load off-the-shelf ResNet from torchvision
     # ResNet18 is used here for demonstration
@@ -118,14 +126,19 @@ def main():
     replace_conv2d_with_mdep(model)
     model = model.to(device)
     
-    # 2. Setup Loss, Optimizer, Trainer
-    criterion = EvidentialFocalLoss(gamma=2.0, num_classes=num_classes, kl_lambda=0.1)
-    # Khắc phục lỗi Optimizer Hijacking: chặn 'scores' khỏi AdamW
-    trainable_params = [p for name, p in model.named_parameters() if 'scores' not in name]
-    optimizer = optim.Adam(trainable_params, lr=1e-3)
-    
     total_epochs = 15 # Shorter for Kaggle demo
     warmup_epochs = 3
+    
+    # 2. Setup Loss, Optimizer, Trainer
+    criterion = EvidentialFocalLoss(
+        gamma=2.0, num_classes=num_classes, kl_lambda=0.1,
+        class_weights=class_weights.to(device),
+        warmup_epochs=warmup_epochs, total_epochs=total_epochs
+    )
+    # Khắc phục lỗi Optimizer Hijacking: chặn 'scores' khỏi AdamW
+    trainable_params = [p for name, p in model.named_parameters() if 'scores' not in name]
+    optimizer = optim.Adam(trainable_params, lr=4.0e-05)
+    
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs)
     
     # 3. Training Loop

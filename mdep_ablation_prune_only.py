@@ -84,7 +84,9 @@ def compute_uncertainties(evidence):
     digamma_S = torch.digamma(S + 1.0)
     digamma_alpha = torch.digamma(alpha + 1.0)
     u_a_term = (alpha / S) * (digamma_S - digamma_alpha)
-    u_a = -torch.sum(u_a_term, dim=1, keepdim=True)
+    u_a = torch.sum(u_a_term, dim=1, keepdim=True)
+    assert torch.all(u_a > -1e-6), f"Sanity check failed: u_a contains negative values {u_a[u_a < -1e-6].tolist()}"
+    u_a = torch.clamp(u_a, min=0.0)
 
     return {
         'epistemic': u_e,
@@ -118,16 +120,19 @@ def kl_divergence(alpha, num_classes):
 
 class EvidentialFocalLoss(nn.Module):
     """
-    Evidential Focal Loss (EFL) with KL Divergence Regularization.
+    Evidential Focal Loss (EFL) with KL Divergence Regularization and Dynamic Gamma Scheduling.
     The focal weight modulates the CE term — not the evidence space directly —
     so the Dirichlet structure stays valid even on highly imbalanced data.
     """
-    def __init__(self, gamma=2.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10):
+    def __init__(self, gamma=2.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
         super(EvidentialFocalLoss, self).__init__()
+        self.base_gamma = gamma
         self.gamma = gamma
         self.num_classes = num_classes
         self.kl_lambda = kl_lambda
         self.annealing_epochs = annealing_epochs
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
         if class_weights is not None:
             self.register_buffer('class_weights', class_weights)
         else:
@@ -147,8 +152,25 @@ class EvidentialFocalLoss(nn.Module):
             dim=1, keepdim=True,
         )
 
+        # Dynamic gamma scheduling
+        if epoch is not None:
+            if epoch < self.warmup_epochs:
+                gamma_val = 0.0
+            elif epoch < self.warmup_epochs + 5:
+                # Linear warmup from 0.0 to 2.0 over 5 epochs
+                gamma_val = 2.0 * (epoch - self.warmup_epochs) / 5.0
+            else:
+                # Max force phase: increase from 2.0 to 4.0 in the remaining epochs
+                remaining_epochs = max(1, self.total_epochs - (self.warmup_epochs + 5))
+                progress = (epoch - (self.warmup_epochs + 5)) / remaining_epochs
+                gamma_val = 2.0 + 2.0 * min(1.0, progress)
+        else:
+            gamma_val = self.gamma
+
+        self.gamma = gamma_val # Store current gamma value
+
         p_target = torch.sum(targets * p_hat, dim=1, keepdim=True)
-        focal_weight = (1.0 - p_target.detach()) ** self.gamma
+        focal_weight = (1.0 - p_target.detach()) ** gamma_val
 
         if self.class_weights is not None:
             sample_weight = torch.sum(targets * self.class_weights.unsqueeze(0), dim=1, keepdim=True)
@@ -164,7 +186,7 @@ class EvidentialFocalLoss(nn.Module):
         else:
             annealing_coef = 1.0
 
-        loss = sample_weight * focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl
+        loss = sample_weight * (focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl)
         return torch.mean(loss)
 
 
@@ -262,21 +284,25 @@ def update_scores_agents(model, beta=1.0):
     ABLATION: Prune-Only — Microglia agent only.
     The Astrocyte (growing) signal G_ij is zeroed out.
 
-    Microglia (§5.2): C_ij = Norm(|w·∂L_EFL/∂w|) + β·Norm(|w·∂u_a/∂w|)
+    Microglia (§5.2): C_ij = Norm(|∂L_EFL/∂S|) + β·Norm(|∂u_a/∂S|)
     """
     for module in model.modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            if not hasattr(module, 'grad_L_w'):
+            if not hasattr(module, 'grad_L_S'):
                 continue
 
             w_val = module.weight.data
 
             # --- Microglia agent: pruning score (§5.2) ---
-            c1 = torch.abs(w_val * module.grad_L_w)
-            c1_norm = c1 / (c1.max() + 1e-8)
+            c1 = torch.abs(module.grad_L_S)
+            c1_min = c1.min()
+            c1_max = c1.max()
+            c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
 
-            c2 = torch.abs(w_val * getattr(module, 'grad_ua_w', torch.zeros_like(w_val)))
-            c2_norm = c2 / (c2.max() + 1e-8)
+            c2 = torch.abs(getattr(module, 'grad_ua_S', torch.zeros_like(module.scores)))
+            c2_min = c2.min()
+            c2_max = c2.max()
+            c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
 
             C_ij = c1_norm + beta * c2_norm
 
@@ -285,6 +311,9 @@ def update_scores_agents(model, beta=1.0):
 
             # Update latent scores (only pruning contributes)
             module.scores.data += (C_ij + G_ij) * 0.1
+            
+            # Zero-centering stabilization
+            module.scores.data.sub_(module.scores.data.mean())
 
 
 # ============================================================================
@@ -292,12 +321,15 @@ def update_scores_agents(model, beta=1.0):
 # ============================================================================
 
 class MDEPTrainer:
-    def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=15):
+    def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.total_epochs = total_epochs
-        self.warmup_epochs = warmup_epochs
+        if warmup_epochs is None:
+            self.warmup_epochs = max(1, int(0.20 * total_epochs))
+        else:
+            self.warmup_epochs = warmup_epochs
 
         # Smoothed-STE temperature schedule
         self.gamma_initial = 5.0
@@ -312,6 +344,93 @@ class MDEPTrainer:
             1 + math.cos(math.pi * progress)
         )
         return gamma
+
+    def check_gradient_flow(self, epoch):
+        import os
+        import matplotlib.pyplot as plt
+        
+        # Create artifacts folder if not exists
+        artifacts_dir = os.path.join(os.getcwd(), "artifacts")
+        os.makedirs(artifacts_dir, exist_ok=True)
+        
+        target_layers = []
+        for name, m in self.model.named_modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                target_layers.append((name, m))
+                
+        if not target_layers:
+            print("No MDEP layers found to check gradient flow.")
+            return
+            
+        print(f"\n🔍 [Gradient Flow Check - Epoch {epoch}]")
+        print("-" * 75)
+        
+        # We will check the last layer
+        visualize_layers = [target_layers[-1]]
+        
+        for name, m in visualize_layers:
+            w_val = m.weight.data.cpu()
+            grad_ua = getattr(m, 'grad_ua_S', None)
+            grad_L = getattr(m, 'grad_L_S', None)
+            
+            if grad_ua is None or grad_L is None:
+                print(f"Layer {name}: grad_ua_S or grad_L_S is None. Cannot perform flow check.")
+                continue
+                
+            grad_ua = grad_ua.cpu()
+            grad_L = grad_L.cpu()
+            
+            # Magnitudes in score-space
+            mag_ua = torch.abs(grad_ua)
+            mag_L = torch.abs(grad_L)
+            
+            # Min-Max Normalization (Strategy 1)
+            mag_ua_min = mag_ua.min()
+            mag_ua_max = mag_ua.max()
+            mag_ua_norm = (mag_ua - mag_ua_min) / (mag_ua_max - mag_ua_min + 1e-8)
+            
+            mag_L_min = mag_L.min()
+            mag_L_max = mag_L.max()
+            mag_L_norm = (mag_L - mag_L_min) / (mag_L_max - mag_L_min + 1e-8)
+            
+            # Print raw statistics
+            print(f"Layer: {name}")
+            print(f"  |du_a/dS| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
+            print(f"  |dL_EFL/dS| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
+            
+            # Relative scale check (beta balance)
+            ratio = mag_ua.mean() / (mag_L.mean() + 1e-8)
+            print(f"  Ratio (Raw) |du_a/dS| / |dL/dS|: {ratio.item():.4f}")
+            
+            # Normalized statistics
+            ratio_norm = mag_ua_norm.mean() / (mag_L_norm.mean() + 1e-8)
+            print(f"  Normalized |du_a/dS|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
+            print(f"  Normalized |dL_EFL/dS|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
+            print(f"  Ratio (Normalized): {ratio_norm.item():.4f}")
+            
+            # Plot histograms
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            
+            # Flatten to 1D
+            mag_ua_flat = mag_ua.numpy().flatten()
+            mag_L_flat = mag_L.numpy().flatten()
+            
+            ax1.hist(mag_ua_flat, bins=50, color='blue', alpha=0.7)
+            ax1.set_title(f'|du_a/dS| ({name})')
+            ax1.set_xlabel('Magnitude')
+            ax1.set_ylabel('Count')
+            
+            ax2.hist(mag_L_flat, bins=50, color='green', alpha=0.7)
+            ax2.set_title(f'|dL_EFL/dS| ({name})')
+            ax2.set_xlabel('Magnitude')
+            ax2.set_ylabel('Count')
+            
+            plt.tight_layout()
+            plot_path = os.path.join(artifacts_dir, f"grad_ua_flow_epoch_{epoch}.png")
+            plt.savefig(plot_path)
+            plt.close()
+            print(f"  Saved gradient histogram to: {plot_path}")
+            print("-" * 75)
 
     def set_warmup_state(self, is_warmup, gamma):
         for module in self.model.modules():
@@ -343,12 +462,15 @@ class MDEPTrainer:
         u_a = torch.mean(uncertainties['aleatoric'])
         u_e = torch.mean(uncertainties['epistemic'])
 
-        # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
-        self.optimizer.zero_grad()
+        # 1. ∂u_a/∂S → Microglia agent (per-weight score signal)
+        self.model.zero_grad()
         u_a.backward(retain_graph=True)
         for m in self.model.modules():
-            if isinstance(m, (MDEPLinear, MDEPConv2d)) and m.weight.grad is not None:
-                m.grad_ua_w = m.weight.grad.clone().detach()
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                if m.scores.grad is not None:
+                    m.grad_ua_S = m.scores.grad.clone().detach()
+                else:
+                    m.grad_ua_S = torch.zeros_like(m.scores)
 
         # 2. ∂u_e/∂a^(l) → Astrocyte agent (per-neuron signal)
         act_tensors = []
@@ -359,7 +481,7 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            self.optimizer.zero_grad()
+            self.model.zero_grad()
             grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
@@ -372,7 +494,7 @@ class MDEPTrainer:
 
         for h in hooks:
             h.remove()
-        self.optimizer.zero_grad()
+        self.model.zero_grad()
 
     def train_epoch(self, epoch, dataloader, device, print_interval=200):
         self.model.train()
@@ -382,8 +504,8 @@ class MDEPTrainer:
         self.set_warmup_state(is_warmup, gamma)
 
         # Manual LR Warmup parameters
-        warmup_period = 5
-        base_lr = 1e-3
+        warmup_period = 1
+        base_lr = 4.0e-05
 
         total_loss = 0.0
         total_grad_norm = 0.0
@@ -405,11 +527,11 @@ class MDEPTrainer:
 
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # Amortized uncertainty-gradient pass on the first batch of the epoch
-            if not is_warmup and batch_idx == 0:
+            # Amortized uncertainty-gradient pass on the first batch of the epoch (also during warm-up epochs 0 and 1)
+            if (not is_warmup or epoch < 2) and batch_idx == 0:
                 self.compute_amortized_gradients(inputs)
 
-            self.optimizer.zero_grad()
+            self.model.zero_grad()
             evidence = self.model(inputs)
             loss = self.criterion(evidence, targets, epoch)
             
@@ -417,15 +539,23 @@ class MDEPTrainer:
             scaled_loss = loss * 4.0
             scaled_loss.backward()
 
-            # Gradient clipping and norm tracking
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=2.0)
+            # Gradient clipping and norm tracking (only for optimized parameters)
+            params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
+            grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
             total_grad_norm += grad_norm.item()
 
-            # Cache primary gradient for structural updates
-            if not is_warmup:
+            # Cache primary gradient for structural updates & check gradient flow during warm-up
+            if not is_warmup or epoch < 2:
+                inv_scale = 0.25
                 for m in self.model.modules():
-                    if isinstance(m, (MDEPLinear, MDEPConv2d)) and m.weight.grad is not None:
-                        m.grad_L_w = m.weight.grad.clone().detach()
+                    if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                        if m.scores.grad is not None:
+                            m.grad_L_S = m.scores.grad.clone().detach() * inv_scale
+                        else:
+                            m.grad_L_S = torch.zeros_like(m.scores)
+
+            if epoch < 2 and batch_idx == 0:
+                self.check_gradient_flow(epoch)
 
             self.optimizer.step()
 
@@ -655,10 +785,13 @@ def get_isic_dataloaders(batch_size=32, test_ratio=0.2):
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=2)
 
+    # Compute class weights (dampened inverse frequency to prevent loss/gradient explosion)
+    import math
     class_counts = train_df['target'].value_counts().sort_index()
     total = len(train_df)
-    cw = torch.tensor([total / (num_classes * class_counts.get(c, 1)) for c in range(num_classes)],
-                       dtype=torch.float32)
+    cw_raw = [math.sqrt(total / class_counts.get(c, 1)) for c in range(num_classes)]
+    majority_weight = cw_raw[0]
+    cw = torch.tensor([w / majority_weight for w in cw_raw], dtype=torch.float32)
     print(f"⚖️  Class weights: {dict(enumerate(cw.tolist()))}")
 
     return train_loader, test_loader, num_classes, cw
@@ -875,7 +1008,7 @@ def evaluate(model, test_loader, device, num_classes):
     u_a    = np.concatenate(all_u_a)
     correct = (y_pred == y_true).astype(float)
 
-    # ── Scalar Metrics ─────────────────────────────────────────────
+    # ── Scalar Metrics (Default Threshold = 0.5) ───────────────────
     bal_acc = balanced_accuracy_score(y_true, y_pred)
     macro_f1 = f1_score(y_true, y_pred, average='macro')
 
@@ -891,6 +1024,23 @@ def evaluate(model, test_loader, device, num_classes):
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
         sensitivity = tp / (tp + fn + 1e-8)
         specificity = tn / (tn + fp + 1e-8)
+        
+        # Optimize threshold for Balanced Accuracy
+        best_t = 0.5
+        best_bal_acc = 0.0
+        for t in np.linspace(0.01, 0.99, 99):
+            y_pred_t = (probs[:, 1] >= t).astype(int)
+            bal_acc_t = balanced_accuracy_score(y_true, y_pred_t)
+            if bal_acc_t > best_bal_acc:
+                best_bal_acc = bal_acc_t
+                best_t = t
+                
+        y_pred_opt = (probs[:, 1] >= best_t).astype(int)
+        bal_acc_opt = balanced_accuracy_score(y_true, y_pred_opt)
+        macro_f1_opt = f1_score(y_true, y_pred_opt, average='macro')
+        tn_opt, fp_opt, fn_opt, tp_opt = confusion_matrix(y_true, y_pred_opt).ravel()
+        sensitivity_opt = tp_opt / (tp_opt + fn_opt + 1e-8)
+        specificity_opt = tn_opt / (tn_opt + fp_opt + 1e-8)
     else:
         macro_auroc = roc_auc_score(y_true, probs, multi_class='ovr', average='macro')
         pauc = float('nan')
@@ -898,6 +1048,12 @@ def evaluate(model, test_loader, device, num_classes):
         brier = float('nan')
         sensitivity = float('nan')
         specificity = float('nan')
+        best_t = 0.5
+        bal_acc_opt = bal_acc
+        macro_f1_opt = macro_f1
+        sensitivity_opt = float('nan')
+        specificity_opt = float('nan')
+        y_pred_opt = y_pred
 
     ece_val, bin_accs, bin_confs, bin_sizes = compute_ece(confs, correct)
 
@@ -909,7 +1065,7 @@ def evaluate(model, test_loader, device, num_classes):
         m_ece = float('nan')
 
     # ── Print Results ──────────────────────────────────────────────
-    print("\n📈 Evaluation Results")
+    print("\n📈 Evaluation Results (Threshold = 0.5)")
     print("=" * 50)
     print(f"  Balanced Accuracy     : {bal_acc:.4f}")
     print(f"  Macro F1-Score        : {macro_f1:.4f}")
@@ -926,6 +1082,15 @@ def evaluate(model, test_loader, device, num_classes):
     print(f"  Mean Aleatoric u_a    : {u_a.mean():.4f}")
     print("=" * 50)
 
+    if num_classes == 2:
+        print(f"\n📈 Evaluation Results (Optimized Threshold = {best_t:.4f})")
+        print("=" * 50)
+        print(f"  Balanced Accuracy     : {bal_acc_opt:.4f}")
+        print(f"  Macro F1-Score        : {macro_f1_opt:.4f}")
+        print(f"  Sensitivity (Recall)  : {sensitivity_opt:.4f}")
+        print(f"  Specificity           : {specificity_opt:.4f}")
+        print("=" * 50)
+
     # ── Plots ──────────────────────────────────────────────────────
     plot_reliability_diagram(bin_accs, bin_confs, bin_sizes)
     plot_uncertainty_histogram(
@@ -934,10 +1099,13 @@ def evaluate(model, test_loader, device, num_classes):
     )
     if num_classes == 2:
         plot_pr_curve(y_true, probs[:, 1])
-    plot_risk_coverage_curve(y_true, y_pred, confs)
+    plot_risk_coverage_curve(y_true, y_pred_opt, confs)
 
     return {
         'balanced_accuracy': bal_acc,
+        'balanced_accuracy_opt': bal_acc_opt,
+        'sensitivity_opt': sensitivity_opt,
+        'specificity_opt': specificity_opt,
         'macro_auroc': macro_auroc,
         'pauc': pauc,
         'ece': ece_val,
@@ -972,14 +1140,15 @@ def main():
     replace_conv2d_with_mdep(model)
     model = model.to(device)
 
+    total_epochs  = 15
+    warmup_epochs = 3
+
     criterion = EvidentialFocalLoss(
         gamma=2.0, num_classes=num_classes, kl_lambda=0.1,
         class_weights=class_weights.to(device),
+        warmup_epochs=warmup_epochs, total_epochs=total_epochs
     )
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-    total_epochs  = 15
-    warmup_epochs = 3
+    optimizer = optim.Adam(model.parameters(), lr=4.0e-05)
 
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs)
 

@@ -41,7 +41,9 @@ def compute_uncertainties(evidence):
     digamma_alpha = torch.digamma(alpha + 1.0)
     
     u_a_term = (alpha / S) * (digamma_S - digamma_alpha)
-    u_a = -torch.sum(u_a_term, dim=1, keepdim=True)
+    u_a = torch.sum(u_a_term, dim=1, keepdim=True)
+    assert torch.all(u_a > -1e-6), f"Sanity check failed: u_a contains negative values {u_a[u_a < -1e-6].tolist()}"
+    u_a = torch.clamp(u_a, min=0.0)
     
     return {
         'epistemic': u_e,

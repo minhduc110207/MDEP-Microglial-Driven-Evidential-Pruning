@@ -97,21 +97,25 @@ class MDEPConv2d(nn.Conv2d):
 
 def update_scores_agents(model, beta=1.0):
     """
-    Updates latent scores S_ij using Microglia and Astrocyte signals.
+    Updates latent scores S_ij using Microglia and Astrocyte signals (Dense Gradient Pass).
     """
     for module in model.modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            if not hasattr(module, 'grad_L_w'):
+            if not hasattr(module, 'grad_L_S'):
                 continue
             
             w_val = module.weight.data
             
-            # Microglia: Pruning Score
-            c1 = torch.abs(w_val * module.grad_L_w)
-            c1_norm = c1 / (c1.max() + 1e-8)
+            # Microglia: Pruning Score (computed in score-space)
+            c1 = torch.abs(module.grad_L_S)
+            c1_min = c1.min()
+            c1_max = c1.max()
+            c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
             
-            c2 = torch.abs(w_val * getattr(module, 'grad_ua_w', torch.zeros_like(w_val)))
-            c2_norm = c2 / (c2.max() + 1e-8)
+            c2 = torch.abs(getattr(module, 'grad_ua_S', torch.zeros_like(module.scores)))
+            c2_min = c2.min()
+            c2_max = c2.max()
+            c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
             
             C_ij = c1_norm + beta * c2_norm
             
@@ -128,22 +132,28 @@ def update_scores_agents(model, beta=1.0):
                 g1 = torch.zeros_like(w_val)
             g1_norm = g1 / (g1.max() + 1e-8)
             
-            g2 = torch.abs(module.grad_L_w)
+            g2 = torch.abs(module.grad_L_S)
             g2_norm = g2 / (g2.max() + 1e-8)
             
             G_ij = g1_norm * g2_norm
+            
+            if torch.all(G_ij == 0.0):
+                import warnings
+                warnings.warn(
+                    "⚠️ [Astrocyte Warning] Astrocyte regrowth potential G_ij is entirely 0.0. "
+                    "This may indicate premature temperature freezing (crystallization) or missing epistemic gradients."
+                )
             
             # Calculate total driving force Delta S
             delta_S = C_ij + G_ij
             
             # Step 1: Update Velocity (Momentum EMA)
-            # V = beta_m * V + (1 - beta_m) * delta_S
-            # We use 0.9 for momentum decay beta_m
             beta_m = 0.9
             module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
             
             # Step 2: Update Latent Scores S
-            # S = S + eta * V
-            # We use 0.1 for learning rate eta
             eta = 0.1
             module.scores.data.add_(module.scores_momentum.data, alpha=eta)
+            
+            # Step 3: Zero-Centering Stabilization to prevent memory drift
+            module.scores.data.sub_(module.scores.data.mean())

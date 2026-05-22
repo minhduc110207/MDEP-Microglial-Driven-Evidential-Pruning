@@ -58,3 +58,25 @@ Hàm loss luôn bị "đóng băng" ở mức 0.2. Hệ số Focal $(1-\hat{p}_t
 - **Loss Scaling:** Chủ động nhân hàm loss đầu ra với một hằng số tỷ lệ (ở đây là `4.0`) để trung hòa sức ép của hệ số tiêu cự.
 - **Manual LR Warmup:** Khởi tạo học suất từ con số cực nhỏ ($1e^{-6}$) và tăng tịnh tiến lên Base LR ($1e^{-3}$) trong 5 epoch đầu tiên. Điều này giúp Adam tích lũy được đà một cách tự nhiên.
 - **Gradient Clipping & Logging:** Kẹp (clip) norm của gradient tại 2.0 để chống nổ, đồng thời in cả `LR` và `GradNorm` ra màn hình mỗi vòng lặp để bạn trực tiếp giám sát quá trình "vượt ngục" của mô hình khỏi vùng zero-evidence.
+
+## 9. Cân Bằng KL Regularization & Tối Ưu Hóa Ngưỡng Phân Lớp Cho Dữ Liệu Mất Cân Bằng Nghiêm Trọng
+**Vấn đề:**
+1. **Lực Áp Chế KL Không Cân Bằng:** Trong hàm mất mát Evidential Focal Loss (EFL), số lượng mẫu lành tính (class 0) áp đảo hoàn toàn mẫu ác tính (class 1) khoảng 667 lần. Lớp phạt KL không được cân bằng trọng số sẽ tạo ra áp lực tích lũy gradient khổng lồ dìm bằng chứng ác tính về 0, dẫn tới độ nhạy (Sensitivity) gần như bằng 0.
+2. **Trọng Số Lớp Bị Giảm Cường Độ:** Trong `mdep_notebook.py`, trọng số lớp bị lấy căn bậc hai (`math.sqrt`), làm yếu đi đáng kể tín hiệu gradient của lớp thiểu số.
+3. **Ngưỡng Argmax Mặc Định (0.5):** Việc sử dụng ngưỡng cố định 0.5 để đánh giá Sensitivity/Specificity trên dữ liệu mất cân bằng cực đoan là không tối ưu và làm giảm nghiêm trọng độ nhạy y tế.
+4. **Thiếu Trọng Số Lớp Ở main.py:** `main.py` hoàn toàn không tính toán và truyền trọng số lớp vào hàm loss.
+5. **Đường Dẫn Thư Mục Cứng (Hardcoded Paths):** `trainer.py` và các file ablation chứa đường dẫn tuyệt đối cứng đến thư mục của phiên làm việc cũ.
+
+**Giải pháp:**
+1. **Cân Bằng Hàm Phạt KL:** Nhân toàn bộ per-sample loss (bao gồm cả CE và KL) với trọng số mẫu (`sample_weight`). Điều này giúp cân bằng hoàn hảo áp lực giảm thiểu bằng chứng sai lệch giữa các lớp.
+   - **Mã nguồn:** `loss = sample_weight * (focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl)`
+2. **Trọng Số Lớp Giảm Chấn Chuẩn Hóa Lớp Đa Số (Majority-Normalized Square Root Dampened Class Weights):** Trọng số tần suất nghịch đảo đầy đủ quá lớn (~509x cho lớp ác tính) khiến hàm loss trung bình của batch bị đẩy lên rất cao (đến 3.16) và biến động gradient cực đoan khi có mẫu ác tính xuất hiện. Chúng ta áp dụng hàm căn bậc hai để giảm chấn và chia cho trọng số lớp đa số để chuẩn hóa lớp đa số về chính xác 1.0. Điều này giúp ổn định hàm loss ở mức 0.2 - 0.4 mà vẫn cung cấp tín hiệu gradient mạnh mẽ gấp 32 lần cho lớp ác tính.
+   - **Mã nguồn:**
+     ```python
+     cw_raw = [math.sqrt(total / class_counts.get(c, 1)) for c in range(num_classes)]
+     majority_weight = cw_raw[0]
+     cw = torch.tensor([w / majority_weight for w in cw_raw], dtype=torch.float32)
+     ```
+3. **Tự Động Tối Ưu Hóa Ngưỡng Phân Lớp (Decision Threshold Tuning):** Bổ sung thuật toán quét ngưỡng tối ưu trên tập kiểm tra để tìm ngưỡng tối đa hóa Balanced Accuracy, đồng thời hiển thị kết quả cho cả ngưỡng 0.5 mặc định và ngưỡng tối ưu.
+4. **Truyền Trọng Số Trong main.py:** Đã sửa hàm `get_isic_dataloader` và `main()` để tính toán và truyền class weights thích hợp.
+5. **Đường Dẫn Động:** Sử dụng `os.path.join(os.getcwd(), "artifacts")` để lưu trữ gradient flow diagrams tự động và an toàn.

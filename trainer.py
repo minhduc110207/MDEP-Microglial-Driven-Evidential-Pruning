@@ -4,12 +4,15 @@ from mdep_agents import MDEPLinear, MDEPConv2d, update_scores_agents
 from edl_core import compute_uncertainties
 
 class MDEPTrainer:
-    def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=15):
+    def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.total_epochs = total_epochs
-        self.warmup_epochs = warmup_epochs
+        if warmup_epochs is None:
+            self.warmup_epochs = max(1, int(0.20 * total_epochs))
+        else:
+            self.warmup_epochs = warmup_epochs
         
         # User requested parameters for gamma
         self.gamma_initial = 5.0
@@ -56,12 +59,15 @@ class MDEPTrainer:
         u_a = torch.mean(uncertainties['aleatoric'])
         u_e = torch.mean(uncertainties['epistemic'])
 
-        # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
-        self.optimizer.zero_grad()
+        # 1. ∂u_a/∂S → Microglia agent (per-weight score signal)
+        self.model.zero_grad()
         u_a.backward(retain_graph=True)
         for m in self.model.modules():
-            if isinstance(m, (MDEPLinear, MDEPConv2d)) and m.weight.grad is not None:
-                m.grad_ua_w = m.weight.grad.clone().detach()
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                if m.scores.grad is not None:
+                    m.grad_ua_S = m.scores.grad.clone().detach()
+                else:
+                    m.grad_ua_S = torch.zeros_like(m.scores)
 
         # 2. ∂u_e/∂a^(l) → Astrocyte agent (per-neuron signal)
         act_tensors = []
@@ -72,7 +78,7 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            self.optimizer.zero_grad()
+            self.model.zero_grad()
             grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
@@ -85,7 +91,7 @@ class MDEPTrainer:
 
         for h in hooks:
             h.remove()
-        self.optimizer.zero_grad()
+        self.model.zero_grad()
 
     def train_epoch(self, epoch, dataloader, device, print_interval=200):
         self.model.train()
@@ -95,8 +101,8 @@ class MDEPTrainer:
         self.set_warmup_state(is_warmup, gamma)
         
         # Manual LR Warmup parameters
-        warmup_period = 5
-        base_lr = 1e-3
+        warmup_period = 1
+        base_lr = 4.0e-05
         num_batches = len(dataloader)
                 
         total_loss = 0
@@ -121,16 +127,18 @@ class MDEPTrainer:
 
             inputs, targets = inputs.to(device), targets.to(device)
             
-            # Amortized evaluation on first batch
-            if not is_warmup and batch_idx == 0:
+            # Amortized evaluation on first batch (also on warm-up epoch 0 and 1 for diagnostics)
+            if (not is_warmup or epoch < 2) and batch_idx == 0:
                 self.compute_amortized_gradients(inputs)
                 
-            self.optimizer.zero_grad()
+            self.model.zero_grad()
             
             # Use Automatic Mixed Precision for Forward Pass
             with torch.cuda.amp.autocast():
                 evidence = self.model(inputs)
-                # Ensure Evidential Loss runs in FP32 to avoid underflow
+            
+            # Ensure Evidential Loss runs strictly in FP32 to avoid digamma/log underflow
+            with torch.cuda.amp.autocast(enabled=False):
                 loss = self.criterion(evidence.float(), targets, epoch)
             
             # Loss scaling to counteract Focal Loss shrinkage (decayed)
@@ -138,16 +146,24 @@ class MDEPTrainer:
             
             self.scaler.scale(scaled_loss).backward()
             
-            # Gradient clipping and norm tracking
+            # Gradient clipping and norm tracking (only for optimized parameters)
             self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=2.0)
+            params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
+            grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
             total_grad_norm += grad_norm.item()
             
-            # Store primary gradient for structural updates
-            if not is_warmup:
+            # Cache primary gradient for structural updates & check gradient flow during warm-up
+            if not is_warmup or epoch < 2:
+                inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
                 for module in self.model.modules():
-                    if isinstance(module, (MDEPLinear, MDEPConv2d)) and module.weight.grad is not None:
-                        module.grad_L_w = module.weight.grad.clone().detach()
+                    if isinstance(module, (MDEPLinear, MDEPConv2d)):
+                        if module.scores.grad is not None:
+                            module.grad_L_S = module.scores.grad.clone().detach() * inv_scale
+                        else:
+                            module.grad_L_S = torch.zeros_like(module.scores)
+
+            if epoch < 2 and batch_idx == 0:
+                self.check_gradient_flow(epoch)
                         
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -162,3 +178,90 @@ class MDEPTrainer:
         avg_grad = total_grad_norm / len(dataloader)
         print(f"    Epoch {epoch} | LR: {current_lr:.2e} | GradNorm: {avg_grad:.4f}")
         return avg_loss
+
+    def check_gradient_flow(self, epoch):
+        import os
+        import matplotlib.pyplot as plt
+        
+        # Create artifacts folder if not exists
+        artifacts_dir = os.path.join(os.getcwd(), "artifacts")
+        os.makedirs(artifacts_dir, exist_ok=True)
+        
+        target_layers = []
+        for name, m in self.model.named_modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                target_layers.append((name, m))
+                
+        if not target_layers:
+            print("No MDEP layers found to check gradient flow.")
+            return
+            
+        print(f"\n🔍 [Gradient Flow Check - Epoch {epoch}]")
+        print("-" * 75)
+        
+        # We will check the last layer
+        visualize_layers = [target_layers[-1]]
+        
+        for name, m in visualize_layers:
+            w_val = m.weight.data.cpu()
+            grad_ua = getattr(m, 'grad_ua_S', None)
+            grad_L = getattr(m, 'grad_L_S', None)
+            
+            if grad_ua is None or grad_L is None:
+                print(f"Layer {name}: grad_ua_S or grad_L_S is None. Cannot perform flow check.")
+                continue
+                
+            grad_ua = grad_ua.cpu()
+            grad_L = grad_L.cpu()
+            
+            # Magnitudes in score-space
+            mag_ua = torch.abs(grad_ua)
+            mag_L = torch.abs(grad_L)
+            
+            # Min-Max Normalization (Strategy 1)
+            mag_ua_min = mag_ua.min()
+            mag_ua_max = mag_ua.max()
+            mag_ua_norm = (mag_ua - mag_ua_min) / (mag_ua_max - mag_ua_min + 1e-8)
+            
+            mag_L_min = mag_L.min()
+            mag_L_max = mag_L.max()
+            mag_L_norm = (mag_L - mag_L_min) / (mag_L_max - mag_L_min + 1e-8)
+            
+            # Print raw statistics
+            print(f"Layer: {name}")
+            print(f"  |du_a/dS| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
+            print(f"  |dL_EFL/dS| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
+            
+            # Relative scale check (beta balance)
+            ratio = mag_ua.mean() / (mag_L.mean() + 1e-8)
+            print(f"  Ratio (Raw) |du_a/dS| / |dL/dS|: {ratio.item():.4f}")
+            
+            # Normalized statistics
+            ratio_norm = mag_ua_norm.mean() / (mag_L_norm.mean() + 1e-8)
+            print(f"  Normalized |du_a/dS|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
+            print(f"  Normalized |dL_EFL/dS|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
+            print(f"  Ratio (Normalized): {ratio_norm.item():.4f}")
+            
+            # Plot histograms
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            
+            # Flatten to 1D
+            mag_ua_flat = mag_ua.numpy().flatten()
+            mag_L_flat = mag_L.numpy().flatten()
+            
+            ax1.hist(mag_ua_flat, bins=50, color='blue', alpha=0.7)
+            ax1.set_title(f'|du_a/dS| ({name})')
+            ax1.set_xlabel('Magnitude')
+            ax1.set_ylabel('Count')
+            
+            ax2.hist(mag_L_flat, bins=50, color='green', alpha=0.7)
+            ax2.set_title(f'|dL_EFL/dS| ({name})')
+            ax2.set_xlabel('Magnitude')
+            ax2.set_ylabel('Count')
+            
+            plt.tight_layout()
+            plot_path = os.path.join(artifacts_dir, f"grad_ua_flow_epoch_{epoch}.png")
+            plt.savefig(plot_path)
+            plt.close()
+            print(f"  Saved gradient histogram to: {plot_path}")
+            print("-" * 75)
