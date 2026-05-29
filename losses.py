@@ -24,7 +24,7 @@ class EvidentialFocalLoss(nn.Module):
     """
     Evidential Focal Loss (EFL) with KL Divergence Regularization and Dynamic Gamma Scheduling.
     """
-    def __init__(self, gamma=2.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
+    def __init__(self, gamma=1.2, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
         super(EvidentialFocalLoss, self).__init__()
         self.base_gamma = gamma
         self.gamma = gamma
@@ -93,7 +93,7 @@ class EvidentialFocalLoss(nn.Module):
         else:
             annealing_coef = 1.0
             
-        # Final modulated loss (scale the entire loss by sample weights to balance KL and CE forces under class imbalance)
+        # Final modulated loss (scale the CE loss by focal weight, and the overall loss by sample weight to balance KL and CE forces under class imbalance)
         loss = sample_weight * (focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl)
         
         return torch.mean(loss)

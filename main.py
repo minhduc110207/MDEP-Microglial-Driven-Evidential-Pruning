@@ -1,3 +1,9 @@
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -126,12 +132,12 @@ def main():
     replace_conv2d_with_mdep(model)
     model = model.to(device)
     
-    total_epochs = 15 # Shorter for Kaggle demo
-    warmup_epochs = 3
+    total_epochs = 20
+    warmup_epochs = 6
     
     # 2. Setup Loss, Optimizer, Trainer
     criterion = EvidentialFocalLoss(
-        gamma=2.0, num_classes=num_classes, kl_lambda=0.1,
+        gamma=1.2, num_classes=num_classes, kl_lambda=0.1,
         class_weights=class_weights.to(device),
         warmup_epochs=warmup_epochs, total_epochs=total_epochs
     )

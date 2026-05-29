@@ -73,6 +73,11 @@ class MDEPLinear(nn.Linear):
             differentiable_mask = SmoothedSTE.apply(self.scores, self.mask, self.gamma)
             effective_weight = self.weight * differentiable_mask
             
+        if effective_weight.requires_grad and not effective_weight.is_leaf:
+            effective_weight.retain_grad()
+        # Bypass PyTorch's nn.Module.__setattr__ registration by writing directly to self.__dict__
+        self.__dict__['effective_weight'] = effective_weight
+            
         return F.linear(x, effective_weight, self.bias)
         
 class MDEPConv2d(nn.Conv2d):
@@ -93,33 +98,41 @@ class MDEPConv2d(nn.Conv2d):
             differentiable_mask = SmoothedSTE.apply(self.scores, self.mask, self.gamma)
             effective_weight = self.weight * differentiable_mask
             
+        if effective_weight.requires_grad and not effective_weight.is_leaf:
+            effective_weight.retain_grad()
+        # Bypass PyTorch's nn.Module.__setattr__ registration by writing directly to self.__dict__
+        self.__dict__['effective_weight'] = effective_weight
+            
         return F.conv2d(x, effective_weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
 def update_scores_agents(model, beta=1.0):
     """
-    Updates latent scores S_ij using Microglia and Astrocyte signals (Dense Gradient Pass).
+    Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals (Dense Gradient Pass).
     """
     for module in model.modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            if not hasattr(module, 'grad_L_S'):
+            if not hasattr(module, 'grad_L_w'):
                 continue
             
             w_val = module.weight.data
             
-            # Microglia: Pruning Score (computed in score-space)
-            c1 = torch.abs(module.grad_L_S)
+            # --- Microglia agent: pruning score (§5.2) ---
+            # c1: importance for prediction = |w * ∂L_EFL/∂w|
+            c1 = torch.abs(w_val * module.grad_L_w)
             c1_min = c1.min()
             c1_max = c1.max()
             c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
             
-            c2 = torch.abs(getattr(module, 'grad_ua_S', torch.zeros_like(module.scores)))
+            # c2: importance for noise modelling = |w * ∂u_a/∂w|
+            grad_ua_w = getattr(module, 'grad_ua_w', torch.zeros_like(w_val))
+            c2 = torch.abs(w_val * grad_ua_w)
             c2_min = c2.min()
             c2_max = c2.max()
             c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
             
             C_ij = c1_norm + beta * c2_norm
             
-            # Astrocyte: Growing Score
+            # --- Astrocyte agent: growing score (§5.3) ---
             u_e_node = getattr(module, 'u_e_node', None)
             if u_e_node is not None:
                 if isinstance(module, MDEPLinear):
@@ -130,30 +143,37 @@ def update_scores_agents(model, beta=1.0):
                     g1 = torch.zeros_like(w_val)
             else:
                 g1 = torch.zeros_like(w_val)
-            g1_norm = g1 / (g1.max() + 1e-8)
+            g1_min = g1.min()
+            g1_max = g1.max()
+            g1_norm = (g1 - g1_min) / (g1_max - g1_min + 1e-8)
             
-            g2 = torch.abs(module.grad_L_S)
-            g2_norm = g2 / (g2.max() + 1e-8)
+            # g2: per-weight loss gradient magnitude = |∂L_EFL/∂w|
+            g2 = torch.abs(module.grad_L_w)
+            g2_min = g2.min()
+            g2_max = g2.max()
+            g2_norm = (g2 - g2_min) / (g2_max - g2_min + 1e-8)
             
             G_ij = g1_norm * g2_norm
             
-            if torch.all(G_ij == 0.0):
-                import warnings
-                warnings.warn(
-                    "⚠️ [Astrocyte Warning] Astrocyte regrowth potential G_ij is entirely 0.0. "
-                    "This may indicate premature temperature freezing (crystallization) or missing epistemic gradients."
-                )
+            # Khắc phục hiện tượng kết tinh Astrocyte (Phase 4 Action 2):
+            # Nếu tất cả các tiềm năng tăng trưởng G_ij bằng 0, thêm xung lực tăng trưởng ngẫu nhiên
+            if G_ij.max().item() <= 1e-8:
+                noise = 0.0316 * torch.randn_like(G_ij) * g1_norm
+                G_ij = G_ij + torch.clamp(noise, min=0.0)
             
             # Calculate total driving force Delta S
             delta_S = C_ij + G_ij
             
             # Step 1: Update Velocity (Momentum EMA)
-            beta_m = 0.9
+            beta_m = 0.95
             module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
             
             # Step 2: Update Latent Scores S
-            eta = 0.1
+            eta = 0.02
             module.scores.data.add_(module.scores_momentum.data, alpha=eta)
             
             # Step 3: Zero-Centering Stabilization to prevent memory drift
             module.scores.data.sub_(module.scores.data.mean())
+            
+            # Step 4: Clamp scores to prevent infinite growth and gradient underflow
+            module.scores.data.clamp_(min=-5.0, max=5.0)

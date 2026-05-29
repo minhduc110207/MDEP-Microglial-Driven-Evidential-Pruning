@@ -16,7 +16,7 @@ class MDEPTrainer:
         
         # User requested parameters for gamma
         self.gamma_initial = 5.0
-        self.gamma_final = 0.05
+        self.gamma_final = 0.15
         
         # AMP Scaler for Mixed Precision
         self.scaler = torch.cuda.amp.GradScaler()
@@ -34,6 +34,12 @@ class MDEPTrainer:
             if isinstance(module, (MDEPLinear, MDEPConv2d)):
                 module.warmup = is_warmup
                 module.gamma = gamma
+
+    def reset_effective_weight_grads(self):
+        for m in self.model.modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                if hasattr(m, 'effective_weight') and m.effective_weight is not None:
+                    m.effective_weight.grad = None
 
     def compute_amortized_gradients(self, inputs):
         """
@@ -59,15 +65,20 @@ class MDEPTrainer:
         u_a = torch.mean(uncertainties['aleatoric'])
         u_e = torch.mean(uncertainties['epistemic'])
 
-        # 1. ∂u_a/∂S → Microglia agent (per-weight score signal)
+        # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
         self.model.zero_grad()
+        self.reset_effective_weight_grads()
         u_a.backward(retain_graph=True)
         for m in self.model.modules():
             if isinstance(m, (MDEPLinear, MDEPConv2d)):
-                if m.scores.grad is not None:
-                    m.grad_ua_S = m.scores.grad.clone().detach()
+                if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
+                    m.grad_ua_w = m.effective_weight.grad.clone().detach()
                 else:
-                    m.grad_ua_S = torch.zeros_like(m.scores)
+                    m.grad_ua_w = torch.zeros_like(m.weight)
+
+        # Clear grads of all parameters and intermediate weight tensors to isolate the u_e graph
+        self.model.zero_grad()
+        self.reset_effective_weight_grads()
 
         # 2. ∂u_e/∂a^(l) → Astrocyte agent (per-neuron signal)
         act_tensors = []
@@ -78,7 +89,6 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            self.model.zero_grad()
             grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
@@ -92,6 +102,7 @@ class MDEPTrainer:
         for h in hooks:
             h.remove()
         self.model.zero_grad()
+        self.reset_effective_weight_grads()
 
     def train_epoch(self, epoch, dataloader, device, print_interval=200):
         self.model.train()
@@ -132,6 +143,7 @@ class MDEPTrainer:
                 self.compute_amortized_gradients(inputs)
                 
             self.model.zero_grad()
+            self.reset_effective_weight_grads()
             
             # Use Automatic Mixed Precision for Forward Pass
             with torch.cuda.amp.autocast():
@@ -152,15 +164,15 @@ class MDEPTrainer:
             grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
             total_grad_norm += grad_norm.item()
             
-            # Cache primary gradient for structural updates & check gradient flow during warm-up
+            # Cache primary weight gradient for structural updates
             if not is_warmup or epoch < 2:
                 inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
                 for module in self.model.modules():
                     if isinstance(module, (MDEPLinear, MDEPConv2d)):
-                        if module.scores.grad is not None:
-                            module.grad_L_S = module.scores.grad.clone().detach() * inv_scale
+                        if hasattr(module, 'effective_weight') and module.effective_weight.grad is not None:
+                            module.grad_L_w = module.effective_weight.grad.clone().detach() * inv_scale
                         else:
-                            module.grad_L_S = torch.zeros_like(module.scores)
+                            module.grad_L_w = torch.zeros_like(module.weight)
 
             if epoch < 2 and batch_idx == 0:
                 self.check_gradient_flow(epoch)
@@ -171,6 +183,10 @@ class MDEPTrainer:
             # Perform multi-agent structure optimization
             if not is_warmup and batch_idx == 0:
                 update_scores_agents(self.model)
+            
+            # Reset parameter and intermediate grads to avoid cross-batch contamination
+            self.model.zero_grad()
+            self.reset_effective_weight_grads()
             
             total_loss += loss.item()
             
@@ -196,7 +212,7 @@ class MDEPTrainer:
             print("No MDEP layers found to check gradient flow.")
             return
             
-        print(f"\n🔍 [Gradient Flow Check - Epoch {epoch}]")
+        print(f"\n[INFO] [Gradient Flow Check - Epoch {epoch}]")
         print("-" * 75)
         
         # We will check the last layer
@@ -204,19 +220,19 @@ class MDEPTrainer:
         
         for name, m in visualize_layers:
             w_val = m.weight.data.cpu()
-            grad_ua = getattr(m, 'grad_ua_S', None)
-            grad_L = getattr(m, 'grad_L_S', None)
+            grad_ua = getattr(m, 'grad_ua_w', None)
+            grad_L = getattr(m, 'grad_L_w', None)
             
             if grad_ua is None or grad_L is None:
-                print(f"Layer {name}: grad_ua_S or grad_L_S is None. Cannot perform flow check.")
+                print(f"Layer {name}: grad_ua_w or grad_L_w is None. Cannot perform flow check.")
                 continue
                 
             grad_ua = grad_ua.cpu()
             grad_L = grad_L.cpu()
             
-            # Magnitudes in score-space
-            mag_ua = torch.abs(grad_ua)
-            mag_L = torch.abs(grad_L)
+            # Magnitudes in Taylor weight-space: |w * grad_w|
+            mag_ua = torch.abs(w_val * grad_ua)
+            mag_L = torch.abs(w_val * grad_L)
             
             # Min-Max Normalization (Strategy 1)
             mag_ua_min = mag_ua.min()
@@ -229,17 +245,17 @@ class MDEPTrainer:
             
             # Print raw statistics
             print(f"Layer: {name}")
-            print(f"  |du_a/dS| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
-            print(f"  |dL_EFL/dS| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
+            print(f"  |w * du_a/dw| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
+            print(f"  |w * dL_EFL/dw| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
             
             # Relative scale check (beta balance)
             ratio = mag_ua.mean() / (mag_L.mean() + 1e-8)
-            print(f"  Ratio (Raw) |du_a/dS| / |dL/dS|: {ratio.item():.4f}")
+            print(f"  Ratio (Raw) |w * du_a/dw| / |w * dL/dw|: {ratio.item():.4f}")
             
             # Normalized statistics
             ratio_norm = mag_ua_norm.mean() / (mag_L_norm.mean() + 1e-8)
-            print(f"  Normalized |du_a/dS|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
-            print(f"  Normalized |dL_EFL/dS|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
+            print(f"  Normalized |w * du_a/dw|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
+            print(f"  Normalized |w * dL_EFL/dw|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
             print(f"  Ratio (Normalized): {ratio_norm.item():.4f}")
             
             # Plot histograms
@@ -250,12 +266,12 @@ class MDEPTrainer:
             mag_L_flat = mag_L.numpy().flatten()
             
             ax1.hist(mag_ua_flat, bins=50, color='blue', alpha=0.7)
-            ax1.set_title(f'|du_a/dS| ({name})')
+            ax1.set_title(f'|w * du_a/dw| ({name})')
             ax1.set_xlabel('Magnitude')
             ax1.set_ylabel('Count')
             
             ax2.hist(mag_L_flat, bins=50, color='green', alpha=0.7)
-            ax2.set_title(f'|dL_EFL/dS| ({name})')
+            ax2.set_title(f'|w * dL_EFL/dw| ({name})')
             ax2.set_xlabel('Magnitude')
             ax2.set_ylabel('Count')
             

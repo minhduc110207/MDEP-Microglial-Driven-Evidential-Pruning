@@ -79,7 +79,10 @@ def compute_uncertainties(evidence):
     # Epistemic Uncertainty: u_e = K / S
     u_e = K / S
 
-    # Aleatoric Uncertainty: u_a = - sum (alpha_c / S) * (psi(S+1) - psi(alpha_c+1))
+    # Aleatoric Uncertainty: u_a = sum (alpha_c / S) * (psi(S+1) - psi(alpha_c+1))
+    # NOTE: The formula in the original research proposal main (36).pdf incorrectly had a negative sign prefix
+    # (u_a = - sum ...). Since psi(S+1) > psi(alpha_c+1), that negative sign would yield negative uncertainty.
+    # We omit the negative sign here to ensure mathematical consistency and non-negativity (u_a >= 0).
     digamma_S = torch.digamma(S + 1.0)
     digamma_alpha = torch.digamma(alpha + 1.0)
     u_a_term = (alpha / S) * (digamma_S - digamma_alpha)
@@ -123,7 +126,7 @@ class EvidentialFocalLoss(nn.Module):
     The focal weight modulates the CE term — not the evidence space directly —
     so the Dirichlet structure stays valid even on highly imbalanced data.
     """
-    def __init__(self, gamma=2.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
+    def __init__(self, gamma=1.2, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
         super(EvidentialFocalLoss, self).__init__()
         self.base_gamma = gamma
         self.gamma = gamma
@@ -189,6 +192,7 @@ class EvidentialFocalLoss(nn.Module):
         else:
             annealing_coef = 1.0
 
+        # Scale the CE loss by focal weight, and the overall loss by sample weight to balance KL and CE forces under class imbalance
         loss = sample_weight * (focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl)
         return torch.mean(loss)
 
@@ -240,6 +244,13 @@ def generate_2_4_mask(scores):
     Generates an NVIDIA 2:4 structured sparsity mask.
     For every contiguous block of 4 elements the top-2 (by score) survive.
     This replaces a single global threshold tau with a dynamic, local one.
+    
+    NOTE ON SPARSITY SCHEDULING:
+    The research proposal main (36).pdf mentions a gradual cosine pruning schedule. However, to comply with the 
+    hard hardware-enforced 2:4 structured sparsity (exactly 50% non-zero parameters per block of 4) required for
+    acceleration on Tensor Cores, a hard 50% mask is applied immediately after the warmup phase. The cosine 
+    schedule is instead applied to the exploration temperature (gamma) of the Smoothed STE to control the dynamic 
+    structural exploration rate (mask flips), rather than the sparsity ratio itself.
     """
     if scores.numel() % 4 != 0:
         return torch.ones_like(scores)
@@ -325,8 +336,8 @@ def update_scores_agents(model, beta=1.0):
     print("-" * 75)
     for name, module in model.named_modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            if not hasattr(module, 'grad_L_S'):
-                print(f"  Layer {name}: ⚠️ Missing grad_L_S")
+            if not hasattr(module, 'grad_L_w'):
+                print(f"  Layer {name}: ⚠️ Missing grad_L_w")
                 continue
 
             # Capture old mask before score update
@@ -335,15 +346,15 @@ def update_scores_agents(model, beta=1.0):
             w_val = module.weight.data
 
             # --- Microglia agent: pruning score (§5.2) ---
-            # c1: importance for prediction = |∂L_EFL/∂S|
-            c1 = torch.abs(module.grad_L_S)
+            # c1: importance for prediction = |w * ∂L_EFL/∂w|
+            c1 = torch.abs(w_val * module.grad_L_w)
             c1_min = c1.min().item()
             c1_max = c1.max().item()
             c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
 
-            # c2: importance for noise modelling = |∂u_a/∂S|
-            grad_ua = getattr(module, 'grad_ua_S', torch.zeros_like(module.scores))
-            c2 = torch.abs(grad_ua)
+            # c2: importance for noise modelling = |w * ∂u_a/∂w|
+            grad_ua_w = getattr(module, 'grad_ua_w', torch.zeros_like(w_val))
+            c2 = torch.abs(w_val * grad_ua_w)
             c2_min = c2.min().item()
             c2_max = c2.max().item()
             c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
@@ -365,23 +376,29 @@ def update_scores_agents(model, beta=1.0):
             g1_max = g1.max().item()
             g1_norm = (g1 - g1_min) / (g1_max - g1_min + 1e-8)
 
-            # g2: per-weight loss gradient magnitude (in score space)
-            g2 = torch.abs(module.grad_L_S)
+            # g2: per-weight loss gradient magnitude = |∂L_EFL/∂w|
+            g2 = torch.abs(module.grad_L_w)
             g2_min = g2.min().item()
             g2_max = g2.max().item()
             g2_norm = (g2 - g2_min) / (g2_max - g2_min + 1e-8)
 
             G_ij = g1_norm * g2_norm
 
+            # Khắc phục hiện tượng kết tinh Astrocyte (Phase 4 Action 2):
+            # Nếu tất cả các tiềm năng tăng trưởng G_ij bằng 0, thêm xung lực tăng trưởng ngẫu nhiên
+            if G_ij.max().item() <= 1e-8:
+                noise = 0.0316 * torch.randn_like(G_ij) * g1_norm
+                G_ij = G_ij + torch.clamp(noise, min=0.0)
+
             # Calculate total driving force Delta S
             delta_S = C_ij + G_ij
             
             # Step 1: Update Velocity (Momentum EMA)
-            beta_m = 0.9
+            beta_m = 0.95
             module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
             
             # Step 2: Update Latent Scores S
-            eta = 0.1
+            eta = 0.02
             module.scores.data.add_(module.scores_momentum.data, alpha=eta)
             
             # Step 3: Zero-center scores to prevent global positive drift over time
@@ -398,8 +415,8 @@ def update_scores_agents(model, beta=1.0):
 
             # Print diagnostic info for each layer
             print(f"  Layer: {name}")
-            print(f"    grad_L_S   : min={c1_min:.2e}, max={c1_max:.2e}")
-            print(f"    grad_ua_S  : min={c2_min:.2e}, max={c2_max:.2e}")
+            print(f"    grad_L_w   : min={c1_min:.2e}, max={c1_max:.2e}")
+            print(f"    grad_ua_w  : min={c2_min:.2e}, max={c2_max:.2e}")
             print(f"    u_e_node   : max={g1_max:.2e}")
             print(f"    delta_S    : min={delta_S.min().item():.4f}, max={delta_S.max().item():.4f}")
             print(f"    Flips/Total: {flops} / {old_mask.numel()} ({flops / old_mask.numel() * 100:.4f}%)")
@@ -428,7 +445,7 @@ class MDEPTrainer:
 
         # Smoothed-STE temperature schedule
         self.gamma_initial = 5.0
-        self.gamma_final = 0.05
+        self.gamma_final = 0.15
         
         # AMP Scaler for Mixed Precision
         self.scaler = torch.cuda.amp.GradScaler()
@@ -468,19 +485,19 @@ class MDEPTrainer:
         
         for name, m in visualize_layers:
             w_val = m.weight.data.cpu()
-            grad_ua = getattr(m, 'grad_ua_S', None)
-            grad_L = getattr(m, 'grad_L_S', None)
+            grad_ua = getattr(m, 'grad_ua_w', None)
+            grad_L = getattr(m, 'grad_L_w', None)
             
             if grad_ua is None or grad_L is None:
-                print(f"Layer {name}: grad_ua_S or grad_L_S is None. Cannot perform flow check.")
+                print(f"Layer {name}: grad_ua_w or grad_L_w is None. Cannot perform flow check.")
                 continue
                 
             grad_ua = grad_ua.cpu()
             grad_L = grad_L.cpu()
             
-            # Magnitudes in score-space
-            mag_ua = torch.abs(grad_ua)
-            mag_L = torch.abs(grad_L)
+            # Magnitudes in Taylor weight-space: |w * grad_w|
+            mag_ua = torch.abs(w_val * grad_ua)
+            mag_L = torch.abs(w_val * grad_L)
             
             # Min-Max Normalization (Strategy 1)
             mag_ua_min = mag_ua.min()
@@ -493,17 +510,17 @@ class MDEPTrainer:
             
             # Print raw statistics
             print(f"Layer: {name}")
-            print(f"  |du_a/dS| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
-            print(f"  |dL_EFL/dS| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
+            print(f"  |w * du_a/dw| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
+            print(f"  |w * dL_EFL/dw| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
             
             # Relative scale check (beta balance)
             ratio = mag_ua.mean() / (mag_L.mean() + 1e-8)
-            print(f"  Ratio (Raw) |du_a/dS| / |dL/dS|: {ratio.item():.4f}")
+            print(f"  Ratio (Raw) |w * du_a/dw| / |w * dL/dw|: {ratio.item():.4f}")
             
             # Normalized statistics
             ratio_norm = mag_ua_norm.mean() / (mag_L_norm.mean() + 1e-8)
-            print(f"  Normalized |du_a/dS|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
-            print(f"  Normalized |dL_EFL/dS|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
+            print(f"  Normalized |w * du_a/dw|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
+            print(f"  Normalized |w * dL_EFL/dw|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
             print(f"  Ratio (Normalized): {ratio_norm.item():.4f}")
             
             # Plot histograms
@@ -514,12 +531,12 @@ class MDEPTrainer:
             mag_L_flat = mag_L.numpy().flatten()
             
             ax1.hist(mag_ua_flat, bins=50, color='blue', alpha=0.7)
-            ax1.set_title(f'|du_a/dS| ({name})')
+            ax1.set_title(f'|w * du_a/dw| ({name})')
             ax1.set_xlabel('Magnitude')
             ax1.set_ylabel('Count')
             
             ax2.hist(mag_L_flat, bins=50, color='green', alpha=0.7)
-            ax2.set_title(f'|dL_EFL/dS| ({name})')
+            ax2.set_title(f'|w * dL_EFL/dw| ({name})')
             ax2.set_xlabel('Magnitude')
             ax2.set_ylabel('Count')
             
@@ -535,6 +552,12 @@ class MDEPTrainer:
             if isinstance(module, (MDEPLinear, MDEPConv2d)):
                 module.warmup = is_warmup
                 module.gamma = gamma
+
+    def reset_effective_weight_grads(self):
+        for m in self.model.modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                if hasattr(m, 'effective_weight') and m.effective_weight is not None:
+                    m.effective_weight.grad = None
 
     def compute_amortized_gradients(self, inputs):
         """
@@ -560,15 +583,20 @@ class MDEPTrainer:
         u_a = torch.mean(uncertainties['aleatoric'])
         u_e = torch.mean(uncertainties['epistemic'])
 
-        # 1. ∂u_a/∂S → Microglia agent (per-weight score signal)
+        # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
         self.model.zero_grad()
+        self.reset_effective_weight_grads()
         u_a.backward(retain_graph=True)
         for m in self.model.modules():
             if isinstance(m, (MDEPLinear, MDEPConv2d)):
-                if m.scores.grad is not None:
-                    m.grad_ua_S = m.scores.grad.clone().detach()
+                if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
+                    m.grad_ua_w = m.effective_weight.grad.clone().detach()
                 else:
-                    m.grad_ua_S = torch.zeros_like(m.scores)
+                    m.grad_ua_w = torch.zeros_like(m.weight)
+
+        # Clear grads of all parameters and intermediate weight tensors to isolate the u_e graph
+        self.model.zero_grad()
+        self.reset_effective_weight_grads()
 
         # 2. ∂u_e/∂a^(l) → Astrocyte agent (per-neuron signal)
         #    Paper §5.3: u_e,i^(node) = |∂u_e / ∂a_i^(l)|
@@ -580,7 +608,6 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            self.model.zero_grad()
             grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
@@ -597,6 +624,7 @@ class MDEPTrainer:
         for h in hooks:
             h.remove()
         self.model.zero_grad()
+        self.reset_effective_weight_grads()
 
     def train_epoch(self, epoch, dataloader, device, print_interval=200):
         self.model.train()
@@ -639,6 +667,7 @@ class MDEPTrainer:
                 self.compute_amortized_gradients(inputs)
 
             self.model.zero_grad()
+            self.reset_effective_weight_grads()
             
             # Use Automatic Mixed Precision for Forward Pass
             with torch.cuda.amp.autocast():
@@ -664,15 +693,15 @@ class MDEPTrainer:
                 else:
                     ema_grad = 0.95 * ema_grad + 0.05 * grad_norm.item()
 
-            # Cache primary gradient for structural updates & check gradient flow during warm-up
+            # Cache primary weight gradient for structural updates
             if not is_warmup or epoch < 2:
                 inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
                 for m in self.model.modules():
                     if isinstance(m, (MDEPLinear, MDEPConv2d)):
-                        if m.scores.grad is not None:
-                            m.grad_L_S = m.scores.grad.clone().detach() * inv_scale
+                        if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
+                            m.grad_L_w = m.effective_weight.grad.clone().detach() * inv_scale
                         else:
-                            m.grad_L_S = torch.zeros_like(m.scores)
+                            m.grad_L_w = torch.zeros_like(m.weight)
 
             if not is_warmup and batch_idx == 0:
                 self.check_gradient_flow(epoch)
@@ -684,6 +713,9 @@ class MDEPTrainer:
             if not is_warmup and batch_idx == 0:
                 mask_flop_rate = update_scores_agents(self.model)
                 self.last_flop_rate = mask_flop_rate
+
+            self.model.zero_grad()
+            self.reset_effective_weight_grads()
 
             if ema_loss is None:
                 ema_loss = loss.item()
@@ -1084,8 +1116,9 @@ def check_representational_collapse(model):
             mean = scores.mean().item()
             
             grad_norm = 0.0
-            if module.scores.grad is not None:
-                grad_norm = module.scores.grad.norm().item()
+            grad_L = getattr(module, 'grad_L_w', None)
+            if grad_L is not None:
+                grad_norm = grad_L.norm().item()
                 
             status = "✅ PASS"
             issues = []
@@ -1328,12 +1361,12 @@ def main():
     nn.init.constant_(model.fc[0].bias, 0)
     replace_conv2d_with_mdep(model)
     model = model.to(device)
-    total_epochs  = 15
-    warmup_epochs = 3
+    total_epochs  = 20
+    warmup_epochs = 6
 
     # ── Optimizer & Loss ───────────────────────────────────────────
     criterion = EvidentialFocalLoss(
-        gamma=2.0, num_classes=num_classes, kl_lambda=0.1,
+        gamma=1.2, num_classes=num_classes, kl_lambda=0.1,
         class_weights=class_weights.to(device),
         warmup_epochs=warmup_epochs, total_epochs=total_epochs
     )

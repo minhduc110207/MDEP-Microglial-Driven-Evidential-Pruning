@@ -50,8 +50,9 @@ class EvidenceLayer(nn.Module):
     Ensures the output of the network is non-negative evidence (e >= 0).
     Replaces the traditional Softmax layer for EDL.
     """
-    def __init__(self, activation='softplus'):
+    def __init__(self, activation='softplus', max_evidence=20.0):
         super(EvidenceLayer, self).__init__()
+        self.max_evidence = max_evidence
         if activation == 'softplus':
             self.activation = nn.Softplus()
         elif activation == 'relu':
@@ -60,7 +61,10 @@ class EvidenceLayer(nn.Module):
             raise ValueError(f"Unsupported activation: {activation}")
 
     def forward(self, x):
-        return self.activation(x)
+        ev = self.activation(x)
+        if self.max_evidence is not None:
+            ev = torch.clamp(ev, max=self.max_evidence)
+        return ev
 
 
 def compute_uncertainties(evidence):
@@ -80,7 +84,10 @@ def compute_uncertainties(evidence):
     # Epistemic Uncertainty: u_e = K / S
     u_e = K / S
 
-    # Aleatoric Uncertainty: u_a = - sum (alpha_c / S) * (psi(S+1) - psi(alpha_c+1))
+    # Aleatoric Uncertainty: u_a = sum (alpha_c / S) * (psi(S+1) - psi(alpha_c+1))
+    # NOTE: The formula in the original research proposal main (36).pdf incorrectly had a negative sign prefix
+    # (u_a = - sum ...). Since psi(S+1) > psi(alpha_c+1), that negative sign would yield negative uncertainty.
+    # We omit the negative sign here to ensure mathematical consistency and non-negativity (u_a >= 0).
     digamma_S = torch.digamma(S + 1.0)
     digamma_alpha = torch.digamma(alpha + 1.0)
     u_a_term = (alpha / S) * (digamma_S - digamma_alpha)
@@ -124,7 +131,7 @@ class EvidentialFocalLoss(nn.Module):
     The focal weight modulates the CE term — not the evidence space directly —
     so the Dirichlet structure stays valid even on highly imbalanced data.
     """
-    def __init__(self, gamma=2.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
+    def __init__(self, gamma=1.2, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100):
         super(EvidentialFocalLoss, self).__init__()
         self.base_gamma = gamma
         self.gamma = gamma
@@ -186,6 +193,8 @@ class EvidentialFocalLoss(nn.Module):
         else:
             annealing_coef = 1.0
 
+        # Modulate the entire loss (both CE and KL) by focal and sample weights
+        # Scale the CE loss by focal weight, and the overall loss by sample weight to balance KL and CE forces under class imbalance
         loss = sample_weight * (focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl)
         return torch.mean(loss)
 
@@ -196,21 +205,38 @@ class EvidentialFocalLoss(nn.Module):
 
 class SmoothedSTE(torch.autograd.Function):
     """
-    Smoothed Straight-Through Estimator.
-    Forward: passes the hard binary mask unchanged.
-    Backward: approximates dM/dS ≈ sigma'(S/gamma) so gradients flow to
-              dormant connections for the Astrocyte agent.
+    Smoothed Straight-Through Estimator with Local 2:4 Bounds.
+    Forward: passes the hard binary mask unchanged, but computes local thresholds.
+    Backward: approximates dM/dS ≈ sigma'((S - tau)/gamma) so gradients flow
+              only to connections near the 2:4 survival boundary.
     """
     @staticmethod
     def forward(ctx, scores, mask, gamma):
-        ctx.save_for_backward(scores, torch.tensor(gamma))
+        shape = scores.shape
+        if scores.numel() % 4 == 0:
+            scores_flat = scores.view(-1, 4)
+            # Find the 2nd and 3rd largest values in each block
+            sorted_scores, _ = torch.sort(scores_flat, dim=-1, descending=True)
+            s2 = sorted_scores[:, 1]
+            s3 = sorted_scores[:, 2]
+            # Local threshold is the midpoint
+            tau = ((s2 + s3) / 2.0).unsqueeze(-1) # shape: (N, 1)
+            tau = tau.expand_as(scores_flat).reshape(shape)
+        else:
+            tau = torch.zeros_like(scores)
+
+        ctx.save_for_backward(scores, tau, torch.tensor(gamma))
         return mask
 
     @staticmethod
     def backward(ctx, grad_output):
-        scores, gamma = ctx.saved_tensors
+        scores, tau, gamma = ctx.saved_tensors
         gamma_val = gamma.item()
-        sig = torch.sigmoid(scores / gamma_val)
+        
+        # Localized STE: margin to the boundary
+        margin = scores - tau
+        
+        sig = torch.sigmoid(margin / gamma_val)
         grad_scores = grad_output * sig * (1.0 - sig) / gamma_val
         return grad_scores, None, None
 
@@ -220,6 +246,13 @@ def generate_2_4_mask(scores):
     Generates an NVIDIA 2:4 structured sparsity mask.
     For every contiguous block of 4 elements the top-2 (by score) survive.
     This replaces a single global threshold tau with a dynamic, local one.
+    
+    NOTE ON SPARSITY SCHEDULING:
+    The research proposal main (36).pdf mentions a gradual cosine pruning schedule. However, to comply with the 
+    hard hardware-enforced 2:4 structured sparsity (exactly 50% non-zero parameters per block of 4) required for
+    acceleration on Tensor Cores, a hard 50% mask is applied immediately after the warmup phase. The cosine 
+    schedule is instead applied to the exploration temperature (gamma) of the Smoothed STE to control the dynamic 
+    structural exploration rate (mask flips), rather than the sparsity ratio itself.
     """
     if scores.numel() % 4 != 0:
         return torch.ones_like(scores)
@@ -236,8 +269,9 @@ class MDEPLinear(nn.Linear):
     """Drop-in replacement for nn.Linear with MDEP dynamic sparsity."""
     def __init__(self, in_features, out_features, bias=True):
         super(MDEPLinear, self).__init__(in_features, out_features, bias)
-        self.scores = nn.Parameter(torch.randn_like(self.weight))
+        self.scores = nn.Parameter(torch.abs(self.weight.data).clone())
         self.register_buffer('mask', torch.ones_like(self.weight))
+        self.register_buffer('scores_momentum', torch.zeros_like(self.weight))
         self.gamma = 1.0
         self.warmup = True
 
@@ -249,19 +283,26 @@ class MDEPLinear(nn.Linear):
             self.mask.copy_(raw_mask)
             differentiable_mask = SmoothedSTE.apply(self.scores, self.mask, self.gamma)
             effective_weight = self.weight * differentiable_mask
+            
+        if effective_weight.requires_grad and not effective_weight.is_leaf:
+            effective_weight.retain_grad()
+        # Bypass PyTorch's nn.Module.__setattr__ registration by writing directly to self.__dict__
+        self.__dict__['effective_weight'] = effective_weight
+            
         return F.linear(x, effective_weight, self.bias)
 
 
 class MDEPConv2d(nn.Conv2d):
     """Drop-in replacement for nn.Conv2d with MDEP dynamic sparsity."""
     def __init__(self, in_channels, out_channels, kernel_size,
-                 stride=1, padding=0, bias=True):
+                 stride=1, padding=0, dilation=1, groups=1, bias=True):
         super(MDEPConv2d, self).__init__(
             in_channels, out_channels, kernel_size,
-            stride=stride, padding=padding, bias=bias,
+            stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias,
         )
-        self.scores = nn.Parameter(torch.randn_like(self.weight))
+        self.scores = nn.Parameter(torch.abs(self.weight.data).clone())
         self.register_buffer('mask', torch.ones_like(self.weight))
+        self.register_buffer('scores_momentum', torch.zeros_like(self.weight))
         self.gamma = 1.0
         self.warmup = True
 
@@ -273,6 +314,12 @@ class MDEPConv2d(nn.Conv2d):
             self.mask.copy_(raw_mask)
             differentiable_mask = SmoothedSTE.apply(self.scores, self.mask, self.gamma)
             effective_weight = self.weight * differentiable_mask
+            
+        if effective_weight.requires_grad and not effective_weight.is_leaf:
+            effective_weight.retain_grad()
+        # Bypass PyTorch's nn.Module.__setattr__ registration by writing directly to self.__dict__
+        self.__dict__['effective_weight'] = effective_weight
+            
         return F.conv2d(
             x, effective_weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
@@ -284,24 +331,35 @@ def update_scores_agents(model, beta=1.0):
     ABLATION: Prune-Only — Microglia agent only.
     The Astrocyte (growing) signal G_ij is zeroed out.
 
-    Microglia (§5.2): C_ij = Norm(|∂L_EFL/∂S|) + β·Norm(|∂u_a/∂S|)
+    Microglia (§5.2): C_ij = Norm(|w_ij * ∂L_EFL/∂w_ij|) + β·Norm(|w_ij * ∂u_a/∂w_ij|)
     """
+    total_flops = 0
+    total_elements = 0
+    
+    print("\n🔍 [DEBUG - update_scores_agents - ABLATION: Prune-Only]")
+    print("-" * 75)
     for module in model.modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            if not hasattr(module, 'grad_L_S'):
+            if not hasattr(module, 'grad_L_w'):
                 continue
+
+            # Capture old mask before score update
+            old_mask = generate_2_4_mask(module.scores.data)
 
             w_val = module.weight.data
 
             # --- Microglia agent: pruning score (§5.2) ---
-            c1 = torch.abs(module.grad_L_S)
-            c1_min = c1.min()
-            c1_max = c1.max()
+            # c1: importance for prediction = |w * ∂L_EFL/∂w|
+            c1 = torch.abs(w_val * module.grad_L_w)
+            c1_min = c1.min().item()
+            c1_max = c1.max().item()
             c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
 
-            c2 = torch.abs(getattr(module, 'grad_ua_S', torch.zeros_like(module.scores)))
-            c2_min = c2.min()
-            c2_max = c2.max()
+            # c2: importance for noise modelling = |w * ∂u_a/∂w|
+            grad_ua_w = getattr(module, 'grad_ua_w', torch.zeros_like(w_val))
+            c2 = torch.abs(w_val * grad_ua_w)
+            c2_min = c2.min().item()
+            c2_max = c2.max().item()
             c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
 
             C_ij = c1_norm + beta * c2_norm
@@ -309,11 +367,33 @@ def update_scores_agents(model, beta=1.0):
             # --- Astrocyte agent: DISABLED (zeroed out) ---
             G_ij = torch.zeros_like(C_ij)
 
-            # Update latent scores (only pruning contributes)
-            module.scores.data += (C_ij + G_ij) * 0.1
+            # Calculate total driving force Delta S
+            delta_S = C_ij + G_ij
             
-            # Zero-centering stabilization
+            # Step 1: Update Velocity (Momentum EMA)
+            beta_m = 0.95
+            module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
+            
+            # Step 2: Update Latent Scores S
+            eta = 0.02
+            module.scores.data.add_(module.scores_momentum.data, alpha=eta)
+            
+            # Step 3: Zero-center scores to prevent global positive drift over time
             module.scores.data.sub_(module.scores.data.mean())
+
+            # Step 4: Clamp scores to prevent infinite growth and gradient underflow (dead gradients)
+            module.scores.data.clamp_(min=-5.0, max=5.0)
+            
+            # Compute new mask and count flops
+            new_mask = generate_2_4_mask(module.scores.data)
+            flops = (old_mask != new_mask).sum().item()
+            total_flops += flops
+            total_elements += old_mask.numel()
+
+    flop_rate = total_flops / (total_elements + 1e-8)
+    print(f"  >>> TOTAL FLOP RATE: {flop_rate*100:.6f}% ({total_flops} / {total_elements})")
+    print("-" * 75)
+    return flop_rate
 
 
 # ============================================================================
@@ -333,7 +413,10 @@ class MDEPTrainer:
 
         # Smoothed-STE temperature schedule
         self.gamma_initial = 5.0
-        self.gamma_final = 0.05
+        self.gamma_final = 0.15
+        
+        # AMP Scaler for Mixed Precision
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def step_gamma(self, epoch):
         """Cosine-annealed temperature for the Smoothed STE."""
@@ -370,19 +453,19 @@ class MDEPTrainer:
         
         for name, m in visualize_layers:
             w_val = m.weight.data.cpu()
-            grad_ua = getattr(m, 'grad_ua_S', None)
-            grad_L = getattr(m, 'grad_L_S', None)
+            grad_ua = getattr(m, 'grad_ua_w', None)
+            grad_L = getattr(m, 'grad_L_w', None)
             
             if grad_ua is None or grad_L is None:
-                print(f"Layer {name}: grad_ua_S or grad_L_S is None. Cannot perform flow check.")
+                print(f"Layer {name}: grad_ua_w or grad_L_w is None. Cannot perform flow check.")
                 continue
                 
             grad_ua = grad_ua.cpu()
             grad_L = grad_L.cpu()
             
-            # Magnitudes in score-space
-            mag_ua = torch.abs(grad_ua)
-            mag_L = torch.abs(grad_L)
+            # Magnitudes in Taylor weight-space: |w * grad_w|
+            mag_ua = torch.abs(w_val * grad_ua)
+            mag_L = torch.abs(w_val * grad_L)
             
             # Min-Max Normalization (Strategy 1)
             mag_ua_min = mag_ua.min()
@@ -395,17 +478,17 @@ class MDEPTrainer:
             
             # Print raw statistics
             print(f"Layer: {name}")
-            print(f"  |du_a/dS| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
-            print(f"  |dL_EFL/dS| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
+            print(f"  |w * du_a/dw| (Raw): mean={mag_ua.mean().item():.2e}, std={mag_ua.std().item():.2e}, max={mag_ua.max().item():.2e}")
+            print(f"  |w * dL_EFL/dw| (Raw): mean={mag_L.mean().item():.2e}, std={mag_L.std().item():.2e}, max={mag_L.max().item():.2e}")
             
             # Relative scale check (beta balance)
             ratio = mag_ua.mean() / (mag_L.mean() + 1e-8)
-            print(f"  Ratio (Raw) |du_a/dS| / |dL/dS|: {ratio.item():.4f}")
+            print(f"  Ratio (Raw) |w * du_a/dw| / |w * dL/dw|: {ratio.item():.4f}")
             
             # Normalized statistics
             ratio_norm = mag_ua_norm.mean() / (mag_L_norm.mean() + 1e-8)
-            print(f"  Normalized |du_a/dS|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
-            print(f"  Normalized |dL_EFL/dS|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
+            print(f"  Normalized |w * du_a/dw|: mean={mag_ua_norm.mean().item():.4f}, std={mag_ua_norm.std().item():.4f}")
+            print(f"  Normalized |w * dL_EFL/dw|: mean={mag_L_norm.mean().item():.4f}, std={mag_L_norm.std().item():.4f}")
             print(f"  Ratio (Normalized): {ratio_norm.item():.4f}")
             
             # Plot histograms
@@ -416,12 +499,12 @@ class MDEPTrainer:
             mag_L_flat = mag_L.numpy().flatten()
             
             ax1.hist(mag_ua_flat, bins=50, color='blue', alpha=0.7)
-            ax1.set_title(f'|du_a/dS| ({name})')
+            ax1.set_title(f'|w * du_a/dw| ({name})')
             ax1.set_xlabel('Magnitude')
             ax1.set_ylabel('Count')
             
             ax2.hist(mag_L_flat, bins=50, color='green', alpha=0.7)
-            ax2.set_title(f'|dL_EFL/dS| ({name})')
+            ax2.set_title(f'|w * dL_EFL/dw| ({name})')
             ax2.set_xlabel('Magnitude')
             ax2.set_ylabel('Count')
             
@@ -437,6 +520,12 @@ class MDEPTrainer:
             if isinstance(module, (MDEPLinear, MDEPConv2d)):
                 module.warmup = is_warmup
                 module.gamma = gamma
+
+    def reset_effective_weight_grads(self):
+        for m in self.model.modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                if hasattr(m, 'effective_weight') and m.effective_weight is not None:
+                    m.effective_weight.grad = None
 
     def compute_amortized_gradients(self, inputs):
         """
@@ -462,17 +551,23 @@ class MDEPTrainer:
         u_a = torch.mean(uncertainties['aleatoric'])
         u_e = torch.mean(uncertainties['epistemic'])
 
-        # 1. ∂u_a/∂S → Microglia agent (per-weight score signal)
+        # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
         self.model.zero_grad()
+        self.reset_effective_weight_grads()
         u_a.backward(retain_graph=True)
         for m in self.model.modules():
             if isinstance(m, (MDEPLinear, MDEPConv2d)):
-                if m.scores.grad is not None:
-                    m.grad_ua_S = m.scores.grad.clone().detach()
+                if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
+                    m.grad_ua_w = m.effective_weight.grad.clone().detach()
                 else:
-                    m.grad_ua_S = torch.zeros_like(m.scores)
+                    m.grad_ua_w = torch.zeros_like(m.weight)
+
+        # Clear grads of all parameters and intermediate weight tensors to isolate the u_e graph
+        self.model.zero_grad()
+        self.reset_effective_weight_grads()
 
         # 2. ∂u_e/∂a^(l) → Astrocyte agent (per-neuron signal)
+        #    Paper §5.3: u_e,i^(node) = |∂u_e / ∂a_i^(l)|
         act_tensors = []
         act_modules = []
         for name, m in self.model.named_modules():
@@ -481,20 +576,23 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            self.model.zero_grad()
             grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
                     if isinstance(m, MDEPLinear):
+                        # grad: (B, out_features) → per-neuron: (out_features,)
                         m.u_e_node = torch.abs(grad).mean(dim=0).detach()
                     elif isinstance(m, MDEPConv2d):
+                        # grad: (B, C_out, H, W) → per-neuron: (C_out,)
                         m.u_e_node = torch.abs(grad).mean(dim=(0, 2, 3)).detach()
                 else:
                     m.u_e_node = None
 
+        # Clean up hooks
         for h in hooks:
             h.remove()
         self.model.zero_grad()
+        self.reset_effective_weight_grads()
 
     def train_epoch(self, epoch, dataloader, device, print_interval=200):
         self.model.train()
@@ -507,8 +605,8 @@ class MDEPTrainer:
         warmup_period = 1
         base_lr = 4.0e-05
 
-        total_loss = 0.0
-        total_grad_norm = 0.0
+        ema_loss = None
+        ema_grad = None
         num_batches = len(dataloader)
         epoch_start = time.time()
 
@@ -518,10 +616,15 @@ class MDEPTrainer:
                 current_step = epoch * num_batches + batch_idx
                 total_warmup_steps = warmup_period * num_batches
                 current_lr = 1e-6 + (base_lr - 1e-6) * (current_step / total_warmup_steps)
+                
+                # Linear decay for Loss Scaling from 4.0 to 1.0 to prevent overshooting
+                current_loss_scale = 4.0 - 3.0 * (current_step / total_warmup_steps)
+                
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = current_lr
             else:
                 current_lr = base_lr
+                current_loss_scale = 1.0
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = current_lr
 
@@ -532,57 +635,83 @@ class MDEPTrainer:
                 self.compute_amortized_gradients(inputs)
 
             self.model.zero_grad()
-            evidence = self.model(inputs)
-            loss = self.criterion(evidence, targets, epoch)
+            self.reset_effective_weight_grads()
             
-            # Loss scaling to counteract Focal Loss shrinkage
-            scaled_loss = loss * 4.0
-            scaled_loss.backward()
+            # Use Automatic Mixed Precision for Forward Pass
+            with torch.cuda.amp.autocast():
+                evidence = self.model(inputs)
+                
+            # Ensure Evidential Loss runs strictly in FP32 to avoid digamma/log underflow
+            with torch.cuda.amp.autocast(enabled=False):
+                loss = self.criterion(evidence.float(), targets, epoch)
+            
+            # Loss scaling to counteract Focal Loss shrinkage (decayed)
+            scaled_loss = loss * current_loss_scale
+            
+            self.scaler.scale(scaled_loss).backward()
 
             # Gradient clipping and norm tracking (only for optimized parameters)
+            self.scaler.unscale_(self.optimizer)
             params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
             grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
-            total_grad_norm += grad_norm.item()
+            
+            if not torch.isnan(grad_norm).item() and not torch.isinf(grad_norm).item():
+                if ema_grad is None:
+                    ema_grad = grad_norm.item()
+                else:
+                    ema_grad = 0.95 * ema_grad + 0.05 * grad_norm.item()
 
-            # Cache primary gradient for structural updates & check gradient flow during warm-up
+            # Cache primary weight gradient for structural updates
             if not is_warmup or epoch < 2:
-                inv_scale = 0.25
+                inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
                 for m in self.model.modules():
                     if isinstance(m, (MDEPLinear, MDEPConv2d)):
-                        if m.scores.grad is not None:
-                            m.grad_L_S = m.scores.grad.clone().detach() * inv_scale
+                        if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
+                            m.grad_L_w = m.effective_weight.grad.clone().detach() * inv_scale
                         else:
-                            m.grad_L_S = torch.zeros_like(m.scores)
+                            m.grad_L_w = torch.zeros_like(m.weight)
 
-            if epoch < 2 and batch_idx == 0:
+            if not is_warmup and batch_idx == 0:
                 self.check_gradient_flow(epoch)
 
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             # Multi-agent structure optimization (once per epoch)
             if not is_warmup and batch_idx == 0:
-                update_scores_agents(self.model)
+                mask_flop_rate = update_scores_agents(self.model)
+                self.last_flop_rate = mask_flop_rate
 
-            total_loss += loss.item()
+            self.model.zero_grad()
+            self.reset_effective_weight_grads()
+
+            if ema_loss is None:
+                ema_loss = loss.item()
+            else:
+                ema_loss = 0.95 * ema_loss + 0.05 * loss.item()
 
             # Progress printing
             if (batch_idx + 1) % print_interval == 0 or (batch_idx + 1) == num_batches:
                 elapsed = time.time() - epoch_start
                 avg_time = elapsed / (batch_idx + 1)
                 eta = avg_time * (num_batches - batch_idx - 1)
-                avg_loss = total_loss / (batch_idx + 1)
-                avg_grad = total_grad_norm / (batch_idx + 1)
+                avg_loss = ema_loss if ema_loss is not None else 0.0
+                avg_grad = ema_grad if ema_grad is not None else 0.0
+                
+                flop_str = f"| Flop: {self.last_flop_rate*100:.4f}%  " if hasattr(self, 'last_flop_rate') else ""
+                
                 print(
                     f"    Batch [{batch_idx+1:>5}/{num_batches}]  "
                     f"| Loss: {avg_loss:.4f}  "
                     f"| LR: {current_lr:.2e}  "
                     f"| GradNorm: {avg_grad:.4f}  "
+                    f"{flop_str}"
                     f"| Elapsed: {elapsed/60:.1f}m  "
                     f"| ETA: {eta/60:.1f}m",
                     flush=True,
                 )
 
-        return total_loss / num_batches
+        return ema_loss if ema_loss is not None else 0.0
 
 
 # ============================================================================
@@ -1140,11 +1269,11 @@ def main():
     replace_conv2d_with_mdep(model)
     model = model.to(device)
 
-    total_epochs  = 15
-    warmup_epochs = 3
+    total_epochs  = 20
+    warmup_epochs = 6
 
     criterion = EvidentialFocalLoss(
-        gamma=2.0, num_classes=num_classes, kl_lambda=0.1,
+        gamma=1.2, num_classes=num_classes, kl_lambda=0.1,
         class_weights=class_weights.to(device),
         warmup_epochs=warmup_epochs, total_epochs=total_epochs
     )

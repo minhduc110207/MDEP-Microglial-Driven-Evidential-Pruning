@@ -55,7 +55,7 @@ The MDEP repository integrates several robust mathematical and architectural fix
 1. **Focal Weight Gradient Detachment:** Explicitly severs the computational graph at the focal coefficient $(1-\hat{p}_c)^\gamma$, treating it as a batch-wise scalar modifier. This prevents PyTorch from manipulating the Dirichlet landscape to artificially lower the loss, avoiding immediate evidence collapse.
 2. **Astrocyte Hooking:** Uses PyTorch Forward Hooks to cache activation tensors $a^{(l)}$ during the forward pass, enabling exact calculations of activation-based gradients for precise synaptic regrowth.
 3. **Evidence Layer Initialization:** Terminal linear layers are initialized with a highly constrained normal distribution ($mean=0, std=0.001$), preventing large initial evidence that triggers gradient explosions from the KL penalty.
-4. **Optimizer Hijacking Shield:** Filters the latent `scores` matrix out of the optimizer's parameter list to prevent AdamW weight decay from destroying topological memory. Updates are managed via a custom EMA momentum tracking buffer ($\beta = 0.9$).
+4. **Optimizer Hijacking Shield:** Filters the latent `scores` matrix out of the optimizer's parameter list to prevent AdamW weight decay from destroying topological memory. Updates are managed via a custom EMA momentum tracking buffer ($\beta = 0.95$).
 5. **Dirichlet Parameter Offset:** Constrains Dirichlet parameters using $\alpha_c = e_c + 1.0$, bounding the inputs to digamma ($\psi$) and log-gamma ($lgamma$) operators to $[1.0, \infty)$, eliminating numerical underflow and `NaN` runtime crashes.
 6. **Pure One-Hot Target Enforcement:** Enforces binary one-hot targets to isolate the Kullback-Leibler (KL) divergence regularizer, avoiding optimization deadlocks caused by label smoothing.
 7. **Dampened Class Weights:** Implements majority-normalized square-root class weights to scale the entire per-sample loss (including the KL term), providing a balanced gradient boost for rare classes without inducing training volatility.
@@ -90,24 +90,24 @@ MDEP includes a comprehensive evaluation and diagnostic suite to track predictiv
 The MDEP framework was evaluated on the **ISIC 2024 Skin Cancer Detection** dataset, which represents an extreme class-imbalanced y-health setting where malignant samples comprise only **~0.15%** of the population.
 
 ### 1. Decision Threshold Optimization
-Due to the severe class imbalance, the default argmax threshold of $\tau = 0.5$ outputs highly conservative predictions, resulting in a low Sensitivity (True Positive Rate) of **0.0506**. By sweeping the decision threshold to an optimized $\tau = 0.1800$ (maximizing Balanced Accuracy on the validation set), clinical Sensitivity is restored to **0.7089** while maintaining a high Specificity of **0.8993**.
+Due to the severe class imbalance, the default argmax threshold of $\tau = 0.5$ outputs highly conservative predictions, resulting in a low Sensitivity (True Positive Rate) of **0.0000**. By sweeping the decision threshold to an optimized $\tau = 0.0500$ (maximizing Balanced Accuracy on the validation set), clinical Sensitivity is restored to **0.7342** while maintaining a high Specificity of **0.9131**.
 
 Below is a detailed comparison of model metrics before and after decision threshold optimization:
 
-| Evaluation Metric | Default Threshold ($\tau = 0.50$) | Optimized Threshold ($\tau = 0.18$) | Metric Type & Clinical Interpretation |
+| Evaluation Metric | Default Threshold ($\tau = 0.50$) | Optimized Threshold ($\tau = 0.05$) | Metric Type & Clinical Interpretation |
 | :--- | :---: | :---: | :--- |
-| **Balanced Accuracy** | 0.5251 | **0.8041** | *Threshold-Dependent.* Mean of Sensitivity and Specificity; neutralizes majority-class bias. |
-| **Sensitivity (Recall)** | 0.0506 | **0.7089** | *Threshold-Dependent.* True Positive Rate; crucial for identifying malignant lesions. |
-| **Specificity** | **0.9995** | 0.8993 | *Threshold-Dependent.* True Negative Rate; minimizes false-alarm biopsies. |
-| **Macro $F_1$-Score** | **0.5316** | 0.4802 | *Threshold-Dependent.* Harmonic mean of Precision and Recall across classes. |
-| **Macro-AUROC** | 0.8459 | 0.8459 | *Threshold-Independent.* Discriminative power across all possible thresholds. |
-| **pAUC (@ 20% FPR)** | 0.8022 | 0.8022 | *Threshold-Independent.* Area under ROC curve restricted to low-false-positive region. |
-| **PR-AUC** | 0.0288 | 0.0288 | *Threshold-Independent.* Area under Precision-Recall curve; focus on positive class. |
-| **Brier Score** | 0.0210 | 0.0210 | *Threshold-Independent.* Proper scoring rule measuring overall probability calibration. |
-| **Expected Calibration Error (ECE)**| 0.1363 | 0.1363 | *Threshold-Independent.* Discrepancy between average confidence and empirical accuracy. |
-| **Minority-ECE (Class 1)** | 0.6955 | 0.6955 | *Threshold-Independent.* Calibration error isolated strictly to malignant samples. |
-| **Mean Epistemic Uncertainty ($u_e$)**| 0.2686 | 0.2686 | *Threshold-Independent.* Represents model's lack of knowledge (Dirichlet strength $K/S$). |
-| **Mean Aleatoric Uncertainty ($u_a$)** | 0.3389 | 0.3389 | *Threshold-Independent.* Represents intrinsic data noise (digamma entropy difference). |
+| **Balanced Accuracy** | 0.5000 | **0.8236** | *Threshold-Dependent.* Mean of Sensitivity and Specificity; neutralizes majority-class bias. |
+| **Sensitivity (Recall)** | 0.0000 | **0.7342** | *Threshold-Dependent.* True Positive Rate; crucial for identifying malignant lesions. |
+| **Specificity** | **1.0000** | 0.9131 | *Threshold-Dependent.* True Negative Rate; minimizes false-alarm biopsies. |
+| **Macro $F_1$-Score** | **0.4998** | 0.4854 | *Threshold-Dependent.* Harmonic mean of Precision and Recall across classes. |
+| **Macro-AUROC** | 0.8852 | 0.8852 | *Threshold-Independent.* Discriminative power across all possible thresholds. |
+| **pAUC (@ 20% FPR)** | 0.8165 | 0.8165 | *Threshold-Independent.* Area under ROC curve restricted to low-false-positive region. |
+| **PR-AUC** | 0.0253 | 0.0253 | *Threshold-Independent.* Area under Precision-Recall curve; focus on positive class. |
+| **Brier Score** | 0.0033 | 0.0033 | *Threshold-Independent.* Proper scoring rule measuring overall probability calibration. |
+| **Expected Calibration Error (ECE)**| 0.0479 | 0.0479 | *Threshold-Independent.* Discrepancy between average confidence and empirical accuracy. |
+| **Minority-ECE (Class 1)** | 0.9084 | 0.9084 | *Threshold-Independent.* Calibration error isolated strictly to malignant samples. |
+| **Mean Epistemic Uncertainty ($u_e$)**| 0.0906 | 0.0906 | *Threshold-Independent.* Represents model's lack of knowledge (Dirichlet strength $K/S$). |
+| **Mean Aleatoric Uncertainty ($u_a$)** | 0.1751 | 0.1751 | *Threshold-Independent.* Represents intrinsic data noise (digamma entropy difference). |
 
 ---
 
@@ -116,7 +116,7 @@ Below is a detailed comparison of model metrics before and after decision thresh
 To verify the quality of the evidential representations and multi-agent stability, the framework generates several clinical diagnostics:
 
 #### A. Reliability Diagram
-The diagram plots empirical accuracy versus model confidence over 15 equal-width bins. MDEP achieves an **ECE of 0.1363**, demonstrating that the output probabilities closely track the actual accuracy (diagonal line) instead of exhibiting the typical overconfidence of standard networks.
+The diagram plots empirical accuracy versus model confidence over 15 equal-width bins. MDEP achieves an **ECE of 0.0479**, demonstrating that the output probabilities closely track the actual accuracy (diagonal line) instead of exhibiting the typical overconfidence of standard networks.
 
 ![Reliability Diagram](artifacts/reliability_diagram.png)
 
@@ -126,7 +126,7 @@ This plot demonstrates the separation of Epistemic Uncertainty ($u_e$) between c
 ![Uncertainty Distribution](artifacts/uncertainty_distribution.png)
 
 #### C. Precision-Recall Curve
-Under extreme data imbalance, the Precision-Recall curve is a more rigorous measure of performance than ROC. MDEP achieves a **PR-AUC of 0.026** (empirical PR-AUC of **0.0288**), indicating stable feature learning for the minority class without catastrophic representation collapse.
+Under extreme data imbalance, the Precision-Recall curve is a more rigorous measure of performance than ROC. MDEP achieves a **PR-AUC of 0.0253**, indicating stable feature learning for the minority class without catastrophic representation collapse.
 
 ![Precision-Recall Curve](artifacts/precision_recall_curve.png)
 
