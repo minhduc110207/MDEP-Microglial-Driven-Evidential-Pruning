@@ -1,4 +1,4 @@
-"""
+r"""
 ============================================================================
   MDEP — Microglial-Driven Evidential Pruning (Swin-T Backbone Version)
   Single-file Kaggle Notebook version
@@ -9,7 +9,7 @@
     3. Copy-paste this entire file into a single code cell.
     4. Run the cell.
 ============================================================================
-"""
+r"""
 
 import torch
 import torch.nn as nn
@@ -51,10 +51,10 @@ class LogPriorCorrection(nn.Module):
 
 
 class EvidenceLayer(nn.Module):
-    """
+    r"""
     Ensures the output of the network is non-negative evidence (e >= 0).
     Replaces the traditional Softmax layer for EDL.
-    """
+    r"""
     def __init__(self, activation='softplus', max_evidence=20.0):
         super(EvidenceLayer, self).__init__()
         self.max_evidence = max_evidence
@@ -73,7 +73,7 @@ class EvidenceLayer(nn.Module):
 
 
 def compute_uncertainties(evidence):
-    """
+    r"""
     Computes epistemic and aleatoric uncertainties from the Dirichlet evidence.
     
     Args:
@@ -81,7 +81,7 @@ def compute_uncertainties(evidence):
         
     Returns:
         dict: Epistemic uncertainty, aleatoric uncertainty, alpha, and Dirichlet strength S.
-    """
+    r"""
     alpha = evidence + 1.0
     S = torch.sum(alpha, dim=1, keepdim=True)
     K = evidence.shape[1]
@@ -110,7 +110,7 @@ def compute_uncertainties(evidence):
 # ============================================================================
 
 def kl_divergence(alpha, num_classes):
-    """KL divergence between Dirichlet(alpha) and uniform Dirichlet(1,...,1)."""
+    r"""KL divergence between Dirichlet(alpha) and uniform Dirichlet(1,...,1).r"""
     beta = torch.ones(1, num_classes, dtype=torch.float32, device=alpha.device)
     S_alpha = torch.sum(alpha, dim=1, keepdim=True)
     S_beta = torch.sum(beta, dim=1, keepdim=True)
@@ -126,10 +126,10 @@ def kl_divergence(alpha, num_classes):
 
 
 def dirichlet_kl_divergence(alpha_s, alpha_t):
-    """
+    r"""
     Computes the Kullback-Leibler divergence between two Dirichlet distributions
     represented by concentration parameters alpha_s (student) and alpha_t (teacher).
-    """
+    r"""
     S_s = torch.sum(alpha_s, dim=-1, keepdim=True)
     S_t = torch.sum(alpha_t, dim=-1, keepdim=True)
     
@@ -212,12 +212,12 @@ class EvidentialFocalLoss(nn.Module):
 # ============================================================================
 
 class SmoothedSTE(torch.autograd.Function):
-    """
+    r"""
     Smoothed Straight-Through Estimator with Local 2:4 Bounds.
     Forward: passes the hard binary mask unchanged, but utilizes precomputed local thresholds.
     Backward: approximates dM/dS ≈ sigma'((S - tau)/gamma) so gradients flow
               only to connections near the 2:4 survival boundary.
-    """
+    r"""
     @staticmethod
     def forward(ctx, scores, mask, tau, gamma):
         ctx.save_for_backward(scores, tau, torch.tensor(gamma))
@@ -237,7 +237,7 @@ class SmoothedSTE(torch.autograd.Function):
 
 
 def generate_2_4_mask(scores):
-    """Generates an NVIDIA 2:4 structured sparsity mask."""
+    r"""Generates an NVIDIA 2:4 structured sparsity mask.r"""
     if scores.numel() % 4 != 0:
         return torch.ones_like(scores)
         
@@ -301,10 +301,10 @@ class MDEPConv2d(nn.Conv2d):
 
 
 def update_scores_agents(model, beta=1.0):
-    """
+    r"""
     Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals.
     Employs the corrected opposing forces: delta_S = G_ij - C_ij.
-    """
+    r"""
     total_flips = 0
     total_elements = 0
     
@@ -386,7 +386,7 @@ def update_scores_agents(model, beta=1.0):
 # ============================================================================
 
 def replace_swin_linear_with_mdep(model):
-    """Recursively replaces nn.Linear inside Swin features to MDEPLinear."""
+    r"""Recursively replaces nn.Linear inside Swin features to MDEPLinear.r"""
     for name, module in model.named_children():
         if isinstance(module, nn.Linear):
             new = MDEPLinear(
@@ -420,7 +420,7 @@ def replace_swin_linear_with_mdep(model):
 
 
 def replace_resnet_with_mdep(model):
-    """Converts Teacher ResNet-18 layers to MDEP structure for state_dict loading."""
+    r"""Converts Teacher ResNet-18 layers to MDEP structure for state_dict loading.r"""
     for name, module in model.named_children():
         if isinstance(module, nn.Conv2d):
             new = MDEPConv2d(
@@ -512,7 +512,7 @@ class SwinMDEPTrainer:
                     m.effective_weight.grad = None
 
     def compute_amortized_gradients(self, inputs):
-        """Amortized backward to compute ∂u_a / ∂w and ∂u_e / ∂a^(l)."""
+        r"""Amortized backward to compute ∂u_a / ∂w and ∂u_e / ∂a^(l).r"""
         self.model.train()
 
         activations = {}
@@ -825,7 +825,7 @@ def get_isic_dataloaders(batch_size=32, debug=False, subsample_ratio=20):
 
 
 def compute_ece(confidences, accuracies, n_bins=15):
-    """Expected Calibration Error with equal-width bins."""
+    r"""Expected Calibration Error with equal-width bins.r"""
     bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
     bin_accs, bin_confs, bin_sizes = [], [], []
@@ -847,7 +847,7 @@ def compute_ece(confidences, accuracies, n_bins=15):
 
 
 def plot_reliability_diagram(bin_accs, bin_confs, bin_sizes, n_bins=15):
-    """Reliability diagram: accuracy vs confidence per bin."""
+    r"""Reliability diagram: accuracy vs confidence per bin.r"""
     fig, ax = plt.subplots(1, 1, figsize=(6, 5))
     x = np.arange(n_bins)
     width = 0.8
@@ -864,7 +864,7 @@ def plot_reliability_diagram(bin_accs, bin_confs, bin_sizes, n_bins=15):
 
 
 def plot_uncertainty_histogram(u_e_correct, u_e_incorrect):
-    """Overlaid histograms of epistemic uncertainty for correct vs wrong."""
+    r"""Overlaid histograms of epistemic uncertainty for correct vs wrong.r"""
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
     if len(u_e_correct) > 0:
         ax.hist(u_e_correct, bins=40, alpha=0.6, label='Correct', color='#59a14f')
@@ -879,7 +879,7 @@ def plot_uncertainty_histogram(u_e_correct, u_e_incorrect):
 
 
 def plot_pr_curve(y_true, probs):
-    """Precision-Recall Curve with PR-AUC."""
+    r"""Precision-Recall Curve with PR-AUC.r"""
     precision, recall, _ = precision_recall_curve(y_true, probs)
     pr_auc = auc(recall, precision)
     fig, ax = plt.subplots(1, 1, figsize=(6, 5))
@@ -894,7 +894,7 @@ def plot_pr_curve(y_true, probs):
 
 
 def plot_risk_coverage_curve(y_true, y_pred, confidences):
-    """Risk-Coverage curve and AURC (Area Under Risk-Coverage)."""
+    r"""Risk-Coverage curve and AURC (Area Under Risk-Coverage).r"""
     sorted_indices = np.argsort(-confidences)
     sorted_true = y_true[sorted_indices]
     sorted_pred = y_pred[sorted_indices]
@@ -920,9 +920,9 @@ def plot_risk_coverage_curve(y_true, y_pred, confidences):
 
 
 def check_representational_collapse(model):
-    """
+    r"""
     Diagnoses Representational Collapse in 2:4 structured sparsity.
-    """
+    r"""
     print("\n[DIAG] Representational Collapse Diagnostics")
     print("-" * 105)
     print(f"  {'Layer':30s} | {'Score Std':12s} | {'Score Mean':12s} | {'Grad Norm':12s} | {'Status'}")
@@ -964,7 +964,7 @@ def check_representational_collapse(model):
 
 
 def print_sparsity_report(model):
-    """Per-layer and total sparsity stats + 2:4 pattern check + MACs estimation."""
+    r"""Per-layer and total sparsity stats + 2:4 pattern check + MACs estimation.r"""
     print("\n[SPARSITY] Sparsity & Hardware Metrics Report")
     print("-" * 75)
     total_params = 0
@@ -1007,7 +1007,7 @@ def print_sparsity_report(model):
 
 @torch.no_grad()
 def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
-    """Full evaluation: metrics, plots, and uncertainty analysis."""
+    r"""Full evaluation: metrics, plots, and uncertainty analysis.r"""
     model.eval()
 
     best_t = 0.5
@@ -1175,7 +1175,7 @@ def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
 
 
 def load_state_dict_filtered(model, state_dict, strict=False):
-    """Loads state_dict into model, filtering out non-persistent mask/tau buffers for compatibility."""
+    r"""Loads state_dict into model, filtering out non-persistent mask/tau buffers for compatibility.r"""
     for key in list(state_dict.keys()):
         if key.endswith('.mask') or key.endswith('.tau'):
             state_dict.pop(key)
