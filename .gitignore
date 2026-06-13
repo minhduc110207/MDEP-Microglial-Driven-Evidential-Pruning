@@ -167,3 +167,10 @@ mdep_research_report.html
 pdf_content.txt
 main_pdf_extracted.txt
 *.pdf
+
+# Swin-MDEP Compiler/Build Artifacts
+**/build_artifacts/
+*.exe
+*.obj
+*.pdb
+*.ilk

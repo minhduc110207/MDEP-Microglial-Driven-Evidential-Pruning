@@ -1,11 +1,11 @@
 """
 ============================================================================
-  MDEP — Ablation Study: PRUNE-ONLY (Microglia Only)
+  MDEP — Ablation Study: GROW-ONLY (Astrocyte Only)
   Single-file Kaggle Notebook version
   
-  This ablation disables the Astrocyte (growing) agent entirely.
-  Only the Microglia (pruning) agent drives sparsity decisions.
-  Compare results with the full MDEP and grow-only ablation.
+  This ablation disables the Microglia (pruning) agent entirely.
+  Only the Astrocyte (growing) agent drives sparsity decisions.
+  Compare results with the full MDEP and prune-only ablation.
   
   HOW TO RUN ON KAGGLE:
     1. Create a new Notebook, set Accelerator to GPU (T4 or P100).
@@ -328,15 +328,17 @@ class MDEPConv2d(nn.Conv2d):
 
 def update_scores_agents(model, beta=1.0):
     """
-    ABLATION: Prune-Only — Microglia agent only.
-    The Astrocyte (growing) signal G_ij is zeroed out.
+    ABLATION: Grow-Only — Astrocyte agent only.
+    The Microglia (pruning) signal C_ij is zeroed out.
 
-    Microglia (§5.2): C_ij = Norm(|w_ij * ∂L_EFL/∂w_ij|) + β·Norm(|w_ij * ∂u_a/∂w_ij|)
+    Astrocyte (§5.3): G_ij = Norm(u_e,i^(node)) × Norm(|∂L_EFL/∂w_ij|)
+      u_e,i^(node) = |∂u_e/∂a_i^(l)| is per-neuron epistemic uncertainty,
+      projected from node-space to edge-space via broadcasting.
     """
     total_flops = 0
     total_elements = 0
     
-    print("\n🔍 [DEBUG - update_scores_agents - ABLATION: Prune-Only]")
+    print("\n🔍 [DEBUG - update_scores_agents - ABLATION: Grow-Only]")
     print("-" * 75)
     for module in model.modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
@@ -348,27 +350,41 @@ def update_scores_agents(model, beta=1.0):
 
             w_val = module.weight.data
 
-            # --- Microglia agent: pruning score (§5.2) ---
-            # c1: importance for prediction = |w * ∂L_EFL/∂w|
-            c1 = torch.abs(w_val * module.grad_L_w)
-            c1_min = c1.min().item()
-            c1_max = c1.max().item()
-            c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
+            # --- Microglia agent: DISABLED (zeroed out) ---
+            C_ij = torch.zeros_like(w_val)
 
-            # c2: importance for noise modelling = |w * ∂u_a/∂w|
-            grad_ua_w = getattr(module, 'grad_ua_w', torch.zeros_like(w_val))
-            c2 = torch.abs(w_val * grad_ua_w)
-            c2_min = c2.min().item()
-            c2_max = c2.max().item()
-            c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
+            # --- Astrocyte agent: growing score (§5.3) ---
+            # g1: per-neuron epistemic uncertainty, projected to weight shape
+            u_e_node = getattr(module, 'u_e_node', None)
+            if u_e_node is not None:
+                if isinstance(module, MDEPLinear):
+                    g1 = u_e_node.unsqueeze(1).expand_as(w_val)
+                elif isinstance(module, MDEPConv2d):
+                    g1 = u_e_node.view(-1, 1, 1, 1).expand_as(w_val)
+                else:
+                    g1 = torch.zeros_like(w_val)
+            else:
+                g1 = torch.zeros_like(w_val)
+            g1_min = g1.min().item()
+            g1_max = g1.max().item()
+            g1_norm = (g1 - g1_min) / (g1_max - g1_min + 1e-8)
 
-            C_ij = c1_norm + beta * c2_norm
+            # g2: per-weight loss gradient magnitude = |∂L_EFL/∂w|
+            g2 = torch.abs(module.grad_L_w)
+            g2_min = g2.min().item()
+            g2_max = g2.max().item()
+            g2_norm = (g2 - g2_min) / (g2_max - g2_min + 1e-8)
 
-            # --- Astrocyte agent: DISABLED (zeroed out) ---
-            G_ij = torch.zeros_like(C_ij)
+            G_ij = g1_norm * g2_norm
 
-            # Calculate total driving force Delta S
-            delta_S = C_ij + G_ij
+            # Khắc phục hiện tượng kết tinh Astrocyte (Phase 4 Action 2):
+            # Nếu tất cả các tiềm năng tăng trưởng G_ij bằng 0, thêm xung lực tăng trưởng ngẫu nhiên
+            if G_ij.max().item() <= 1e-8:
+                noise = 0.0316 * torch.randn_like(G_ij) * g1_norm
+                G_ij = G_ij + torch.clamp(noise, min=0.0)
+
+            # Corrected formulation: Growth promotes connection (+), Pruning demotes it (-)
+            delta_S = G_ij - C_ij
             
             # Step 1: Update Velocity (Momentum EMA)
             beta_m = 0.95
@@ -549,7 +565,8 @@ class MDEPTrainer:
         uncertainties = compute_uncertainties(outputs)
 
         u_a = torch.mean(uncertainties['aleatoric'])
-        u_e = torch.mean(uncertainties['epistemic'])
+        # Class-selective epistemic target to resolve gradient blindness
+        u_e_target = torch.mean(torch.sum(1.0 / uncertainties['alpha'], dim=-1))
 
         # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
         self.model.zero_grad()
@@ -576,7 +593,7 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
+            grads = torch.autograd.grad(u_e_target, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
                     if isinstance(m, MDEPLinear):
@@ -1282,7 +1299,7 @@ def main():
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs)
 
     # ── Training ───────────────────────────────────────────────────
-    print("\n🚀 Starting Training (ABLATION: Prune-Only / Microglia Only)")
+    print("\n🚀 Starting Training (ABLATION: Grow-Only / Astrocyte Only)")
     print("=" * 60)
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device)
@@ -1300,6 +1317,7 @@ def main():
     # ── Evaluation ─────────────────────────────────────────────────
     evaluate(model, test_loader, device, num_classes)
     print_sparsity_report(model)
+
 
 
 # ── Run ────────────────────────────────────────────────────────────────

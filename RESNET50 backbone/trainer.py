@@ -63,7 +63,8 @@ class MDEPTrainer:
         uncertainties = compute_uncertainties(outputs)
 
         u_a = torch.mean(uncertainties['aleatoric'])
-        u_e = torch.mean(uncertainties['epistemic'])
+        # Class-selective epistemic target to resolve gradient blindness
+        u_e_target = torch.mean(torch.sum(1.0 / uncertainties['alpha'], dim=-1))
 
         # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
         self.model.zero_grad()
@@ -89,7 +90,7 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
+            grads = torch.autograd.grad(u_e_target, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
                     if isinstance(m, MDEPLinear):

@@ -1,11 +1,7 @@
 """
 ============================================================================
-  MDEP — Ablation Study: GROW-ONLY (Astrocyte Only)
+  MDEP — Microglial-Driven Evidential Pruning
   Single-file Kaggle Notebook version
-  
-  This ablation disables the Microglia (pruning) agent entirely.
-  Only the Astrocyte (growing) agent drives sparsity decisions.
-  Compare results with the full MDEP and prune-only ablation.
   
   HOW TO RUN ON KAGGLE:
     1. Create a new Notebook, set Accelerator to GPU (T4 or P100).
@@ -41,7 +37,6 @@ from sklearn.metrics import (
     balanced_accuracy_score, roc_auc_score, average_precision_score,
     confusion_matrix, brier_score_loss, f1_score, precision_recall_curve, auc
 )
-# ============================================================================
 #  SECTION 1 — EDL Core (Evidential Deep Learning foundations)
 # ============================================================================
 
@@ -140,6 +135,7 @@ class EvidentialFocalLoss(nn.Module):
         self.annealing_epochs = annealing_epochs
         self.warmup_epochs = warmup_epochs
         self.total_epochs = total_epochs
+        # class_weights: tensor of shape (num_classes,) — higher weight for rare classes
         if class_weights is not None:
             self.register_buffer('class_weights', class_weights)
         else:
@@ -152,8 +148,10 @@ class EvidentialFocalLoss(nn.Module):
         alpha = evidence + 1.0
         S = torch.sum(alpha, dim=1, keepdim=True)
 
+        # Expected probability
         p_hat = alpha / S
 
+        # Cross-entropy term: sum_c  y_c * (psi(S) - psi(alpha_c))
         loss_ce = torch.sum(
             targets * (torch.digamma(S) - torch.digamma(alpha)),
             dim=1, keepdim=True,
@@ -163,27 +161,28 @@ class EvidentialFocalLoss(nn.Module):
         if epoch is not None:
             if epoch < self.warmup_epochs:
                 gamma_val = 0.0
-            elif epoch < self.warmup_epochs + 5:
-                # Linear warmup from 0.0 to 2.0 over 5 epochs
-                gamma_val = 2.0 * (epoch - self.warmup_epochs) / 5.0
+            elif epoch < self.warmup_epochs + 3:
+                # Linear warmup from 0.0 to base_gamma over 3 epochs
+                gamma_val = self.base_gamma * (epoch - self.warmup_epochs) / 3.0
             else:
-                # Max force phase: increase from 2.0 to 4.0 in the remaining epochs
-                remaining_epochs = max(1, self.total_epochs - (self.warmup_epochs + 5))
-                progress = (epoch - (self.warmup_epochs + 5)) / remaining_epochs
-                gamma_val = 2.0 + 2.0 * min(1.0, progress)
+                # Max force phase: held constant at the target maximum
+                gamma_val = self.base_gamma
         else:
             gamma_val = self.gamma
 
         self.gamma = gamma_val # Store current gamma value
 
+        # Focal modulation on the true-class probability
         p_target = torch.sum(targets * p_hat, dim=1, keepdim=True)
         focal_weight = (1.0 - p_target.detach()) ** gamma_val
 
+        # Per-sample class weight: look up weight for the true class
         if self.class_weights is not None:
             sample_weight = torch.sum(targets * self.class_weights.unsqueeze(0), dim=1, keepdim=True)
         else:
             sample_weight = 1.0
 
+        # KL regularization — shrink evidence for *incorrect* classes toward 0
         alpha_tilde = targets + (1 - targets) * alpha
         loss_kl = kl_divergence(alpha_tilde, self.num_classes)
 
@@ -193,7 +192,6 @@ class EvidentialFocalLoss(nn.Module):
         else:
             annealing_coef = 1.0
 
-        # Modulate the entire loss (both CE and KL) by focal and sample weights
         # Scale the CE loss by focal weight, and the overall loss by sample weight to balance KL and CE forces under class imbalance
         loss = sample_weight * (focal_weight * loss_ce + self.kl_lambda * annealing_coef * loss_kl)
         return torch.mean(loss)
@@ -328,21 +326,18 @@ class MDEPConv2d(nn.Conv2d):
 
 def update_scores_agents(model, beta=1.0):
     """
-    ABLATION: Grow-Only — Astrocyte agent only.
-    The Microglia (pruning) signal C_ij is zeroed out.
-
-    Astrocyte (§5.3): G_ij = Norm(u_e,i^(node)) × Norm(|∂L_EFL/∂w_ij|)
-      u_e,i^(node) = |∂u_e/∂a_i^(l)| is per-neuron epistemic uncertainty,
-      projected from node-space to edge-space via broadcasting.
+    Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals (Dense Gradient Pass).
+    Also computes and returns the Mask Flop Rate (structural convergence).
     """
     total_flops = 0
     total_elements = 0
     
-    print("\n🔍 [DEBUG - update_scores_agents - ABLATION: Grow-Only]")
+    print("\n🔍 [DEBUG - update_scores_agents]")
     print("-" * 75)
-    for module in model.modules():
+    for name, module in model.named_modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
             if not hasattr(module, 'grad_L_w'):
+                print(f"  Layer {name}: ⚠️ Missing grad_L_w")
                 continue
 
             # Capture old mask before score update
@@ -350,11 +345,23 @@ def update_scores_agents(model, beta=1.0):
 
             w_val = module.weight.data
 
-            # --- Microglia agent: DISABLED (zeroed out) ---
-            C_ij = torch.zeros_like(w_val)
+            # --- Microglia agent: pruning score (§5.2) ---
+            # c1: importance for prediction = |w * ∂L_EFL/∂w|
+            c1 = torch.abs(w_val * module.grad_L_w)
+            c1_min = c1.min().item()
+            c1_max = c1.max().item()
+            c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
+
+            # c2: importance for noise modelling = |w * ∂u_a/∂w|
+            grad_ua_w = getattr(module, 'grad_ua_w', torch.zeros_like(w_val))
+            c2 = torch.abs(w_val * grad_ua_w)
+            c2_min = c2.min().item()
+            c2_max = c2.max().item()
+            c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
+
+            C_ij = c1_norm + beta * c2_norm
 
             # --- Astrocyte agent: growing score (§5.3) ---
-            # g1: per-neuron epistemic uncertainty, projected to weight shape
             u_e_node = getattr(module, 'u_e_node', None)
             if u_e_node is not None:
                 if isinstance(module, MDEPLinear):
@@ -383,8 +390,8 @@ def update_scores_agents(model, beta=1.0):
                 noise = 0.0316 * torch.randn_like(G_ij) * g1_norm
                 G_ij = G_ij + torch.clamp(noise, min=0.0)
 
-            # Calculate total driving force Delta S
-            delta_S = C_ij + G_ij
+            # Corrected formulation: Growth promotes connection (+), Pruning demotes it (-)
+            delta_S = G_ij - C_ij
             
             # Step 1: Update Velocity (Momentum EMA)
             beta_m = 0.95
@@ -405,6 +412,15 @@ def update_scores_agents(model, beta=1.0):
             flops = (old_mask != new_mask).sum().item()
             total_flops += flops
             total_elements += old_mask.numel()
+
+            # Print diagnostic info for each layer
+            print(f"  Layer: {name}")
+            print(f"    grad_L_w   : min={c1_min:.2e}, max={c1_max:.2e}")
+            print(f"    grad_ua_w  : min={c2_min:.2e}, max={c2_max:.2e}")
+            print(f"    u_e_node   : max={g1_max:.2e}")
+            print(f"    delta_S    : min={delta_S.min().item():.4f}, max={delta_S.max().item():.4f}")
+            print(f"    Flips/Total: {flops} / {old_mask.numel()} ({flops / old_mask.numel() * 100:.4f}%)")
+            print("-" * 50)
 
     flop_rate = total_flops / (total_elements + 1e-8)
     print(f"  >>> TOTAL FLOP RATE: {flop_rate*100:.6f}% ({total_flops} / {total_elements})")
@@ -565,7 +581,8 @@ class MDEPTrainer:
         uncertainties = compute_uncertainties(outputs)
 
         u_a = torch.mean(uncertainties['aleatoric'])
-        u_e = torch.mean(uncertainties['epistemic'])
+        # Class-selective epistemic target to resolve gradient blindness
+        u_e_target = torch.mean(torch.sum(1.0 / uncertainties['alpha'], dim=-1))
 
         # 1. ∂u_a/∂w → Microglia agent (per-weight signal)
         self.model.zero_grad()
@@ -592,7 +609,7 @@ class MDEPTrainer:
                 act_modules.append(m)
 
         if act_tensors:
-            grads = torch.autograd.grad(u_e, act_tensors, allow_unused=True)
+            grads = torch.autograd.grad(u_e_target, act_tensors, allow_unused=True)
             for m, grad in zip(act_modules, grads):
                 if grad is not None:
                     if isinstance(m, MDEPLinear):
@@ -743,6 +760,7 @@ class ISICDataset(Dataset):
         self.transform = transform
         self.hdf5_path = hdf5_path
         self._hdf5_file = None
+        self._error_printed = False
 
     def _get_hdf5(self):
         """Lazy-open HDF5 file (one handle per worker process)."""
@@ -758,12 +776,16 @@ class ISICDataset(Dataset):
         image = None
 
         # Try 1: Load from individual image file
-        img_path = os.path.join(self.image_dir, f"{isic_id}.jpg")
-        if os.path.exists(img_path):
-            try:
-                image = Image.open(img_path).convert('RGB')
-            except Exception:
-                image = None
+        if self.image_dir:
+            img_path = os.path.join(self.image_dir, f"{isic_id}.jpg")
+            if os.path.exists(img_path):
+                try:
+                    image = Image.open(img_path).convert('RGB')
+                except Exception as e:
+                    if not self._error_printed:
+                        print(f"\n⚠️ Error loading image file {img_path}: {e}")
+                        self._error_printed = True
+                    image = None
 
         # Try 2: Load from HDF5 archive
         if image is None and self.hdf5_path and HAS_H5PY:
@@ -772,7 +794,10 @@ class ISICDataset(Dataset):
                 if isic_id in hf:
                     img_bytes = hf[isic_id][()]
                     image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-            except Exception:
+            except Exception as e:
+                if not self._error_printed:
+                    print(f"\n⚠️ Error loading image {isic_id} from HDF5: {e}")
+                    self._error_printed = True
                 image = None
 
         # Fallback: black placeholder
@@ -891,7 +916,7 @@ def get_isic_dataloaders(batch_size=32, test_ratio=0.2):
         return (DataLoader(tr, batch_size=batch_size, shuffle=True),
                 DataLoader(te, batch_size=batch_size),
                 num_classes,
-                torch.ones(num_classes))
+                torch.ones(num_classes))  # uniform weights for dummy data
 
     df = pd.read_csv(csv_path)
     print(f"📊 Loaded CSV with {len(df)} rows, columns: {list(df.columns[:5])}")
@@ -927,8 +952,8 @@ def get_isic_dataloaders(batch_size=32, test_ratio=0.2):
     print(f"📊 Train: {len(train_df)} samples  |  Test: {len(test_df)} samples")
     train_ds = ISICDataset(train_df, image_dir, transform=train_tf, hdf5_path=hdf5_path)
     test_ds  = ISICDataset(test_df,  image_dir, transform=test_tf,  hdf5_path=hdf5_path)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
-    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, prefetch_factor=2)
+    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
 
     # Compute class weights (dampened inverse frequency to prevent loss/gradient explosion)
     import math
@@ -949,9 +974,11 @@ def replace_conv2d_with_mdep(model):
             new = MDEPConv2d(
                 module.in_channels, module.out_channels, module.kernel_size,
                 stride=module.stride, padding=module.padding,
+                dilation=module.dilation, groups=module.groups,
                 bias=(module.bias is not None),
             )
             new.weight.data.copy_(module.weight.data)
+            new.scores.data.copy_(torch.abs(module.weight.data))
             if module.bias is not None:
                 new.bias.data.copy_(module.bias.data)
             setattr(model, name, new)
@@ -961,6 +988,7 @@ def replace_conv2d_with_mdep(model):
                 bias=(module.bias is not None),
             )
             new.weight.data.copy_(module.weight.data)
+            new.scores.data.copy_(torch.abs(module.weight.data))
             if module.bias is not None:
                 new.bias.data.copy_(module.bias.data)
             setattr(model, name, new)
@@ -1046,16 +1074,12 @@ def plot_risk_coverage_curve(y_true, y_pred, confidences):
     sorted_true = y_true[sorted_indices]
     sorted_pred = y_pred[sorted_indices]
     
-    coverages = []
-    risks = []
-    
     n_samples = len(y_true)
     errors = (sorted_true != sorted_pred).astype(float)
     cumulative_errors = np.cumsum(errors)
     
-    for i in range(1, n_samples + 1):
-        coverages.append(i / n_samples)
-        risks.append(cumulative_errors[i-1] / i)
+    coverages = np.arange(1, n_samples + 1) / n_samples
+    risks = cumulative_errors / np.arange(1, n_samples + 1)
         
     aurc = auc(coverages, risks)
     
@@ -1068,6 +1092,56 @@ def plot_risk_coverage_curve(y_true, y_pred, confidences):
     ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+
+def check_representational_collapse(model):
+    """
+    Diagnoses Representational Collapse in 2:4 structured sparsity.
+    A collapse occurs not when sparsity reaches 100% (which is impossible under 2:4),
+    but when the Multi-Agent system loses its ability to rank connections, leading to random pruning.
+    We check for:
+    1. Score Variance Tracking (Zero Variance)
+    2. Mean Drift Control (Negative Drift)
+    3. Gradient Vitality (Dead Gradient)
+    """
+    print("\n🔬 Representational Collapse Diagnostics")
+    print("-" * 105)
+    print(f"  {'Layer':30s} | {'Score Std':12s} | {'Score Mean':12s} | {'Grad Norm':12s} | {'Status'}")
+    print("-" * 105)
+    
+    all_pass = True
+    for name, module in model.named_modules():
+        if isinstance(module, (MDEPLinear, MDEPConv2d)):
+            scores = module.scores.data
+            std = scores.std().item() if scores.numel() > 1 else 0.0
+            mean = scores.mean().item()
+            
+            grad_norm = 0.0
+            grad_L = getattr(module, 'grad_L_w', None)
+            if grad_L is not None:
+                grad_norm = grad_L.norm().item()
+                
+            status = "✅ PASS"
+            issues = []
+            if std <= 1e-4:
+                issues.append("Zero Variance")
+            if mean <= -10.0:
+                issues.append("Negative Drift")
+            if grad_norm <= 1e-6:
+                issues.append("Dead Gradient")
+                
+            if issues:
+                status = "❌ FAIL (" + ", ".join(issues) + ")"
+                all_pass = False
+                
+            print(f"  {name:30s} | {std:12.4e} | {mean:12.4f} | {grad_norm:12.4e} | {status}")
+            
+    print("-" * 105)
+    if all_pass:
+        print("  🌟 OVERALL STATUS: HEALTHY (No Representational Collapse Detected)")
+    else:
+        print("  ⚠️ OVERALL STATUS: WARNING (Representational Collapse Detected in some layers)")
+    print()
 
 
 def print_sparsity_report(model):
@@ -1113,6 +1187,9 @@ def print_sparsity_report(model):
     print(f"  {'THEORETICAL MACs SAVED':30s} | {macs_saved:5.1f}% reduction in MDEP layers")
     print("  *(Note: Ampere GPU Tensor Cores provide 2x speedup for strict 2:4 sparsity)*")
     print()
+    
+    # Run Advanced Collapse Diagnostics
+    check_representational_collapse(model)
 
 
 @torch.no_grad()
@@ -1142,8 +1219,8 @@ def evaluate(model, test_loader, device, num_classes):
         all_preds.append(preds)
         all_confs.append(confs)
         all_probs.append(p_hat)
-        all_u_e.append(unc['epistemic'].cpu().numpy().squeeze())
-        all_u_a.append(unc['aleatoric'].cpu().numpy().squeeze())
+        all_u_e.append(unc['epistemic'].cpu().numpy()[:, 0])
+        all_u_a.append(unc['aleatoric'].cpu().numpy()[:, 0])
 
     y_true = np.concatenate(all_targets)
     y_pred = np.concatenate(all_preds)
@@ -1273,6 +1350,7 @@ def main():
     print(f"📊 Classes: {num_classes}")
     print(f"   Train batches: {len(train_loader)}  |  Test batches: {len(test_loader)}")
 
+    # ── Model: ResNet-18 with EDL head ─────────────────────────────
     model = models.resnet18(weights=None)
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
@@ -1284,21 +1362,23 @@ def main():
     nn.init.constant_(model.fc[0].bias, 0)
     replace_conv2d_with_mdep(model)
     model = model.to(device)
-
     total_epochs  = 20
     warmup_epochs = 6
 
+    # ── Optimizer & Loss ───────────────────────────────────────────
     criterion = EvidentialFocalLoss(
         gamma=1.2, num_classes=num_classes, kl_lambda=0.1,
         class_weights=class_weights.to(device),
         warmup_epochs=warmup_epochs, total_epochs=total_epochs
     )
-    optimizer = optim.Adam(model.parameters(), lr=4.0e-05)
+    # Khắc phục lỗi Optimizer Hijacking: chặn 'scores' khỏi AdamW
+    trainable_params = [p for name, p in model.named_parameters() if 'scores' not in name]
+    optimizer = optim.Adam(trainable_params, lr=4.0e-05)
 
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs)
 
     # ── Training ───────────────────────────────────────────────────
-    print("\n🚀 Starting Training (ABLATION: Grow-Only / Astrocyte Only)")
+    print("\n🚀 Starting Training (MDEP Framework)")
     print("=" * 60)
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device)
@@ -1317,7 +1397,74 @@ def main():
     evaluate(model, test_loader, device, num_classes)
     print_sparsity_report(model)
 
+    # ── Saving Model ───────────────────────────────────────────────
+    model_save_path = 'model_checkpoint.pth'
+    torch.save(model.state_dict(), model_save_path)
+    print("=" * 60)
+    print(f"💾 Tải trọng số mô hình đã được lưu tại: {model_save_path}")
+    print("   (Bạn có thể tải file này về từ tab 'Output' trên Kaggle)")
+    print("=" * 60)
+
+
+# ============================================================================
+#  SECTION 8 — Ablation Study Harness (uncomment to run)
+# ============================================================================
+#
+# def update_scores_ablation(model, beta=1.0, mode='full'):
+#     """
+#     Ablation wrapper around update_scores_agents.
+#       mode='full'       → both Microglia + Astrocyte (default)
+#       mode='prune_only' → only Microglia scoring (G_ij = 0)
+#       mode='grow_only'  → only Astrocyte scoring (C_ij = 0)
+#     """
+#     for module in model.modules():
+#         if isinstance(module, (MDEPLinear, MDEPConv2d)):
+#             if not hasattr(module, 'grad_L_w'):
+#                 continue
+#             w_val = module.weight.data
+#             # Microglia
+#             c1 = torch.abs(w_val * module.grad_L_w)
+#             c1_min = c1.min()
+#             c1_max = c1.max()
+#             c1_norm = (c1 - c1_min) / (c1_max - c1_min + 1e-8)
+#             c2 = torch.abs(w_val * getattr(module, 'grad_ua_w', torch.zeros_like(w_val)))
+#             c2_min = c2.min()
+#             c2_max = c2.max()
+#             c2_norm = (c2 - c2_min) / (c2_max - c2_min + 1e-8)
+#             C_ij = c1_norm + beta * c2_norm
+#             # Astrocyte
+#             u_e_node = getattr(module, 'u_e_node', None)
+#             if u_e_node is not None:
+#                 if isinstance(module, MDEPLinear):
+#                     g1 = u_e_node.unsqueeze(1).expand_as(w_val)
+#                 elif isinstance(module, MDEPConv2d):
+#                     g1 = u_e_node.view(-1, 1, 1, 1).expand_as(w_val)
+#                 else:
+#                     g1 = torch.zeros_like(w_val)
+#             else:
+#                 g1 = torch.zeros_like(w_val)
+#             g1_norm = g1 / (g1.max() + 1e-8)
+#             g2 = torch.abs(module.grad_L_w)
+#             g2_norm = g2 / (g2.max() + 1e-8)
+#             G_ij = g1_norm * g2_norm
+#             # Apply ablation
+#             if mode == 'prune_only':
+#                 G_ij = torch.zeros_like(G_ij)
+#             elif mode == 'grow_only':
+#                 C_ij = torch.zeros_like(C_ij)
+#             delta_S = C_ij + G_ij
+#             beta_m = 0.9
+#             module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
+#             eta = 0.1
+#             module.scores.data.add_(module.scores_momentum.data, alpha=eta)
+#             module.scores.data.sub_(module.scores.data.mean())
+#
+# # To run an ablation study, uncomment and call:
+# # for mode in ['prune_only', 'grow_only', 'full']:
+# #     print(f"\n{'='*60}\n  ABLATION: {mode}\n{'='*60}")
+# #     <rebuild model, train with update_scores_ablation(..., mode=mode), evaluate>
 
 
 # ── Run ────────────────────────────────────────────────────────────────
-main()
+if __name__ == '__main__':
+    main()

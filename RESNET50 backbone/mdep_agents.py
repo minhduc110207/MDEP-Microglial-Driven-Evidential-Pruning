@@ -161,8 +161,8 @@ def update_scores_agents(model, beta=1.0):
                 noise = 0.0316 * torch.randn_like(G_ij) * g1_norm
                 G_ij = G_ij + torch.clamp(noise, min=0.0)
             
-            # Calculate total driving force Delta S
-            delta_S = C_ij + G_ij
+            # Corrected formulation: Growth promotes connection (+), Pruning demotes it (-)
+            delta_S = G_ij - C_ij
             
             # Step 1: Update Velocity (Momentum EMA)
             beta_m = 0.95
