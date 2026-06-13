@@ -818,7 +818,7 @@ def get_isic_dataloaders(batch_size=32, debug=False, subsample_ratio=20):
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
     
-    total_samples = sum(class_counts_train.values())
+    total_samples = total_train
     cw_raw = [total_samples / class_counts_train.get(c, 1) for c in range(num_classes)]
     cw = torch.tensor([w / cw_raw[0] for w in cw_raw], dtype=torch.float32)
     return train_loader, val_loader, test_loader, num_classes, cw, p_true, p_train
