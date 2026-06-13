@@ -1233,7 +1233,7 @@ def main():
         parser.add_argument("--wandb-project", type=str, default="swin-mdep")
         parser.add_argument("--wandb-run-id", type=str, default=None)
         parser.add_argument("--resume", action="store_true")
-        args = parser.parse_args()
+        args, _ = parser.parse_known_args()
     else:
         class Args:
             epochs = 30
