@@ -156,9 +156,15 @@ $RECYCLE.BIN/
 # Deep Learning weights & logs
 *.pth
 *.pt
+*.ckpt
+*.safetensors
 *.onnx
 checkpoint/
 logs/
+runs/
+wandb/
+lightning_logs/
+paper_experiment_outputs/
 
 # Local research and debug files
 debug_nan.py
@@ -167,6 +173,9 @@ mdep_research_report.html
 pdf_content.txt
 main_pdf_extracted.txt
 *.pdf
+output/
+tmp/
+.pnpm-store/
 
 # Swin-MDEP Compiler/Build Artifacts
 **/build_artifacts/
