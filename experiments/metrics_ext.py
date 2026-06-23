@@ -43,6 +43,13 @@ def _safe_metric(fn, default: float = float("nan")) -> float:
         return default
 
 
+def _integrate_trapezoid(y: np.ndarray, x: np.ndarray) -> float:
+    integrate = getattr(np, "trapezoid", None)
+    if integrate is None:
+        integrate = getattr(np, "trapz")
+    return float(integrate(y, x))
+
+
 def _ece(confidences: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> float:
     boundaries = np.linspace(0.0, 1.0, n_bins + 1)
     total = max(len(confidences), 1)
@@ -164,8 +171,8 @@ def failure_detection_metrics(
     oracle_errors = np.sort(errors)
     oracle_risks = np.cumsum(oracle_errors) / counts
     coverages = counts / max(len(errors), 1)
-    aurc = float(np.trapz(risks, coverages))
-    oracle_aurc = float(np.trapz(oracle_risks, coverages))
+    aurc = _integrate_trapezoid(risks, coverages)
+    oracle_aurc = _integrate_trapezoid(oracle_risks, coverages)
     metrics[f"{prefix}e_aurc"] = max(0.0, aurc - oracle_aurc)
     return metrics
 
