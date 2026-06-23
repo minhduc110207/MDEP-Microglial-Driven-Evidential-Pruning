@@ -90,11 +90,12 @@ def _stratified_subsets(dataset, labels, seed=42):
     return Subset(dataset, train_idx), Subset(dataset, val_idx), Subset(dataset, cal_idx), Subset(dataset, test_idx)
 
 
-def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32, seed=42):
+def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32, seed=42, allow_dummy_data=False):
     """
     Simulates MVTec AD dataset loading for Image-Level Classification.
     Normal images = Class 0 (Majority), Defective images = Class 1 (Minority)
-    Fallback to dummy tensors if dataset is not found in ./data/mvtec_ad
+    Requires a real MVTec category by default. Dummy tensors are available only
+    for explicit dry-runs with allow_dummy_data=True.
     """
     print(f"Loading MVTec AD ({category}) for Image-Level Classification...")
 
@@ -125,7 +126,14 @@ def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32, 
             p_train = [counts[0] / max(counts.sum(), 1), counts[1] / max(counts.sum(), 1)]
             return train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train
 
-    print("⚠ Real MVTec category not found. Falling back to dummy tensors for dry-run verification.")
+    if not allow_dummy_data:
+        raise FileNotFoundError(
+            f"Real MVTec category '{category}' not found. Add the MVTec AD Kaggle "
+            "dataset so category folders such as bottle/ and hazelnut/ are visible "
+            "under /kaggle/input, or set MVTEC_ROOT. Use --allow_dummy_data only for dry-runs."
+        )
+
+    print("⚠ Real MVTec category not found. Falling back to dummy tensors because allow_dummy_data=True.")
     # Represents 500 normal samples and 20 anomalies (1:25 extreme imbalance)
     X_normal = torch.randn(500, 3, 224, 224)
     y_normal = torch.zeros(500, dtype=torch.long)
@@ -163,6 +171,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     
     # GUDS-EDL Ablation Flags
     parser.add_argument('--disable_pruner', action='store_true')
@@ -181,7 +190,12 @@ if __name__ == "__main__":
     print(f"Starting GUDS-EDL on MVTec AD ({args.category})")
     print(f"⚙️ Ablations: {vars(args)}")
     
-    train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train = get_mvtec_ad_classification_dataloaders(args.category, args.batch_size, seed=args.seed)
+    train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train = get_mvtec_ad_classification_dataloaders(
+        args.category,
+        args.batch_size,
+        seed=args.seed,
+        allow_dummy_data=args.allow_dummy_data,
+    )
     
     # 1. Initialize Binary Classification Model (ResNet-18)
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)

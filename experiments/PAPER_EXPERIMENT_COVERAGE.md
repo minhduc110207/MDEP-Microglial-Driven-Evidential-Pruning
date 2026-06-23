@@ -47,8 +47,9 @@ The broader baseline suite can be run with:
 python experiments/isic_paper_experiments.py --suite baselines
 ```
 
-It includes Standard CE, Focal Loss, Logit Adjustment, Dense EDL, Fisher EDL,
-Flexible EDL, R-EDL, Static 2:4 EDL, and a RigL-style 2:4 proxy.
+It includes Standard CE, Focal Loss, Logit Adjustment, Class-Balanced CE,
+Balanced Softmax, LDAM-DRW, cRT-style classifier retraining, Dense EDL, Fisher
+EDL, Flexible EDL, R-EDL, Static 2:4 EDL, and a RigL-style 2:4 proxy.
 
 ## Appendix C Ablations
 
@@ -82,8 +83,12 @@ python experiments/generalization_paper_suite.py --benchmark cifar --ratio 50 --
 python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
 ```
 
-Each CIFAR run includes CE, Focal Loss, Logit Adjustment, Dense EDL, Static
-2:4 EDL, RigL-style 2:4, and full GUDS-EDL.
+Each CIFAR run includes CE, Focal Loss, Logit Adjustment, Class-Balanced CE,
+Balanced Softmax, LDAM-DRW, cRT-style classifier retraining, Dense EDL, Static
+2:4 EDL, RigL-style 2:4, and full GUDS-EDL. The CIFAR metrics include top-1,
+top-5, balanced accuracy, macro-F1, macro-AUROC, macro-PR-AUC, NLL, multiclass
+Brier, AURC/E-AURC, failure-detection AUROC/AUPR, many/medium/few-shot
+accuracy, group ECE, classwise ECE, and worst-group accuracy.
 
 The MVTec AD image-level protocol can be run by:
 
@@ -94,8 +99,21 @@ python experiments/generalization_paper_suite.py --benchmark mvtec --category bo
 
 `mvtec_ad_runner.py` now searches for a real MVTec category under `MVTEC_ROOT`,
 `./data/mvtec_ad`, `./data/mvtec`, or `/kaggle/input`. If no real category is
-found, it falls back to dummy tensors and should only be treated as a pipeline
-smoke test.
+found, it fails fast by default. Dummy tensors require the explicit
+`--allow_dummy_data` flag and should never be used for paper results.
+
+For an anomaly-detection reference baseline on the same real MVTec categories,
+run the PatchCore-lite protocol:
+
+```bash
+python experiments/mvtec_patchcore_reference.py --category hazelnut --seeds 42 43 44
+python experiments/mvtec_patchcore_reference.py --category bottle --seeds 42 43 44
+```
+
+The all-in-one suite runs this reference by default for each selected MVTec
+category. Pass `--skip_mvtec_reference` to skip it. The reference metrics include
+image-level AUROC, image-level AP, F1-max, NLL/Brier on normalized anomaly
+scores, risk-at-coverage, and failure-detection AUROC/AUPR.
 
 ## Hardware, Quality Gates, and Backbones
 
@@ -105,6 +123,12 @@ manually:
 ```bash
 python experiments/hardware_profile.py
 ```
+
+The hardware profiler now writes per-mode `metrics.json` files so
+`summarize_results.py` can aggregate active density, valid 2:4 block fraction,
+masked-PyTorch throughput, peak CUDA memory, and the theoretical 2:4 sparse
+Tensor Core speedup upper bound. These are structural/profiling metrics unless
+you export to a real cuSPARSELt/TensorRT sparse kernel.
 
 The ISIC runner saves quality-gated failure-detection metrics inside each
 `metrics.json` file. Additional backbone experiments are implemented as an

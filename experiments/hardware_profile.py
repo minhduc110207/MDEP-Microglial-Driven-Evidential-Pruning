@@ -66,13 +66,18 @@ def structural_stats(model: nn.Module) -> dict[str, float]:
                 total_params += n
                 active_params += n
 
+    sparse_density = float(sparse_active / max(sparse_params, 1))
+    active_density = float(active_params / max(total_params, 1))
+    tensor_core_upper_bound = 1.0 / max(sparse_density, 1e-8) if sparse_params > 0 else 1.0
     return {
         "total_params": float(total_params),
         "active_params": float(active_params),
-        "active_density": float(active_params / max(total_params, 1)),
+        "active_density": active_density,
         "sparse_wrapped_params": float(sparse_params),
         "sparse_wrapped_active_params": float(sparse_active),
-        "sparse_wrapped_density": float(sparse_active / max(sparse_params, 1)),
+        "sparse_wrapped_density": sparse_density,
+        "theoretical_sparse_wrapped_param_reduction": float(1.0 - sparse_density),
+        "theoretical_2to4_tensor_core_speedup_upper_bound": float(min(tensor_core_upper_bound, 2.0)),
         "valid_24_block_fraction": float(valid_24_blocks / max(total_24_blocks, 1)),
     }
 
@@ -137,13 +142,32 @@ def main() -> int:
         stats = structural_stats(model)
         timing = profile_forward(model, device, args.batch_size, args.image_size, args.warmup, args.iters)
         result = {
+            "benchmark": "hardware",
+            "run_name": "resnet18_224",
+            "experiment": {"name": mode, "family": "hardware_profile"},
             "mode": mode,
             "device": str(device),
             "structural_stats": stats,
             "forward_profile": timing,
+            "metrics": {
+                "active_density": stats["active_density"],
+                "sparse_wrapped_density": stats["sparse_wrapped_density"],
+                "valid_24_block_fraction": stats["valid_24_block_fraction"],
+                "theoretical_2to4_tensor_core_speedup_upper_bound": stats["theoretical_2to4_tensor_core_speedup_upper_bound"],
+                "images_per_second": timing["images_per_second"],
+                "milliseconds_per_batch": timing["milliseconds_per_batch"],
+                "peak_cuda_memory_mb": timing.get("peak_cuda_memory_mb", float("nan")),
+            },
             "kernel_note": "Standard PyTorch masked execution; not a cuSPARSELt/TensorRT sparse Tensor Core benchmark.",
+            "reporting_scope": (
+                "Use active density, valid_24_block_fraction, and theoretical upper bound as structural-feasibility metrics. "
+                "Use images_per_second only as masked-PyTorch throughput unless the model is exported to a real 2:4 sparse kernel."
+            ),
         }
         results.append(result)
+        mode_dir = output_root() / mode
+        mode_dir.mkdir(parents=True, exist_ok=True)
+        (mode_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
         print(json.dumps(json_safe(result), indent=2))
 
     summary_path = output_root() / "hardware_profile.json"

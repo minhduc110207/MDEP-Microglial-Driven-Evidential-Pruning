@@ -105,6 +105,7 @@ def run_one(backbone: str, args: argparse.Namespace, seed: int) -> dict:
         test_ratio=args.test_ratio,
         subsample_ratio=args.subsample_ratio,
         seed=seed,
+        allow_dummy_data=args.allow_dummy_data,
     )
     train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = loaders
     spec = EXPERIMENTS["full_guds"]
@@ -170,6 +171,7 @@ def main() -> int:
     parser.add_argument("--subsample_ratio", type=int, default=20)
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--save_model", action="store_true")
+    parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

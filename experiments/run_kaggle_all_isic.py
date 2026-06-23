@@ -14,10 +14,12 @@ The script removes top-level checkpoints before each run so experiments do not
 resume from or overwrite each other by accident.
 
 Scope note:
-    This script covers the proposed GUDS-EDL run and the GUDS-EDL ablations
-    that are exposed through the current CLI flags. It does not train external
-    Fisher EDL, Flexible EDL, or R-EDL baselines, because those are separate
-    evidential baseline methods rather than flags of the GUDS-EDL runner.
+    This is a legacy single-core wrapper around guds_edl_core.py. For the
+    complete paper-facing suite, including Fisher/Flexible/R-EDL proxies,
+    topology-cache and calibration ablations, CIFAR-100-LT, MVTec AD,
+    multi-seed execution, and hardware profiling, use:
+
+        python experiments/run_kaggle_paper_suite.py --isic_suite all
 """
 
 from __future__ import annotations
@@ -88,14 +90,15 @@ EXPERIMENTS: tuple[Experiment, ...] = (
 )
 
 PAPER_COVERAGE = (
-    "Covered by this script:",
+    "Covered by this legacy script:",
     "- main_text.tex Tables 1--2: GUDS-EDL (Ours) row via 01_full_guds_edl_class_conditioned.",
     "- Appendix C: w/o pruner, w/o regrower, symmetric KL, w/o EFL, w/o anti-crystallization, absolute pruner, KL-uniform regrower, and random/magnitude topology baselines.",
     "",
-    "Not covered by this script:",
-    "- main_text.tex Tables 1--2: Fisher EDL, Flexible EDL, and R-EDL rows. These require separate baseline implementations, not just GUDS-EDL flags.",
-    "- Appendix C mentions topology-cache and bias-corrected temperature-scaling ablations, but no matching CLI flags are exposed in the current experiments folder.",
-    "- CIFAR-100-LT and MVTec AD are described in main_text.tex as planned generalization protocols, not completed main-table results.",
+    "Use run_kaggle_paper_suite.py for complete paper coverage:",
+    "- ISIC long-tailed, evidential, dynamic sparse, GUDS, topology-cache, and calibration ablations.",
+    "- CIFAR-100-LT planned baseline suite for 1:10, 1:50, and 1:100.",
+    "- MVTec AD planned baseline suite for selected categories.",
+    "- Multi-seed execution, hardware profiling, and summary CSV generation.",
 )
 
 TOP_LEVEL_OUTPUTS = (

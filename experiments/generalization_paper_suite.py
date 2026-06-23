@@ -53,6 +53,12 @@ from experiments.isic_paper_experiments import (  # noqa: E402
     train_guds,
     train_standard,
 )
+from experiments.metrics_ext import (  # noqa: E402
+    binary_extended_metrics,
+    collect_evidential_outputs,
+    multiclass_extended_metrics,
+    uncertainty_separation_metrics,
+)
 from experiments.mvtec_ad_runner import get_mvtec_ad_classification_dataloaders  # noqa: E402
 
 
@@ -60,6 +66,10 @@ PLANNED_EXPERIMENTS = [
     "standard_ce",
     "focal_loss",
     "logit_adjustment",
+    "class_balanced_ce",
+    "balanced_softmax",
+    "ldam_drw",
+    "decoupled_crt",
     "dense_edl",
     "static_24_edl",
     "rigl_style_24",
@@ -224,6 +234,7 @@ def evaluate_multiclass(
                     per_class_acc.append(float((y_pred[mask] == y_true[mask]).mean()))
             metrics["few_shot_accuracy"] = float(np.mean(per_class_acc)) if per_class_acc else float("nan")
             metrics["few_shot_class_count"] = int(len(few_shot_classes))
+    metrics.update(multiclass_extended_metrics(y_true, probs, class_counts=class_counts))
     return metrics
 
 
@@ -231,7 +242,12 @@ def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
     if benchmark == "cifar":
         return get_cifar100_lt_dataloaders(args.ratio, args.batch_size, seed=seed)
     if benchmark == "mvtec":
-        return get_mvtec_ad_classification_dataloaders(args.category, args.batch_size, seed=seed)
+        return get_mvtec_ad_classification_dataloaders(
+            args.category,
+            args.batch_size,
+            seed=seed,
+            allow_dummy_data=args.allow_dummy_data,
+        )
     raise ValueError(f"Unsupported benchmark: {benchmark}")
 
 
@@ -303,6 +319,21 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             bias=bias,
             plot=False,
         )
+        outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=bias)
+        metrics.update(binary_extended_metrics(
+            outputs["y_true"],
+            outputs["probs"],
+            thresholds={
+                "balanced": float(thresholds.get("balanced", 0.5)),
+                "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
+            },
+        ))
+        metrics.update(uncertainty_separation_metrics(
+            outputs["y_true"],
+            outputs["y_pred"],
+            outputs["u_e"],
+            outputs["u_a"],
+        ))
 
     if spec.sparse:
         print_sparsity_report(model)
@@ -347,6 +378,7 @@ def main() -> int:
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--save_model", action="store_true")
+    parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

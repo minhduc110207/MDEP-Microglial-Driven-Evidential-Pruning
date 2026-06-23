@@ -1048,11 +1048,12 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42):
+def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42, allow_dummy_data=False):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
     Uses stratified splitting to create train, val, cal, and test sets.
-    Falls back to dummy data if dataset is not found.
+    Requires a real ISIC dataset by default. Dummy data is available only for
+    explicit dry-runs with allow_dummy_data=True.
     """
     num_classes = 2
 
@@ -1146,7 +1147,13 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     ])
 
     if csv_path is None or not os.path.exists(csv_path):
-        print("⚠ ISIC dataset not found. Falling back to dummy data.")
+        if not allow_dummy_data:
+            raise FileNotFoundError(
+                "ISIC dataset not found. Add the ISIC 2024 Kaggle competition "
+                "input so train-metadata.csv and train-image.hdf5 are visible "
+                "under /kaggle/input. Use allow_dummy_data=True only for local dry-runs."
+            )
+        print("⚠ ISIC dataset not found. Falling back to dummy data because allow_dummy_data=True.")
         X = torch.randn(200, 3, 224, 224)
         Y = torch.randint(0, 2, (200,))
         full = TensorDataset(X, Y)

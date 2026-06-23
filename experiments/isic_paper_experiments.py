@@ -62,6 +62,11 @@ from guds_edl_core import (  # noqa: E402
     print_sparsity_report,
     replace_conv2d_with_mdep,
 )
+from experiments.metrics_ext import (  # noqa: E402
+    binary_extended_metrics,
+    collect_evidential_outputs,
+    uncertainty_separation_metrics,
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,7 @@ class ExperimentSpec:
     logit_adjustment_train: bool = False
     disable_topology_cache: bool = False
     calibration_mode: str = "bias_temperature"
+    classifier_retrain: bool = False
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
@@ -105,6 +111,31 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="Dense ResNet-18 trained with logit-adjusted cross-entropy.",
         loss_name="ce",
         logit_adjustment_train=True,
+    ),
+    "class_balanced_ce": ExperimentSpec(
+        name="class_balanced_ce",
+        family="long_tailed_baseline",
+        description="Class-Balanced Loss baseline using effective-number reweighting.",
+        loss_name="class_balanced_ce",
+    ),
+    "balanced_softmax": ExperimentSpec(
+        name="balanced_softmax",
+        family="long_tailed_baseline",
+        description="Balanced Softmax baseline using train-prior logits inside the CE objective.",
+        loss_name="balanced_softmax",
+    ),
+    "ldam_drw": ExperimentSpec(
+        name="ldam_drw",
+        family="long_tailed_baseline",
+        description="LDAM with deferred effective-number reweighting.",
+        loss_name="ldam_drw",
+    ),
+    "decoupled_crt": ExperimentSpec(
+        name="decoupled_crt",
+        family="long_tailed_baseline",
+        description="cRT-style baseline: dense CE representation learning followed by classifier retraining.",
+        loss_name="ce",
+        classifier_retrain=True,
     ),
     "dense_edl": ExperimentSpec(
         name="dense_edl",
@@ -266,6 +297,10 @@ SUITES: dict[str, list[str]] = {
         "standard_ce",
         "focal_loss",
         "logit_adjustment",
+        "class_balanced_ce",
+        "balanced_softmax",
+        "ldam_drw",
+        "decoupled_crt",
         "dense_edl",
         "fisher_edl",
         "flexible_edl",
@@ -573,6 +608,23 @@ def logits_from_model(model: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
     return model.fc[0](model.backbone(inputs))
 
 
+def effective_number_weights(p_train: list[float], beta: float = 0.9999, device: torch.device | None = None) -> torch.Tensor:
+    """Class-Balanced Loss weights from relative training frequencies."""
+    counts = torch.tensor(p_train, dtype=torch.float32, device=device)
+    counts = counts / counts[counts > 0].min().clamp_min(1e-8)
+    weights = (1.0 - beta) / (1.0 - torch.pow(torch.tensor(beta, device=counts.device), counts).clamp_max(1.0 - 1e-8))
+    weights = weights / weights.mean().clamp_min(1e-8)
+    return weights
+
+
+def ldam_margins(p_train: list[float], max_margin: float = 0.5, device: torch.device | None = None) -> torch.Tensor:
+    counts = torch.tensor(p_train, dtype=torch.float32, device=device)
+    counts = counts / counts[counts > 0].min().clamp_min(1e-8)
+    margins = 1.0 / torch.sqrt(torch.sqrt(counts.clamp_min(1.0)))
+    margins = margins * (max_margin / margins.max().clamp_min(1e-8))
+    return margins
+
+
 def ce_or_focal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -580,6 +632,8 @@ def ce_or_focal_loss(
     class_weights: torch.Tensor,
     p_true: list[float],
     p_train: list[float],
+    epoch: int,
+    total_epochs: int,
 ) -> torch.Tensor:
     adjusted = logits
     if spec.logit_adjustment_train:
@@ -593,10 +647,73 @@ def ce_or_focal_loss(
     if spec.loss_name == "ce":
         return F.cross_entropy(adjusted, targets, weight=class_weights.to(logits.device))
 
+    if spec.loss_name == "class_balanced_ce":
+        cb_weights = effective_number_weights(p_train, device=logits.device)
+        return F.cross_entropy(adjusted, targets, weight=cb_weights)
+
+    if spec.loss_name == "balanced_softmax":
+        log_prior = torch.tensor(
+            [math.log(max(p, 1e-8)) for p in p_train],
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        return F.cross_entropy(adjusted + log_prior, targets)
+
+    if spec.loss_name == "ldam_drw":
+        margins = ldam_margins(p_train, device=logits.device)
+        one_hot = F.one_hot(targets, num_classes=logits.shape[1]).to(logits.dtype)
+        logits_m = adjusted - one_hot * margins.unsqueeze(0)
+        weight = None
+        if epoch >= int(0.75 * total_epochs):
+            weight = effective_number_weights(p_train, device=logits.device)
+        return F.cross_entropy(30.0 * logits_m, targets, weight=weight)
+
     probs = F.softmax(adjusted, dim=1)
     pt = probs.gather(1, targets.view(-1, 1)).clamp_min(1e-8)
     ce = F.cross_entropy(adjusted, targets, weight=class_weights.to(logits.device), reduction="none").view(-1, 1)
     return torch.mean(((1.0 - pt) ** 2.0) * ce)
+
+
+def retrain_classifier_crt(
+    model: nn.Module,
+    train_loader,
+    device: torch.device,
+    class_weights: torch.Tensor,
+    total_epochs: int,
+    lr: float,
+) -> list[dict[str, float]]:
+    """Classifier re-training baseline inspired by cRT/decoupled classifiers."""
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+    for param in model.fc[0].parameters():
+        param.requires_grad = True
+
+    epochs = max(1, int(0.10 * total_epochs))
+    optimizer = optim.AdamW(model.fc[0].parameters(), lr=lr, weight_decay=1e-4)
+    history: list[dict[str, float]] = []
+    weights = class_weights.to(device)
+    for epoch in range(epochs):
+        model.train()
+        losses = []
+        start = time.time()
+        for inputs, targets in train_loader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            logits = logits_from_model(model, inputs)
+            loss = F.cross_entropy(logits, targets, weight=weights)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.fc[0].parameters(), max_norm=1.0)
+            optimizer.step()
+            losses.append(float(loss.detach().cpu()))
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        elapsed = time.time() - start
+        history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed, "stage": "crt"})
+        print(f"cRT [{epoch + 1:>2}/{epochs}] | loss={avg_loss:.4f} | {elapsed:.1f}s")
+
+    for param in model.backbone.parameters():
+        param.requires_grad = True
+    return history
 
 
 def train_standard(
@@ -619,7 +736,8 @@ def train_standard(
         set_static_sparse_mode(model)
 
     criterion = None
-    if spec.loss_name not in {"ce", "focal"}:
+    standard_loss_names = {"ce", "focal", "class_balanced_ce", "balanced_softmax", "ldam_drw"}
+    if spec.loss_name not in standard_loss_names:
         criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
 
     for epoch in range(total_epochs):
@@ -633,9 +751,9 @@ def train_standard(
             targets = targets.to(device)
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
-                if spec.loss_name in {"ce", "focal"}:
+                if spec.loss_name in standard_loss_names:
                     logits = logits_from_model(model, inputs)
-                    loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train)
+                    loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train, epoch, total_epochs)
                 else:
                     evidence = model(inputs)
                     loss = criterion(evidence, targets, epoch=epoch)
@@ -649,6 +767,8 @@ def train_standard(
         elapsed = time.time() - start
         history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed})
         print(f"Epoch [{epoch + 1:>2}/{total_epochs}] | loss={avg_loss:.4f} | {elapsed:.1f}s")
+    if spec.classifier_retrain:
+        history.extend(retrain_classifier_crt(model, train_loader, device, class_weights, total_epochs, lr))
     return history
 
 
@@ -697,6 +817,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         test_ratio=args.test_ratio,
         subsample_ratio=args.subsample_ratio,
         seed=seed,
+        allow_dummy_data=args.allow_dummy_data,
     )
     train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = loaders
 
@@ -752,6 +873,23 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         bias=bias,
         plot=False,
     )
+    outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=bias)
+    threshold_report = {
+        "balanced": float(thresholds.get("balanced", 0.5)),
+        "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
+    }
+    metrics.update(binary_extended_metrics(
+        outputs["y_true"],
+        outputs["probs"],
+        thresholds=threshold_report,
+        deployment_prevalence=args.deployment_prevalence,
+    ))
+    metrics.update(uncertainty_separation_metrics(
+        outputs["y_true"],
+        outputs["y_pred"],
+        outputs["u_e"],
+        outputs["u_a"],
+    ))
     if spec.sparse:
         print_sparsity_report(model)
 
@@ -797,6 +935,8 @@ def main() -> int:
     parser.add_argument("--subsample_ratio", type=int, default=20)
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--no_save_model", action="store_true")
+    parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
+    parser.add_argument("--deployment_prevalence", type=float, default=0.0015, help="Prevalence used for PPV/NPV/NNB reporting.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

@@ -86,10 +86,14 @@ Run the complete MVTec AD baseline suite after attaching a real MVTec dataset:
 ```bash
 !python experiments/generalization_paper_suite.py --benchmark mvtec --category hazelnut --epochs 20 --seeds 42 43 44
 !python experiments/generalization_paper_suite.py --benchmark mvtec --category bottle --epochs 20 --seeds 42 43 44
+!python experiments/mvtec_patchcore_reference.py --category hazelnut --seeds 42 43 44
+!python experiments/mvtec_patchcore_reference.py --category bottle --seeds 42 43 44
 ```
 
-If no real MVTec category is found, the runner falls back to dummy tensors and
-the result should be treated only as a pipeline smoke test.
+If no real MVTec category is found, the runner fails fast by default. This is
+intentional for paper experiments: all reported runs should use the real MVTec
+AD folders. Use `--allow_dummy_data` only for local dry-runs of the classifier
+runner; the PatchCore-lite reference always requires real MVTec images.
 
 Run hardware profiling and aggregate all seed results:
 
