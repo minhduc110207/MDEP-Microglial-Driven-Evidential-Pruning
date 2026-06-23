@@ -17,7 +17,7 @@ from guds_edl_core import (
     MDEPTrainer, evaluate, calibrate_temperature, AdaptiveThresholdDecisionSupport
 )
 
-def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128):
+def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
     """
     Loads CIFAR-100 and applies exponential decay to class frequencies.
     """
@@ -42,11 +42,12 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128):
         num = int(500 * (1.0 / imbalance_ratio) ** (cls_idx / (num_classes - 1.0)))
         img_num_per_cls.append(max(1, num))
         
+    rng = np.random.default_rng(seed)
     train_targets = np.array(train_ds.targets)
     imbalanced_indices = []
     for cls_idx, num in enumerate(img_num_per_cls):
         idx = np.where(train_targets == cls_idx)[0]
-        np.random.shuffle(idx)
+        rng.shuffle(idx)
         imbalanced_indices.extend(idx[:num])
         
     train_ds = Subset(train_ds, imbalanced_indices)
@@ -59,7 +60,7 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128):
     
     val_ds, cal_ds, test_final_ds = random_split(
         test_ds, [val_len, cal_len, test_final_len], 
-        generator=torch.Generator().manual_seed(42)
+        generator=torch.Generator().manual_seed(seed)
     )
     
     # Use 0 workers on Windows to avoid multiprocess issues during testing
@@ -85,6 +86,7 @@ if __name__ == "__main__":
     parser.add_argument("--imbalance_ratio", type=int, default=100, choices=[10, 50, 100])
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=42)
     
     # GUDS-EDL Ablation Flags
     parser.add_argument('--disable_pruner', action='store_true')
@@ -103,7 +105,7 @@ if __name__ == "__main__":
     print(f"Starting GUDS-EDL on CIFAR-100-LT (Ratio 1:{args.imbalance_ratio})")
     print(f"⚙️ Ablations: {vars(args)}")
     
-    train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train = get_cifar100_lt_dataloaders(args.imbalance_ratio, args.batch_size)
+    train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train = get_cifar100_lt_dataloaders(args.imbalance_ratio, args.batch_size, seed=args.seed)
     
     # 1. Initialize ResNet-18 adapted for 32x32 CIFAR images
     model = models.resnet18(weights=None)

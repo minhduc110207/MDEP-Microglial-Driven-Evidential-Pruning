@@ -863,6 +863,8 @@ class MDEPTrainer:
         num_batches = len(dataloader)
         epoch_start = time.time()
 
+        disable_topology_cache = getattr(self.args, 'disable_topology_cache', False) if self.args else False
+
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             # Smooth per-batch LR Warmup
             if epoch < warmup_period:
@@ -883,8 +885,10 @@ class MDEPTrainer:
 
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # Amortized uncertainty-gradient pass on the first batch of the epoch (also during warm-up epochs 0 and 1)
-            if (not is_warmup or epoch < 2) and batch_idx == 0:
+            # Amortized uncertainty-gradient pass. The default caches one structural
+            # pass per epoch; the no-cache ablation recomputes it for each batch.
+            structural_probe_batch = batch_idx == 0 or (disable_topology_cache and not is_warmup)
+            if (not is_warmup or epoch < 2) and structural_probe_batch:
                 self.compute_amortized_gradients(inputs)
 
             self.model.zero_grad()
@@ -934,14 +938,14 @@ class MDEPTrainer:
             self.scaler.update()
 
             # Multi-agent structure optimization (once per epoch)
-            if not is_warmup and batch_idx == 0:
+            if not is_warmup and structural_probe_batch:
                 disable_pruner = getattr(self.args, 'disable_pruner', False) if self.args else False
                 disable_regrower = getattr(self.args, 'disable_regrower', False) if self.args else False
                 pruner_type = getattr(self.args, 'pruner_type', 'signed_first_order') if self.args else 'signed_first_order'
                 use_anticryst = getattr(self.args, 'use_anticryst', True) if self.args else True
                 
                 mask_flop_rate = update_scores_agents(
-                    self.model, epoch=epoch,
+                    self.model, epoch=epoch if batch_idx == 0 else None,
                     disable_pruner=disable_pruner,
                     disable_regrower=disable_regrower,
                     pruner_type=pruner_type,
@@ -1044,7 +1048,7 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20):
+def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
     Uses stratified splitting to create train, val, cal, and test sets.
@@ -1187,17 +1191,17 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         
         # Split patients into train/test stratified by patient-level target
         train_patients, test_patients = train_test_split(
-            patient_df, test_size=test_ratio, stratify=patient_df['target'], random_state=42
+            patient_df, test_size=test_ratio, stratify=patient_df['target'], random_state=seed
         )
         
         # Split train patients into train/val (70/10 of total, which is 12.5% of train)
         train_patients, val_patients = train_test_split(
-            train_patients, test_size=0.125, stratify=train_patients['target'], random_state=42
+            train_patients, test_size=0.125, stratify=train_patients['target'], random_state=seed
         )
         
         # Split val patients in half to create validation and calibration hold-out sets (5% each)
         val_patients, cal_patients = train_test_split(
-            val_patients, test_size=0.5, stratify=val_patients['target'], random_state=42
+            val_patients, test_size=0.5, stratify=val_patients['target'], random_state=seed
         )
         
         # Map patients back to the original dataframe
@@ -1208,13 +1212,13 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     else:
         # Fallback if patient_id doesn't exist
         train_df, test_df = train_test_split(
-            df, test_size=test_ratio, stratify=df['target'], random_state=42
+            df, test_size=test_ratio, stratify=df['target'], random_state=seed
         )
         train_df, val_df = train_test_split(
-            train_df, test_size=0.125, stratify=train_df['target'], random_state=42
+            train_df, test_size=0.125, stratify=train_df['target'], random_state=seed
         )
         val_df, cal_df = train_test_split(
-            val_df, test_size=0.5, stratify=val_df['target'], random_state=42
+            val_df, test_size=0.5, stratify=val_df['target'], random_state=seed
         )
 
     # Calculate true prior probabilities before subsampling
@@ -1229,10 +1233,10 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         num_train_malignant = len(train_malignant)
         if num_train_malignant > 0:
             num_benign_to_sample = min(len(train_benign), num_train_malignant * subsample_ratio)
-            train_benign_sampled = train_benign.sample(n=num_benign_to_sample, random_state=42)
+            train_benign_sampled = train_benign.sample(n=num_benign_to_sample, random_state=seed)
             train_df = pd.concat([train_malignant, train_benign_sampled]).reset_index(drop=True)
             # Shuffle the combined dataframe
-            train_df = train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+            train_df = train_df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
             print(f"📉 Subsampled training set: {num_train_malignant} malignant, {len(train_benign_sampled)} benign.")
 
     print(f"📊 Train: {len(train_df)} samples  |  Val: {len(val_df)} samples  |  Cal: {len(cal_df)} samples  |  Test: {len(test_df)} samples")
@@ -1959,6 +1963,8 @@ def calibrate_temperature(model, val_loader, device):
     
     thresholds_dict = {
         'rule_out': best_t_clinical,
+        'high_recall': best_t_clinical,
+        'double_read': best_t_clinical,
         'balanced': best_t_bal_acc,
         'rule_in': 0.5000  # Rule-in is fixed at 0.5000 to maximize specificity
     }

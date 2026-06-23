@@ -11,7 +11,7 @@ setup order is documented in `experiments/KAGGLE_GITHUB_SETUP.md`.
 Run the whole paper-facing suite:
 
 ```bash
-python experiments/run_kaggle_paper_suite.py --isic_suite all
+python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
 For a quick smoke test before spending GPU hours:
@@ -68,28 +68,57 @@ python experiments/isic_paper_experiments.py --suite ablations
 | w/o anti-crystallization | `guds_without_anticryst` |
 | absolute-gradient pruning ablation | `guds_absolute_pruner` |
 | KL-to-uniform regrowth ablation | `guds_kl_uniform_regrower` |
+| w/o topology cache | `guds_without_topology_cache` |
+| temperature-only calibration | `guds_temperature_only` |
+| w/o post-hoc calibration | `guds_no_posthoc_calibration` |
 
 ## Planned Generalization Protocols
 
 The CIFAR-100-LT protocol can be run by the all-in-one suite, or manually:
 
 ```bash
-python experiments/cifar_lt_runner.py --imbalance_ratio 10 --epochs 100
-python experiments/cifar_lt_runner.py --imbalance_ratio 50 --epochs 100
-python experiments/cifar_lt_runner.py --imbalance_ratio 100 --epochs 100
+python experiments/generalization_paper_suite.py --benchmark cifar --ratio 10 --epochs 100 --seeds 42 43 44
+python experiments/generalization_paper_suite.py --benchmark cifar --ratio 50 --epochs 100 --seeds 42 43 44
+python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
 ```
+
+Each CIFAR run includes CE, Focal Loss, Logit Adjustment, Dense EDL, Static
+2:4 EDL, RigL-style 2:4, and full GUDS-EDL.
 
 The MVTec AD image-level protocol can be run by:
 
 ```bash
-python experiments/mvtec_ad_runner.py --category hazelnut --epochs 20
-python experiments/mvtec_ad_runner.py --category bottle --epochs 20
+python experiments/generalization_paper_suite.py --benchmark mvtec --category hazelnut --epochs 20 --seeds 42 43 44
+python experiments/generalization_paper_suite.py --benchmark mvtec --category bottle --epochs 20 --seeds 42 43 44
 ```
 
 `mvtec_ad_runner.py` now searches for a real MVTec category under `MVTEC_ROOT`,
 `./data/mvtec_ad`, `./data/mvtec`, or `/kaggle/input`. If no real category is
 found, it falls back to dummy tensors and should only be treated as a pipeline
 smoke test.
+
+## Hardware, Quality Gates, and Backbones
+
+Hardware profiling is included in the all-in-one suite and can also be run
+manually:
+
+```bash
+python experiments/hardware_profile.py
+```
+
+The ISIC runner saves quality-gated failure-detection metrics inside each
+`metrics.json` file. Additional backbone experiments are implemented as an
+optional heavyweight protocol:
+
+```bash
+python experiments/backbone_generalization_runner.py --backbones resnet18 convnext_tiny swin_t --epochs 40 --seeds 42 43 44
+```
+
+After all runs, aggregate seed statistics:
+
+```bash
+python experiments/summarize_results.py
+```
 
 ## Remaining Caveats
 

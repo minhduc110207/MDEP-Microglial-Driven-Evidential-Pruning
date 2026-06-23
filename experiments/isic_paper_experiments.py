@@ -40,6 +40,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
+from sklearn.metrics import confusion_matrix
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +81,8 @@ class ExperimentSpec:
     disable_efl: bool = False
     disable_anticryst: bool = False
     logit_adjustment_train: bool = False
+    disable_topology_cache: bool = False
+    calibration_mode: str = "bias_temperature"
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
@@ -225,6 +228,30 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         use_mdep_trainer=True,
         regrower_type="kl_uniform",
     ),
+    "guds_without_topology_cache": ExperimentSpec(
+        name="guds_without_topology_cache",
+        family="ablation",
+        description="GUDS-EDL without amortized topology caching; structural signals are recomputed per batch.",
+        sparse=True,
+        use_mdep_trainer=True,
+        disable_topology_cache=True,
+    ),
+    "guds_temperature_only": ExperimentSpec(
+        name="guds_temperature_only",
+        family="ablation",
+        description="GUDS-EDL calibrated with scalar temperature only, without bias correction.",
+        sparse=True,
+        use_mdep_trainer=True,
+        calibration_mode="temperature_only",
+    ),
+    "guds_no_posthoc_calibration": ExperimentSpec(
+        name="guds_no_posthoc_calibration",
+        family="ablation",
+        description="GUDS-EDL evaluated without post-hoc temperature or bias calibration.",
+        sparse=True,
+        use_mdep_trainer=True,
+        calibration_mode="none",
+    ),
 }
 
 
@@ -255,6 +282,9 @@ SUITES: dict[str, list[str]] = {
         "guds_without_anticryst",
         "guds_absolute_pruner",
         "guds_kl_uniform_regrower",
+        "guds_without_topology_cache",
+        "guds_temperature_only",
+        "guds_no_posthoc_calibration",
     ],
 }
 SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"]))
@@ -360,6 +390,164 @@ def set_static_sparse_mode(model: nn.Module) -> None:
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
             module.warmup = False
             module.gamma = 0.15
+
+
+def model_head(model: nn.Module) -> tuple[nn.Module, nn.Module]:
+    head = model.fc if hasattr(model, "fc") else model.head
+    return head[0], head[1]
+
+
+@torch.no_grad()
+def collect_logits_labels(model: nn.Module, loader, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    model.eval()
+    linear, _ = model_head(model)
+    logits_list = []
+    labels_list = []
+    for inputs, targets in loader:
+        inputs = inputs.to(device)
+        if hasattr(model, "backbone"):
+            features = model.backbone(inputs)
+        else:
+            original_head = model.fc if hasattr(model, "fc") else model.head
+            if hasattr(model, "fc"):
+                model.fc = nn.Identity()
+                features = model(inputs)
+                model.fc = original_head
+            else:
+                model.head = nn.Identity()
+                features = model(inputs)
+                model.head = original_head
+        logits_list.append(linear(features).detach())
+        labels_list.append(targets.to(device))
+    return torch.cat(logits_list, dim=0), torch.cat(labels_list, dim=0)
+
+
+def optimize_thresholds(
+    model: nn.Module,
+    val_loader,
+    device: torch.device,
+    temperature: float,
+    bias: torch.Tensor | None,
+) -> dict[str, float]:
+    linear, evidence_layer = model_head(model)
+    logits, labels = collect_logits_labels(model, val_loader, device)
+    with torch.no_grad():
+        scaled_logits = logits / temperature
+        if bias is not None:
+            scaled_logits = scaled_logits + bias
+        evidence = evidence_layer(scaled_logits)
+        unc = compute_uncertainties(evidence)
+        probs = (unc["alpha"] / unc["S"]).detach().cpu().numpy()
+    y_true = labels.detach().cpu().numpy()
+
+    best_t_bal_acc = 0.5
+    best_bal_acc = 0.0
+    best_t_clinical = 0.5
+    best_spec_at_sens80 = 0.0
+    found_sens80 = False
+    for threshold in np.linspace(0.01, 0.99, 199):
+        y_pred = (probs[:, 1] >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+        sens = tp / (tp + fn + 1e-8)
+        spec = tn / (tn + fp + 1e-8)
+        bal_acc = 0.5 * (sens + spec)
+        if bal_acc > best_bal_acc:
+            best_bal_acc = bal_acc
+            best_t_bal_acc = float(threshold)
+        if sens >= 0.80 and (spec > best_spec_at_sens80 or not found_sens80):
+            best_spec_at_sens80 = spec
+            best_t_clinical = float(threshold)
+            found_sens80 = True
+
+    return {
+        "rule_out": best_t_clinical,
+        "high_recall": best_t_clinical,
+        "double_read": best_t_clinical,
+        "balanced": best_t_bal_acc,
+        "rule_in": 0.5,
+    }
+
+
+def run_calibration(
+    model: nn.Module,
+    cal_loader,
+    val_loader,
+    device: torch.device,
+    mode: str,
+) -> tuple[float, torch.Tensor | None, dict[str, float]]:
+    linear, _ = model_head(model)
+    logits, labels = collect_logits_labels(model, cal_loader, device)
+
+    if mode == "none":
+        temperature = 1.0
+        bias = None
+    elif mode == "temperature_only":
+        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
+        optimizer = optim.LBFGS([temp_param], lr=0.01, max_iter=50)
+
+        def closure():
+            optimizer.zero_grad()
+            loss = F.cross_entropy(logits / temp_param.clamp_min(0.1), labels)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        temperature = max(0.1, float(temp_param.detach().item()))
+        bias = None
+    elif mode == "bias_temperature":
+        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
+        bias_param = nn.Parameter(torch.zeros(linear.out_features, device=device))
+        optimizer = optim.LBFGS([temp_param, bias_param], lr=0.01, max_iter=50)
+
+        def closure():
+            optimizer.zero_grad()
+            loss = F.cross_entropy(logits / temp_param.clamp_min(0.1) + bias_param, labels)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        temperature = max(0.1, float(temp_param.detach().item()))
+        bias = bias_param.detach()
+    else:
+        raise ValueError(f"Unknown calibration_mode: {mode}")
+
+    thresholds = optimize_thresholds(model, val_loader, device, temperature, bias)
+    print(f"[CAL] mode={mode} | T={temperature:.4f} | bias={None if bias is None else bias.detach().cpu().numpy()} | thresholds={thresholds}")
+    return temperature, bias, thresholds
+
+
+@torch.no_grad()
+def quality_gate_report(decision_support: AdaptiveThresholdDecisionSupport, test_loader, device: torch.device) -> dict[str, float]:
+    targets_all = []
+    decisions_all = []
+    ua_all = []
+    for inputs, targets in test_loader:
+        final_decision, _, _, u_a = decision_support(inputs.to(device), mode="balanced", quality_gated=True)
+        targets_all.append(targets.numpy())
+        decisions_all.append(final_decision.cpu().numpy())
+        ua_all.append(u_a.squeeze(-1).cpu().numpy())
+
+    y_true = np.concatenate(targets_all)
+    decisions = np.concatenate(decisions_all)
+    u_a = np.concatenate(ua_all)
+    accepted = decisions != 3
+    discarded = decisions == 3
+    report = {
+        "quality_gate_accepted_coverage": float(accepted.mean()) if len(accepted) else 0.0,
+        "quality_gate_discard_rate": float(discarded.mean()) if len(discarded) else 0.0,
+        "quality_gate_mean_ua_accepted": float(u_a[accepted].mean()) if accepted.any() else 0.0,
+        "quality_gate_mean_ua_discarded": float(u_a[discarded].mean()) if discarded.any() else 0.0,
+    }
+    if accepted.any():
+        valid_pred = decisions[accepted]
+        valid_true = y_true[accepted]
+        tn, fp, fn, tp = confusion_matrix(valid_true, valid_pred, labels=[0, 1]).ravel()
+        report.update({
+            "quality_gate_sensitivity": float(tp / (tp + fn + 1e-8)),
+            "quality_gate_specificity": float(tn / (tn + fp + 1e-8)),
+            "quality_gate_error_rate": float((valid_pred != valid_true).mean()),
+        })
+    return report
 
 
 def make_loss(spec: ExperimentSpec, num_classes: int, class_weights: torch.Tensor, total_epochs: int, device: torch.device) -> nn.Module:
@@ -486,6 +674,7 @@ def train_guds(
         disable_efl=spec.disable_efl,
         disable_anticryst=spec.disable_anticryst,
         use_anticryst=not spec.disable_anticryst,
+        disable_topology_cache=spec.disable_topology_cache,
     )
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args)
     history = []
@@ -496,10 +685,10 @@ def train_guds(
     return history
 
 
-def run_one(spec: ExperimentSpec, args: argparse.Namespace) -> dict:
-    seed_everything(args.seed)
+def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
+    seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
-    run_dir = output_root() / spec.name
+    run_dir = output_root() / spec.name / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n{'=' * 90}\nRunning {spec.name}: {spec.description}\nOutput: {run_dir}\nDevice: {device}\n{'=' * 90}")
 
@@ -507,6 +696,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace) -> dict:
         batch_size=args.batch_size,
         test_ratio=args.test_ratio,
         subsample_ratio=args.subsample_ratio,
+        seed=seed,
     )
     train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = loaders
 
@@ -534,7 +724,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace) -> dict:
             args.lr,
         )
 
-    temperature, bias, thresholds = calibrate_temperature(model, cal_loader, device)
+    temperature, bias, thresholds = run_calibration(model, cal_loader, val_loader, device, spec.calibration_mode)
     decision_support = AdaptiveThresholdDecisionSupport(
         model,
         is_resnet=True,
@@ -545,6 +735,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace) -> dict:
         train_class_prior=p_train,
     )
     evaluate_adaptive_modes(decision_support, test_loader, device)
+    quality_metrics = quality_gate_report(decision_support, test_loader, device)
     decision_support.restore_model()
 
     if hasattr(model.fc[1], "logit_adjustment"):
@@ -566,7 +757,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace) -> dict:
 
     result = {
         "experiment": asdict(spec),
-        "seed": args.seed,
+        "seed": seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "temperature": temperature,
@@ -576,10 +767,12 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace) -> dict:
         "p_train": p_train,
         "history": history,
         "metrics": metrics,
+        "quality_gate": quality_metrics,
     }
     (run_dir / "run_config.json").write_text(json.dumps(json_safe(asdict(spec)), indent=2), encoding="utf-8")
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
-    torch.save(model.state_dict(), run_dir / "model_state.pth")
+    if not args.no_save_model:
+        torch.save(model.state_dict(), run_dir / "model_state.pth")
     print(f"[DONE] Saved metrics and model state to {run_dir}")
     return result
 
@@ -599,16 +792,20 @@ def main() -> int:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", type=int, nargs="+", help="Run all selected experiments for these seeds.")
     parser.add_argument("--test_ratio", type=float, default=0.20)
     parser.add_argument("--subsample_ratio", type=int, default=20)
     parser.add_argument("--no_pretrained", action="store_true")
+    parser.add_argument("--no_save_model", action="store_true")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
     output_root().mkdir(parents=True, exist_ok=True)
     all_results = []
-    for spec in selected_experiments(args):
-        all_results.append(run_one(spec, args))
+    seeds = args.seeds if args.seeds else [args.seed]
+    for seed in seeds:
+        for spec in selected_experiments(args):
+            all_results.append(run_one(spec, args, seed))
 
     summary_path = output_root() / "isic_summary.json"
     summary_path.write_text(json.dumps(json_safe(all_results), indent=2), encoding="utf-8")

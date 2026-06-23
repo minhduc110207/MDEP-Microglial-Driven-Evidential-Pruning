@@ -90,7 +90,7 @@ def _stratified_subsets(dataset, labels, seed=42):
     return Subset(dataset, train_idx), Subset(dataset, val_idx), Subset(dataset, cal_idx), Subset(dataset, test_idx)
 
 
-def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32):
+def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32, seed=42):
     """
     Simulates MVTec AD dataset loading for Image-Level Classification.
     Normal images = Class 0 (Majority), Defective images = Class 1 (Minority)
@@ -112,7 +112,7 @@ def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32):
             print(f"✅ Found real MVTec category at: {category_dir}")
             print(f"📊 Samples: {len(samples)} | normal={labels.count(0)} | defect={labels.count(1)}")
             dataset = MVTecImageLevelDataset(samples, transform=transform)
-            train_ds, val_ds, cal_ds, test_ds = _stratified_subsets(dataset, labels)
+            train_ds, val_ds, cal_ds, test_ds = _stratified_subsets(dataset, labels, seed=seed)
             workers = 2 if os.name != 'nt' else 0
             train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=workers)
             val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=workers)
@@ -143,7 +143,7 @@ def get_mvtec_ad_classification_dataloaders(category="hazelnut", batch_size=32):
     
     train_ds, val_ds, cal_ds, test_ds = random_split(
         dataset, [train_len, val_len, cal_len, test_len],
-        generator=torch.Generator().manual_seed(42)
+        generator=torch.Generator().manual_seed(seed)
     )
     
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
@@ -162,6 +162,7 @@ if __name__ == "__main__":
     parser.add_argument("--category", type=str, default="hazelnut")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--seed", type=int, default=42)
     
     # GUDS-EDL Ablation Flags
     parser.add_argument('--disable_pruner', action='store_true')
@@ -180,7 +181,7 @@ if __name__ == "__main__":
     print(f"Starting GUDS-EDL on MVTec AD ({args.category})")
     print(f"⚙️ Ablations: {vars(args)}")
     
-    train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train = get_mvtec_ad_classification_dataloaders(args.category, args.batch_size)
+    train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train = get_mvtec_ad_classification_dataloaders(args.category, args.batch_size, seed=args.seed)
     
     # 1. Initialize Binary Classification Model (ResNet-18)
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)

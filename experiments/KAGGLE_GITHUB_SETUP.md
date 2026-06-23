@@ -62,7 +62,7 @@ Run all ISIC baselines and ablations described by the paper-facing experiment
 map:
 
 ```bash
-!python experiments/run_kaggle_paper_suite.py --isic_suite all
+!python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
 The outputs are written to:
@@ -73,23 +73,37 @@ paper_experiment_outputs/
 
 ## 6. Optional Protocols
 
-Run the planned CIFAR-100-LT checks:
+Run the complete planned CIFAR-100-LT baseline suite:
 
 ```bash
-!python experiments/cifar_lt_runner.py --imbalance_ratio 10 --epochs 100
-!python experiments/cifar_lt_runner.py --imbalance_ratio 50 --epochs 100
-!python experiments/cifar_lt_runner.py --imbalance_ratio 100 --epochs 100
+!python experiments/generalization_paper_suite.py --benchmark cifar --ratio 10 --epochs 100 --seeds 42 43 44
+!python experiments/generalization_paper_suite.py --benchmark cifar --ratio 50 --epochs 100 --seeds 42 43 44
+!python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
 ```
 
-Run MVTec AD after attaching a real MVTec dataset:
+Run the complete MVTec AD baseline suite after attaching a real MVTec dataset:
 
 ```bash
-!python experiments/mvtec_ad_runner.py --category hazelnut --epochs 20
-!python experiments/mvtec_ad_runner.py --category bottle --epochs 20
+!python experiments/generalization_paper_suite.py --benchmark mvtec --category hazelnut --epochs 20 --seeds 42 43 44
+!python experiments/generalization_paper_suite.py --benchmark mvtec --category bottle --epochs 20 --seeds 42 43 44
 ```
 
 If no real MVTec category is found, the runner falls back to dummy tensors and
 the result should be treated only as a pipeline smoke test.
+
+Run hardware profiling and aggregate all seed results:
+
+```bash
+!python experiments/hardware_profile.py
+!python experiments/summarize_results.py
+```
+
+The optional additional-backbone protocol is heavy and should be run in a
+separate notebook/session:
+
+```bash
+!python experiments/backbone_generalization_runner.py --backbones resnet18 convnext_tiny swin_t --epochs 40 --seeds 42 43 44
+```
 
 ## 7. Updating Code During a Kaggle Run
 

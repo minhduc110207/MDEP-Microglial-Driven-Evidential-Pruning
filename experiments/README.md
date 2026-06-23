@@ -43,7 +43,7 @@ python experiments/run_kaggle_paper_suite.py --smoke
 For the full paper-facing run:
 
 ```bash
-python experiments/run_kaggle_paper_suite.py --isic_suite all
+python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
 If the GitHub repository is private, add a Kaggle secret named `GITHUB_TOKEN`
@@ -62,7 +62,7 @@ See `experiments/KAGGLE_GITHUB_SETUP.md` for the complete Kaggle setup order.
 After cloning or copying the repository to `/kaggle/working`, run:
 
 ```bash
-python experiments/run_kaggle_paper_suite.py --isic_suite all
+python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
 Before spending GPU hours, run a one-epoch smoke test:
@@ -77,6 +77,13 @@ The suite writes logs, checkpoints, and metrics under:
 paper_experiment_outputs/
 ```
 
+By default, a full run uses seeds `42 43 44` for reproducibility. A smoke test
+uses only seed `42`. To run a cheaper first full pass, explicitly pass one seed:
+
+```bash
+python experiments/run_kaggle_paper_suite.py --isic_suite all --seeds 42 --no_save_model --keep_going
+```
+
 For ISIC-only table reproduction:
 
 ```bash
@@ -87,6 +94,20 @@ For all ISIC baselines and ablations:
 
 ```bash
 python experiments/isic_paper_experiments.py --suite all
+```
+
+The complete planned CIFAR/MVTec baseline suites are run through:
+
+```bash
+python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
+python experiments/generalization_paper_suite.py --benchmark mvtec --category hazelnut --epochs 20 --seeds 42 43 44
+```
+
+Hardware profiling and summary aggregation:
+
+```bash
+python experiments/hardware_profile.py
+python experiments/summarize_results.py
 ```
 
 ### Automated Batch Mode (Recommended)

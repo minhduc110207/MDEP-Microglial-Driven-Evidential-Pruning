@@ -3,9 +3,11 @@ Kaggle all-in-one paper experiment launcher.
 
 This script runs the experiment groups referenced by main_text.tex:
 
-1. ISIC 2024 main-table baselines and GUDS-EDL ablations.
-2. CIFAR-100-LT planned generalization ratios 1:10, 1:50, 1:100.
-3. MVTec AD image-level protocol runner for selected categories.
+1. ISIC 2024 main-table baselines, GUDS-EDL ablations, calibration ablations,
+   topology-cache ablation, and quality-gated reports.
+2. CIFAR-100-LT planned generalization baselines for ratios 1:10, 1:50, 1:100.
+3. MVTec AD image-level planned generalization baselines for selected categories.
+4. Hardware profiling for dense/static-2:4/GUDS structural efficiency.
 
 Recommended Kaggle usage:
 
@@ -77,19 +79,24 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
 
     commands: list[CommandSpec] = []
     if not args.skip_isic:
+        isic_command = [
+            sys.executable,
+            str(REPO_ROOT / "experiments" / "isic_paper_experiments.py"),
+            "--suite",
+            args.isic_suite,
+            "--epochs",
+            str(epochs),
+            "--batch_size",
+            str(batch_size),
+            "--seeds",
+            *[str(seed) for seed in args.seeds],
+        ]
+        if args.no_save_model:
+            isic_command.append("--no_save_model")
         commands.append(
             CommandSpec(
                 name=f"isic_{args.isic_suite}",
-                command=[
-                    sys.executable,
-                    str(REPO_ROOT / "experiments" / "isic_paper_experiments.py"),
-                    "--suite",
-                    args.isic_suite,
-                    "--epochs",
-                    str(epochs),
-                    "--batch_size",
-                    str(batch_size),
-                ],
+                command=isic_command,
             )
         )
 
@@ -100,13 +107,17 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
                     name=f"cifar100lt_ir{ratio}",
                     command=[
                         sys.executable,
-                        str(REPO_ROOT / "experiments" / "cifar_lt_runner.py"),
-                        "--imbalance_ratio",
+                        str(REPO_ROOT / "experiments" / "generalization_paper_suite.py"),
+                        "--benchmark",
+                        "cifar",
+                        "--ratio",
                         str(ratio),
                         "--epochs",
                         str(args.cifar_epochs if not args.smoke else 1),
                         "--batch_size",
                         str(batch_size),
+                        "--seeds",
+                        *[str(seed) for seed in args.seeds],
                     ],
                 )
             )
@@ -118,16 +129,62 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
                     name=f"mvtec_{category}",
                     command=[
                         sys.executable,
-                        str(REPO_ROOT / "experiments" / "mvtec_ad_runner.py"),
+                        str(REPO_ROOT / "experiments" / "generalization_paper_suite.py"),
+                        "--benchmark",
+                        "mvtec",
                         "--category",
                         category,
                         "--epochs",
                         str(args.mvtec_epochs if not args.smoke else 1),
                         "--batch_size",
                         str(min(batch_size, 16)),
+                        "--seeds",
+                        *[str(seed) for seed in args.seeds],
                     ],
                 )
             )
+    if not args.skip_hardware:
+        commands.append(
+            CommandSpec(
+                name="hardware_profile",
+                command=[
+                    sys.executable,
+                    str(REPO_ROOT / "experiments" / "hardware_profile.py"),
+                    "--batch_size",
+                    str(min(batch_size, 16) if args.smoke else batch_size),
+                    "--iters",
+                    str(5 if args.smoke else args.hardware_iters),
+                    "--warmup",
+                    str(2 if args.smoke else args.hardware_warmup),
+                ],
+            )
+        )
+    if args.include_backbones:
+        commands.append(
+            CommandSpec(
+                name="backbone_generalization",
+                command=[
+                    sys.executable,
+                    str(REPO_ROOT / "experiments" / "backbone_generalization_runner.py"),
+                    "--epochs",
+                    str(1 if args.smoke else args.backbone_epochs),
+                    "--batch_size",
+                    str(min(batch_size, 8)),
+                    "--seeds",
+                    *[str(seed) for seed in args.seeds],
+                ],
+            )
+        )
+    if not args.skip_summary:
+        commands.append(
+            CommandSpec(
+                name="summarize_results",
+                command=[
+                    sys.executable,
+                    str(REPO_ROOT / "experiments" / "summarize_results.py"),
+                ],
+            )
+        )
     return commands
 
 
@@ -138,14 +195,24 @@ def main() -> int:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--cifar_epochs", type=int, default=100)
     parser.add_argument("--mvtec_epochs", type=int, default=20)
+    parser.add_argument("--backbone_epochs", type=int, default=40)
+    parser.add_argument("--hardware_iters", type=int, default=50)
+    parser.add_argument("--hardware_warmup", type=int, default=10)
     parser.add_argument("--cifar_ratios", type=int, nargs="+", default=[10, 50, 100])
     parser.add_argument("--mvtec_categories", nargs="+", default=["hazelnut", "bottle"])
+    parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--skip_isic", action="store_true")
     parser.add_argument("--skip_cifar", action="store_true")
     parser.add_argument("--skip_mvtec", action="store_true")
+    parser.add_argument("--skip_hardware", action="store_true")
+    parser.add_argument("--skip_summary", action="store_true")
+    parser.add_argument("--include_backbones", action="store_true", help="Also run the heavyweight ConvNeXt/Swin backbone protocol.")
+    parser.add_argument("--no_save_model", action="store_true", help="Avoid saving every model checkpoint in large multi-seed sweeps.")
     parser.add_argument("--smoke", action="store_true", help="Run a 1-epoch smoke test with small batches.")
     parser.add_argument("--keep_going", action="store_true", help="Continue after a failed command.")
     args = parser.parse_args()
+    if args.seeds is None:
+        args.seeds = [42] if args.smoke else [42, 43, 44]
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     commands = build_commands(args)
