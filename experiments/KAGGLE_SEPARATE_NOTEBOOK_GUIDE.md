@@ -39,12 +39,6 @@ experiments/mvtec_patchcore_reference.py
 experiments/mvtec_simplenet_reference.py
 experiments/run_kaggle_paper_suite.py
 experiments/run_local_full_experiments.py
-```
-
-These helper files are already tracked in the repo and should stay on GitHub.
-If your remote branch does not have them, push them too:
-
-```text
 experiments/backbone_generalization_runner.py
 experiments/hardware_profile.py
 experiments/run_kaggle_all_isic.py
@@ -94,6 +88,10 @@ git add experiments/mvtec_patchcore_reference.py
 git add experiments/mvtec_simplenet_reference.py
 git add experiments/run_kaggle_paper_suite.py
 git add experiments/run_local_full_experiments.py
+git add experiments/backbone_generalization_runner.py
+git add experiments/hardware_profile.py
+git add experiments/run_kaggle_all_isic.py
+git add experiments/summarize_results.py
 git commit -m "Update GUDS-EDL theory and paper experiment suite"
 git push
 ```
@@ -188,6 +186,7 @@ run([
 
 os.chdir(REPO_DIR)
 print("Repo:", REPO_DIR)
+run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_DIR)
 ```
 
 Quick dataset check cell:
@@ -215,6 +214,23 @@ Use separate Kaggle notebooks/jobs in this order:
 11. Hardware profiling.
 12. Optional backbone generalization.
 13. Summary aggregation.
+
+All-in-one alternative for a long Kaggle job:
+
+```python
+!python experiments/run_kaggle_paper_suite.py \
+  --isic_suite all \
+  --cifar_ratios 10 50 100 \
+  --mvtec_categories hazelnut bottle \
+  --seeds 42 43 44 \
+  --no_save_model \
+  --keep_going
+```
+
+This currently runs ISIC, CIFAR-100-LT, MVTec supervised classifier,
+PatchCore-style MVTec reference, SimpleNet-style MVTec reference, hardware
+profiling, and summary aggregation. Add `--include_backbones` only for the
+heavier ResNet/ConvNeXt/Swin protocol.
 
 For final paper tables, prefer 3 seeds:
 

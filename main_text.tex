@@ -84,14 +84,10 @@
 \begin{document}
 
 \begin{abstract}
-Extreme imbalanced classification appears across many real-world domains, including industrial defect detection, fraud detection, autonomous driving edge-case recognition, and safety-critical medical screening. Standard dense neural networks often overfit majority classes and produce overconfident predictions on rare classes, while conventional pruning techniques ignore uncertainty signals. 
-
-We propose \textbf{GUDS-EDL}, a framework for uncertainty-guided sparse evidential learning under extreme class imbalance. GUDS-EDL combines Dirichlet evidential learning with NVIDIA 2:4 structured sparsity over eligible complete blocks. Its topology update is implemented as two complementary first-order saliency modules: an uncertainty-guided pruner that down-ranks active connections whose removal is locally predicted to reduce an evidential risk ratio, and an evidence-seeking regrower that up-ranks candidate connections with high local influence on evidential growth signals. A topology cache reduces mask update overhead, and an imbalance-aware evidential objective stabilizes sparse training under severe imbalance.
-
-We instantiate GUDS-EDL on ISIC 2024 as a high-stakes extreme-imbalance case study and outline a multi-benchmark protocol for future validation on controlled long-tailed recognition and industrial anomaly detection. The current empirical evidence should therefore be interpreted as an initial case study rather than a domain-general deployment claim.
+Extreme imbalanced classification requires rare-event sensitivity, calibrated uncertainty, and efficient deployment. We propose \textbf{GUDS-EDL}, an uncertainty-guided sparse evidential learning framework that couples Dirichlet-derived structural signals with NVIDIA 2:4 sparsity over eligible complete blocks. GUDS-EDL updates latent topology scores through two first-order modules: an uncertainty-guided pruner that down-ranks active connections whose removal is locally predicted to reduce an evidential risk ratio, and an evidence-seeking regrower that up-ranks candidate connections with high local influence on evidential growth. An imbalance-aware evidential objective with capped class-dependent modulation supports rare-event learning without changing the Dirichlet prior. We instantiate the method on ISIC 2024 as a high-stakes case study and keep the empirical scope conservative: the current claims are limited to this case study and implemented ablations, while broader long-tailed, anomaly-detection, and hardware-kernel validation remain explicit protocols.
 \end{abstract}
 
-\section{Introduction and Research Background}\label{sec:intro}
+\section{Introduction}\label{sec:intro}
 
 The deployment of large-scale deep learning models in real-world systems often faces extreme class imbalance, where rare but high-cost events are vastly underrepresented. This phenomenon, known as the long-tailed distribution, occurs naturally across critical domains including industrial defect detection, financial fraud, autonomous driving edge cases, safety violations, and medical abnormalities. In these high-stakes regimes, models must be accurate on rare classes, uncertainty-aware when evidence is weak, calibration-conscious at decision time, and efficient enough for low-latency deployment.
 
@@ -101,22 +97,22 @@ To bridge this gap, we introduce \textbf{GUDS-EDL}, a framework that integrates 
 
 \paragraph{Main Contributions.} We present a framework for using Dirichlet-derived structural signals to guide NVIDIA 2:4 structured dynamic sparse training under extreme class imbalance. Specifically, our primary contributions are:
 \begin{itemize}
-    \item \textbf{EDL Contribution:} An imbalance-aware evidential objective incorporating dampened class weights and a capped asymmetric KL multiplier, aimed at preserving rare-event sensitivity while avoiding uncontrolled KL pressure.
-    \item \textbf{DST Contribution:} A rank-normalized first-order pruning/regrowth update under valid-block 2:4 structured sparsity, driven by Dirichlet vacuity, expected categorical entropy, and evidential growth signals.
-    \item \textbf{Real-World Case Study:} We formulate a multi-benchmark evaluation protocol for long-tailed recognition and industrial anomaly detection, and currently instantiate the framework on the ISIC 2024 cohort as a high-stakes extreme-imbalance case study for adaptive operating threshold configurations.
+    \item \textbf{Imbalance-aware evidential objective:} We combine dampened class weights, stop-gradient focal modulation, and a capped asymmetric KL multiplier to target rare-event sensitivity without uncontrolled KL pressure.
+    \item \textbf{Uncertainty-guided 2:4 topology adaptation:} We introduce rank-normalized first-order pruning and regrowth signals driven by Dirichlet vacuity, expected entropy, and evidence-growth proxies under valid-block 2:4 sparsity.
+    \item \textbf{Conservative high-stakes case study:} We instantiate GUDS-EDL on ISIC 2024 with calibration-aware operating points and explicitly separate reported evidence from planned broader validation.
 \end{itemize}
 
 \section{Related Work}\label{sec:related}
 
-\paragraph{Long-Tailed and Extreme Imbalanced Learning.} Long-tailed recognition has been extensively studied through re-sampling, re-weighting, margin adjustment, classifier decoupling, calibration-aware smoothing, and contrastive learning. Class-Balanced Loss~\cite{cui2019class} reweights examples according to the effective number of samples, while LDAM-DRW~\cite{cao2019learning} introduces label-distribution-aware margins with deferred re-weighting to improve tail-class decision boundaries. Logit Adjustment~\cite{menon2021long} and Balanced Softmax~\cite{ren2020balanced} reinterpret long-tailed learning as a label-prior shift problem and modify logits or softmax normalization accordingly. Decoupled training~\cite{kang2019decoupling} shows that representation learning and classifier balancing can be separated, and MiSLAS~\cite{zhong2021improving} improves long-tailed calibration through label-aware smoothing and shifted batch normalization. Architectures such as BBN~\cite{zhou2020bbn} and contrastive objectives such as PaCo~\cite{cui2021parametric} further improve head-tail trade-offs. Unlike these methods, GUDS-EDL does not only rebalance the classification loss; it uses evidential uncertainty signals to adapt the sparse topology itself, targeting representation-deficient regions under extreme imbalance.
+\paragraph{Long-Tailed and Extreme Imbalanced Learning.} Long-tailed recognition is commonly addressed through re-sampling, re-weighting, margin adjustment, classifier decoupling, calibration-aware smoothing, and contrastive learning. Representative methods include Class-Balanced Loss~\cite{cui2019class}, LDAM-DRW~\cite{cao2019learning}, Logit Adjustment~\cite{menon2021long}, Balanced Softmax~\cite{ren2020balanced}, decoupled classifier training~\cite{kang2019decoupling}, MiSLAS~\cite{zhong2021improving}, BBN~\cite{zhou2020bbn}, and PaCo~\cite{cui2021parametric}. These methods improve loss, logits, or classifier balance; GUDS-EDL instead uses evidential structural signals to adapt sparse topology under imbalance.
 
-\paragraph{Evidential and Dirichlet-Based Uncertainty Estimation.} Evidential Deep Learning (EDL)~\cite{sensoy2018evidential} replaces point-estimate softmax confidence with a Dirichlet distribution over class probabilities, enabling single-forward-pass uncertainty estimation. Related Dirichlet-prior methods, such as Prior Networks~\cite{malinin2018predictive} and Posterior Networks~\cite{charpentier2020posterior}, further model predictive distributions for OOD detection and calibration under dataset shift. Recent EDL variants improve the reliability of evidence learning: Fisher Information-based EDL~\cite{deng2023fisher} reweights evidential objectives using sample informativeness, R-EDL~\cite{chen2023redl} relaxes nonessential subjective-logic assumptions, and Flexible EDL~\cite{yoon2025flexible} replaces the fixed Dirichlet assumption with a more expressive flexible Dirichlet family. Recent advances further extend these concepts: ANEDL~\cite{yu2024anedl} explores open-set semi-supervised evidential learning, while Evidence Contraction~\cite{wu2024evidence} analyzes activation constraints in deep evidential regression. However, recent critiques~\cite{shen2024mirage} argue that EDL uncertainties should not be interpreted as exact Bayesian posterior uncertainty. Following this view, GUDS-EDL uses Dirichlet vacuity and expected categorical entropy as practical structural adaptation signals rather than as calibrated Bayesian uncertainty bounds.
+\paragraph{Evidential and Dirichlet-Based Uncertainty Estimation.} Evidential Deep Learning (EDL)~\cite{sensoy2018evidential} replaces point-estimate softmax confidence with a Dirichlet distribution over class probabilities. Related work includes Prior Networks~\cite{malinin2018predictive}, Posterior Networks~\cite{charpentier2020posterior}, Fisher EDL~\cite{deng2023fisher}, R-EDL~\cite{chen2023redl}, Re-EDL~\cite{chen2024reedl}, Flexible EDL~\cite{yoon2025flexible}, ANEDL~\cite{yu2024anedl}, and Evidence Contraction~\cite{wu2024evidence}. Recent critiques~\cite{shen2024mirage} caution against interpreting EDL uncertainty as exact Bayesian posterior uncertainty. Accordingly, GUDS-EDL uses Dirichlet vacuity and expected entropy as structural adaptation signals, not as Bayesian uncertainty guarantees.
 
-\paragraph{Calibration, Selective Prediction, and Failure Detection.} Reliable deployment under rare-event imbalance requires not only high minority recall but also calibrated confidence and the ability to abstain. Guo et al.~\cite{guo2017calibration} showed that modern neural networks are often miscalibrated and that temperature scaling is a strong post-hoc baseline. Selective classification~\cite{geifman2017selective,geifman2019selectivenet} formalizes abstention through the risk-coverage trade-off, allowing a model to reject uncertain samples in mission-critical applications. AURC~\cite{ding2020revisiting} is widely used to summarize selective prediction performance, although recent studies caution that aggregate risk-coverage metrics can hide important working-point behavior~\cite{jaeger2023call,traub2024overcoming}. Accordingly, GUDS-EDL reports both calibration metrics and operating-point metrics such as high-recall specificity and quality-gated coverage-risk behavior.
+\paragraph{Calibration, Selective Prediction, and Failure Detection.} Rare-event deployment requires calibrated confidence, high-recall operating points, and selective abstention. Temperature scaling~\cite{guo2017calibration}, selective classification~\cite{geifman2017selective,geifman2019selectivenet}, AURC~\cite{ding2020revisiting}, and recent evaluation critiques~\cite{jaeger2023call,traub2024overcoming} motivate reporting calibration together with working-point metrics. GUDS-EDL therefore reports ECE, minority calibration, high-recall specificity, and risk-coverage behavior.
 
-\paragraph{Dynamic Sparse Training and Structured Sparsity.} Classical pruning pipelines~\cite{han2016deep,frankle2019lottery} compress dense networks after training, whereas dynamic sparse training maintains sparse connectivity throughout optimization. First-order pruning methods such as SNIP~\cite{lee2019snip} motivate connection sensitivity as a structural saliency signal. SET~\cite{mocanu2018scalable} evolves a sparse topology during training, SNFS~\cite{dettmers2019sparse} uses sparse momentum to grow useful connections, and RigL~\cite{evci2020rigging} updates sparse topology through magnitude-based pruning and gradient-based regrowth under a fixed parameter budget. Recent advances include PFFDST~\cite{li2025pffdst}, which explores parameter-freezing-based federated dynamic sparse training. However, most centralized DST methods focus on unstructured sparsity, which is difficult to accelerate on modern hardware. Structured DST methods such as SRigL~\cite{lasby2023srigl} move toward hardware-compatible N:M sparsity patterns, while NVIDIA Sparse Tensor Cores motivate strict 2:4 sparsity for efficient deployment~\cite{mishra2021accelerating}. GUDS-EDL differs from these methods by making topology evolution uncertainty-aware: the 2:4 mask is refreshed from rank-normalized first-order pruning and regrowth saliency signals that incorporate Dirichlet vacuity and expected-entropy risk, rather than from weight magnitude or task gradient alone.
+\paragraph{Dynamic Sparse Training and Structured Sparsity.} Dynamic sparse training maintains sparse connectivity during optimization rather than compressing after training~\cite{han2016deep,frankle2019lottery}. SNIP~\cite{lee2019snip}, SET~\cite{mocanu2018scalable}, SNFS~\cite{dettmers2019sparse}, RigL~\cite{evci2020rigging}, PFFDST~\cite{li2025pffdst}, and SRigL~\cite{lasby2023srigl} motivate sensitivity, regrowth, and structured sparsity, while NVIDIA Sparse Tensor Cores motivate 2:4 deployment constraints~\cite{mishra2021accelerating}. GUDS-EDL differs by refreshing the 2:4 mask from Dirichlet-derived pruning and regrowth saliency rather than from magnitude or task gradient alone.
 
-\paragraph{Rare-Event Benchmarks and High-Stakes Case Studies.} Long-tailed recognition is commonly evaluated on controlled CIFAR-LT variants and large-scale benchmarks such as iNaturalist~\cite{liu2019large}. Industrial anomaly detection benchmarks such as MVTec AD~\cite{bergmann2019mvtec} provide real-world rare-event inspection settings, with normal-only reference methods such as PatchCore~\cite{roth2022total} and SimpleNet~\cite{liu2023simplenet} representing strong image-level anomaly-detection baselines. ISIC 2024 provides a high-stakes medical rare-event case study based on 3D total body photography lesion crops. In the current work, we report an initial ISIC 2024 case study and define CIFAR-100-LT and MVTec AD as planned benchmarks for future validation. This distinction avoids conflating framework generality with completed multi-domain empirical evidence.
+\paragraph{Rare-Event Benchmarks and High-Stakes Case Studies.} CIFAR-LT, iNaturalist~\cite{liu2019large}, and MVTec AD~\cite{bergmann2019mvtec} are common rare-event or long-tailed evaluation surfaces, with PatchCore~\cite{roth2022total} and SimpleNet~\cite{liu2023simplenet} as strong anomaly-detection references. This paper reports ISIC 2024 as an initial high-stakes case study and treats CIFAR-100-LT and MVTec AD as planned validation protocols rather than completed evidence of domain generality.
 
 \section{Mathematical Foundations: Subjective Logic and Dirichlet Distribution}\label{sec:math}
 
@@ -155,13 +151,13 @@ The effects of extreme class imbalance are handled via Evidential Focal Loss (wh
 \subsection{Decomposition of Predictive Uncertainty}\label{subsec:uncertainties}
 Under Subjective Logic, predictive uncertainty can be decomposed into complementary components that capture different aspects of the predicted distribution. Following recent critiques of Evidential Deep Learning \cite{shen2024mirage}, we explicitly state that we do not claim true Bayesian posterior uncertainty. Instead, we define mathematically well-formed uncertainty proxies that are used as structural adaptation signals.
 
-\paragraph{Dirichlet Vacuity / Evidence-Based Uncertainty ($u_e$):} Models the network's lack of knowledge (e.g., on OOD or rare data). Defined as the vacant belief mass in Subjective Logic:
+\paragraph{Dirichlet Vacuity / Evidence-Based Uncertainty ($u_e$):} Serves as a low-evidence structural proxy defined as the vacant belief mass in Subjective Logic:
 \begin{equation}\label{eq:u_e}
     u_e = \frac{K}{S} = \frac{K}{\sum_{c=1}^K \alpha_c}
 \end{equation}
 For finite logits under Eq.~\ref{eq:softplus}, $u_e \in (0, 1)$, with supremum $1$ approached in the zero-evidence limit. We utilize this vacuity metric as a structural adaptation signal rather than a Bayesian uncertainty bound.
 
-\paragraph{Entropy-Based Ambiguity Proxy ($u_a$):} Used as a data-ambiguity/noise proxy (similar to aleatoric uncertainty), this measures the expected Shannon entropy of the multinomial distribution under the Dirichlet conjugate prior \cite{malinin2018predictive}:
+\paragraph{Entropy-Based Ambiguity Proxy ($u_a$):} Used as a Dirichlet expected-entropy structural proxy, this measures the expected Shannon entropy of the multinomial distribution under the Dirichlet conjugate prior \cite{malinin2018predictive}:
 \begin{equation}\label{eq:u_a}
     u_a = \sum_{c=1}^K \frac{\alpha_c}{S} \left[\psi(S + 1) - \psi(\alpha_c + 1)\right]
 \end{equation}
@@ -179,6 +175,8 @@ The quantities $u_e$ and $u_a$ are therefore valid bounded/non-negative signals 
 \section{GUDS-EDL Framework}\label{sec:methodology}
 
 \textbf{Terminology}: Earlier drafts used biological mnemonics for topology evolution. In this paper, we use the technical terms \textbf{Uncertainty-Guided Pruner} and \textbf{Evidence-Seeking Regrower}; any biological analogy is non-technical.
+
+GUDS-EDL separates training into two coupled loops. The prediction loop uses a cached 2:4 mask $\bm{M}$, performs ordinary mini-batch optimization of the active weights $\bm{W}$, and evaluates the evidential objective. The structural loop runs at refresh points on an amortized proxy batch: it computes $u_e,u_a$, forms the pruning risk ratio $R$ and the regrowth objective $L_{\text{grow}}$, updates latent scores $\bm{V}$ through rank-normalized first-order saliency, and refreshes $\bm{M}$ by blockwise Top-2 selection. This separation keeps the main training path simple while allowing dormant candidates to receive structural saliency estimates during refresh.
 
 
 \begin{figure}[t]
@@ -310,7 +308,7 @@ Removing an active connection has first-order effect $\Delta R\approx -w_{ij}\pa
     \qquad
     \pospart{x}=\max(x,0).
 \end{equation}
-Here $\operatorname{Rank}_{l}(\cdot)$ maps scores within layer $l$ to $[0,1]$ by empirical percentile rank over the trainable entries of the corresponding tensor. Ties are resolved by deterministic tensor ordering in the implementation, and nearly flat score tensors are assigned zero normalized rank before optional exploration. The positive-part operator is not a neural ReLU activation; it gates out connections whose first-order removal would increase the risk ratio.
+Here $\operatorname{Rank}_{l}(\cdot)$ maps scores within layer $l$ to $[0,1]$ by empirical percentile rank over the trainable entries of the corresponding tensor. Larger normalized rank means higher within-layer saliency; the transform preserves ordering but intentionally discards absolute scale and is not an optimality guarantee. Ties are resolved by deterministic tensor ordering in the implementation, and nearly flat score tensors are assigned zero normalized rank before optional exploration. The positive-part operator is not a neural ReLU activation; it gates out connections whose first-order removal would increase the risk ratio.
 \begin{equation}\label{eq:rank_def}
     \operatorname{Rank}_{l}(s_{ij})
     =
@@ -517,43 +515,16 @@ The theoretical statements above establish that the proposed structural update i
 
 \section{Experimental Setup}\label{sec:experiment}
 
-To evaluate GUDS-EDL, we formulate a multi-benchmark evaluation protocol covering controlled long-tailed recognition, industrial anomaly detection, and a high-stakes medical case study.
+\subsection{Evaluation Benchmark}
+The main paper reports a high-stakes ISIC 2024 case study. CIFAR-100-LT, MVTec AD, additional backbones, and hardware profiling are specified as validation protocols in Appendix~D and are not used to support domain-general claims in the main text.
 
-\subsection{Evaluation Benchmarks}
-\paragraph{Controlled Long-Tailed Recognition (CIFAR-100-LT).} To evaluate general long-tailed learning, we plan to use CIFAR-100-LT with varying imbalance profiles. We generate heavily skewed distributions with imbalance ratios (majority to minority) of 1:10, 1:50, and 1:100.
-
-\paragraph{Industrial Rare-Event Detection (MVTec AD).} To assess performance on rare anomalous events, we plan to use the MVTec AD benchmark \cite{bergmann2019mvtec}. We evaluate two complementary protocols: a supervised few-shot image-level rare-defect classification protocol (Normal vs. Defective) aligned with our evidential classifier, and normal-only anomaly-detection reference protocols based on PatchCore-style and SimpleNet-style image-level scoring.
-
-\paragraph{High-Stakes Case Study (ISIC 2024).} We instantiate GUDS-EDL on the ISIC 2024 Challenge dataset~\cite{isic2024} (3D-TBP images with 0.15\% minority prevalence). To prevent data leakage, we adopt a stratified 70/5/5/20 train/validation/calibration/test split grouped by patient\_id. The validation partition is utilized for decision threshold sweeps, the calibration partition is used for temperature and bias calibration, and the 20\% test partition acts as a local hold-out set for evaluating generalization. We apply ImageNet-1K normalization as a fixed preprocessing step across all splits.
+\paragraph{ISIC 2024 Case Study.} We instantiate GUDS-EDL on the ISIC 2024 Challenge dataset~\cite{isic2024} (3D-TBP images with 0.15\% minority prevalence). To prevent data leakage, we use a stratified 70/5/5/20 train/validation/calibration/test split grouped by patient\_id. The validation partition is used for decision threshold sweeps, the calibration partition for temperature and bias calibration, and the 20\% test partition for final local hold-out evaluation. All images use ImageNet-1K normalization.
 
 \subsection{Baselines and Backbones}
-\paragraph{Baselines.} The reported ISIC case-study tables focus on evidential baselines for which the same split, calibration protocol, and threshold sweep are available: Fisher EDL, Flexible EDL, R-EDL, and GUDS-EDL. The full experimental suite additionally defines long-tailed baselines (Standard Cross-Entropy, Focal Loss~\cite{lin2017focal}, Logit Adjustment~\cite{menon2021long}, Class-Balanced Loss, Balanced Softmax, LDAM-DRW, cRT-style classifier retraining, and a MiSLAS-style label-aware-smoothing plus classifier-retraining baseline), sparse baselines (Static 2:4 magnitude pruning and RigL-style 2:4 dynamic sparsity~\cite{evci2020rigging}), and MVTec reference methods (PatchCore-style and SimpleNet-style normal-only anomaly detectors). The latter are implemented as in-repository reference baselines under the shared evaluation protocol rather than as official external-code reproductions with full paper-specific hyperparameter searches. Results for the expanded suite should be reported before making SOTA-level claims beyond the evidential comparison.
+\paragraph{Baselines.} The reported ISIC tables compare evidential baselines for which the same split, calibration protocol, and threshold sweep are available: Fisher EDL, Flexible EDL, R-EDL, and GUDS-EDL. The implemented extended suite additionally includes long-tailed, sparse, and MVTec reference baselines, but those results are treated as appendix/supplementary validation until fully reported. We therefore do not make SOTA-level claims beyond the evidential comparison.
 
 \paragraph{Backbone Instantiation and Wrapping.}
-To demonstrate backbone-agnostic extensibility, we implement structural wrappers for both modern convolutional (ResNet-18, ConvNeXt-T) and transformer-based (Swin-T) architectures. The empirical results and case studies reported in this current work focus on the ResNet-18 instantiation. For ResNet-18, inside each residual block, all $3 \times 3$ convolutional layers (\texttt{conv1} and \texttt{conv2}) are replaced with custom sparse convolutional layers that support 2:4 masks generated from latent scores. The first convolutional layer of the network (\texttt{conv1}, a $7 \times 7$ spatial filter operating on raw input pixels) is kept dense. The structural proxy pass computes the risk-ratio gradient used by the pruner and the KL/evidence gradient used by the regrower. For diagnostics and optional anti-crystallization, we also summarize the activation gradient $\bm{g}_{\text{act}}^{(l)} = \frac{\partial \bar{u}_e}{\partial \bm{a}^{(l)}} \in \R^{B \times C_{\text{out}} \times H \times W}$ into a channel-wise uncertainty sensitivity:
-\begin{equation}\label{eq:conv_pooling_main}
-    u_{e,i}^{(\text{node})} = \frac{1}{B \cdot H \cdot W} \sum_{b=1}^B \sum_{y=1}^H \sum_{x=1}^W \left| g_{\text{act}, i}^{(l)}(b, y, x) \right|
-\end{equation}
-yielding a channel-wise vector $\bm{u}_e^{(\text{node})} \in \R^{C_{\text{out}}}$. This signal scales only the optional exploration noise when the regrowth score is nearly flat; final pruning and regrowth decisions are still determined by Eqs.~\ref{eq:C_ij}--\ref{eq:score_update}.
-
-The implementation can optionally learn a temporary channel permutation during dense warmup and then freeze it into a static index map before 2:4 sparsification. This is treated as a block-ordering implementation detail for hardware-compatible grouping, not as a separate claimed contribution.
-
-All wrapped layers share the same masked-operator form:
-\begin{equation}\label{eq:wrapped_layer}
-    \bm{h}^{(l+1)}
-    = \operatorname{Op}^{(l)}\!\left(\bm{h}^{(l)};
-    \bm{W}^{(l)}\odot\bm{M}^{(l)}\right),
-\end{equation}
-where $\operatorname{Op}^{(l)}$ is a convolution, a pointwise projection, a QKV projection, or an MLP projection depending on the backbone. For transformer-style activations $\bm{h}^{(l)}\in\R^{B\times L\times D}$, the node-level uncertainty pooling becomes:
-\begin{equation}\label{eq:linear_pooling_main}
-    u_{e,r}^{(\text{node})}
-    = \frac{1}{B L}\sum_{b=1}^{B}\sum_{\ell=1}^{L}
-    \left|
-    \frac{\partial \bar{u}_e}{\partial h_{b,\ell,r}^{(l)}}
-    \right|,
-    \qquad r=1,\ldots,D .
-\end{equation}
-The pooled node scores are used only as layer-local diagnostics or anti-crystallization signals, while the final evidential head maps backbone features to Softplus evidence and Dirichlet parameters as defined in Eqs.~\ref{eq:softplus}--\ref{eq:p_hat}.
+The reported case study uses a ResNet-18 instantiation. Inside each residual block, the $3 \times 3$ convolutional layers are replaced with sparse convolutional wrappers that apply masks generated by latent scores; the first input convolution is kept dense. The structural proxy pass computes the risk-ratio gradient for the pruner and the KL/evidence gradient for the regrower. Optional channel permutation and activation-gradient pooling are treated as implementation details for grouping diagnostics and anti-crystallization, not as separate claimed contributions.
 
 \paragraph{Implementation Details.} Models are trained using 16-bit mixed precision (AMP)~\cite{micikevicius2018mixed}, while evidential losses are evaluated in FP32. We apply square-root balanced sampling on majority classes (subsampled at 1:20 in training) and employ validation-based decision threshold sweeps to select operating points. We compute Expected Calibration Error (ECE) using standard equal-width binning with $M=15$ bins.
 
@@ -563,11 +534,11 @@ The pooled node scores are used only as layer-local diagnostics or anti-crystall
 We evaluate the performance of GUDS-EDL on the ISIC 2024 Challenge dataset. The extreme class imbalance (malignant cases account for only 0.15\% of the samples) represents a challenging optimization landscape.
 
 \subsection{Significance of Evaluation Metrics in Long-Tailed Domains}
-Evaluating deep learning models under extreme class imbalance renders standard metrics like overall accuracy deeply misleading. To provide a rigorous evaluation, we ground our assessment in the following specialized metrics:
+Under extreme imbalance, overall accuracy is misleading. We therefore emphasize:
 \begin{itemize}
-    \item \textbf{partial AUC ($\text{pAUC}_{0.80}$):} Traditional Area Under the Receiver Operating Characteristic (AUROC) calculates performance across all possible false positive rates. However, in high-stakes domains, models are only viable within strict false-positive thresholds to prevent excessive investigation costs and false alarms. $\text{pAUC}_{0.80}$ is computed over the ROC region corresponding to Sensitivity/TPR $\ge 0.80$, matching the high-recall operating range used in the ISIC case study.
-    \item \textbf{Expected Calibration Error (ECE):} ECE quantifies the disparity between a model's predicted confidence and its empirical accuracy. Under extreme imbalance, models often become overconfident by overfitting the majority class. Tracking ECE alongside sensitivity ensures that the evidential probabilities reflect true likelihoods rather than arbitrary scalar logits.
-    \item \textbf{Area Under the Risk-Coverage Curve (AURC):} AURC evaluates whether confidence or uncertainty can rank likely errors under selective prediction. By deferring low-confidence predictions, the model decreases its coverage and may improve the accuracy of accepted predictions. Because aggregate AURC can be dominated by majority-class behavior, we interpret it together with high-recall specificity and minority calibration rather than as a standalone safety guarantee.
+    \item \textbf{partial AUC ($\text{pAUC}_{0.80}$):} AUROC restricted to the high-recall region $\text{TPR}\ge0.80$, matching the screening operating range.
+    \item \textbf{Expected Calibration Error (ECE):} Confidence-accuracy mismatch under standard equal-width binning, reported alongside minority-specific calibration.
+    \item \textbf{Area Under the Risk-Coverage Curve (AURC):} Selective-prediction error ranking, interpreted together with working-point metrics because aggregate AURC can be majority dominated.
 \end{itemize}
 
 \subsection{Classification Performance and Robustness}
@@ -620,34 +591,18 @@ However, adjusting the decision threshold further restores utility. When optimiz
 
 We report the 95\% Wilson confidence interval for this Sensitivity, which is $[0.703, 0.878]$. This interval highlights the high statistical sensitivity of the small number of positive samples ($N_{\text{minority}} = 77$) in the test set: a shift of just 3 or 4 false negatives could significantly reduce the observed sensitivity, demonstrating the statistical instability inherent in screening under extreme class imbalance.
 
-Furthermore, we must evaluate the clinical utility of this operating point. Given a real-world prevalence of $0.15\%$, a Sensitivity of $0.8052$, and a Specificity of $0.9030$, the theoretical Positive Predictive Value (PPV) is calculated via Bayes' theorem as $\text{PPV} = \frac{0.8052 \cdot 0.0015}{0.8052 \cdot 0.0015 + (1 - 0.9030) \cdot 0.9985} \approx 1.23\%$. This low PPV means that approximately $98.77\%$ of flagged cases will be benign, indicating that the model cannot act as an autonomous diagnostic selector. Instead, its primary clinical utility is as a screening-level triage tool to filter out highly confident benign cases (retaining $90.3\%$ specificity) while routing the remaining cases to dermatologists. To fully support claims of reducing unnecessary biopsies in clinical deployment, future work must perform Decision Curve Analysis (DCA) and calculate the Number Needed to Biopsy (NNB). Nonetheless, GUDS-EDL's Specificity of $0.9030$ represents a significant improvement over Fisher EDL ($0.7393$), R-EDL ($0.7473$), and Flexible EDL ($0.8203$), offering a more efficient referral pipeline.
+At a real-world prevalence of $0.15\%$, Sensitivity $0.8052$ and Specificity $0.9030$ imply a theoretical PPV of approximately $1.23\%$. Thus, GUDS-EDL should not be viewed as an autonomous diagnostic selector; its plausible role is screening-level triage that filters highly confident benign cases while routing the remaining cases to clinicians. Decision Curve Analysis and Number Needed to Biopsy remain necessary before clinical-deployment claims.
 
 \subsection{Uncertainty Quantification and Selective Classification}
 Table~\ref{tab:results_uncertainty} highlights threshold-independent performance and uncertainty calibration. While the proposed \textbf{GUDS-EDL} model does not outperform all baselines across every single calibration metric, it achieves the highest Macro-AUROC of $\mathbf{0.9088}$, the highest partial AUC ($\text{pAUC}_{0.80}$) of $\mathbf{0.1296}$, and the highest PR-AUC of $\mathbf{0.0297}$, demonstrating superior discriminative and ranking capabilities within the clinical operating range.
 
 Regarding confidence calibration, R-EDL and Flexible EDL achieve lower global Expected Calibration Error (ECE) scores ($0.0989$ and $0.1097$, respectively) compared to GUDS-EDL ($0.1113$). However, global ECE is heavily dominated by the majority class, which constitutes 99.85\% of the cohort. Evaluating calibration specifically on the rare minority class reveals that all models exhibit higher Minority ECE. R-EDL and Fisher EDL exhibit relatively lower Minority ECE ($0.3583$ and $0.3491$) compared to GUDS-EDL ($0.5089$) and Flexible EDL ($0.6101$). This behavior should be interpreted together with their much lower positive prediction tendency; conservative models can appear better calibrated in the positive subspace while sacrificing rare-event sensitivity. GUDS-EDL's Minority ECE of $0.5089$ improves over Flexible EDL ($0.6101$) but remains a clear limitation of the current method.
 
-For Selective Classification (where the model can choose to abstain and refer highly uncertain cases to a human expert), GUDS-EDL obtains an AURC of $\mathbf{0.0003}$, matching the best observed value from Flexible EDL ($0.0003$) and outperforming R-EDL ($0.0018$) under this test split.
-
-\paragraph{Mathematical Formulation of Selective Prediction.} To formally evaluate a model's capacity to abstain, we define the binary acceptance rule $a(x) = \mathbb{I}[u_a(x) \le \tau_u]$, where the model yields a prediction $\hat{y} = \argmax_c \hat{p}_c$ only if the sample's entropy-based ambiguity proxy (expected categorical entropy) falls below a chosen threshold $\tau_u$. The Coverage is the expected acceptance rate $\mathcal{C}(\tau_u) = \E[a(x)]$. The Selective Risk evaluated exclusively on the accepted subset is $\mathcal{R}(\tau_u) = \E[\mathbb{I}(\hat{y} \ne y) \mid a(x) = 1]$. The AURC computes the integral of risk over all possible coverage levels:
-\begin{equation}
-    \text{AURC} = \int_0^1 \mathcal{R}(\mathcal{C}) \, d\mathcal{C}
-\end{equation}
-A lower AURC indicates that the model better ranks its own errors under the chosen confidence score. The low AURC suggests improved selective behavior under the evaluated operating regime, but it should not be interpreted as a standalone deployment-safety guarantee because the test distribution is extremely majority dominated.
+For selective classification, GUDS-EDL obtains an AURC of $\mathbf{0.0003}$, matching the best observed value from Flexible EDL ($0.0003$) and outperforming R-EDL ($0.0018$) under this test split. AURC is interpreted only as an error-ranking diagnostic under the evaluated confidence score; because the test distribution is extremely majority dominated, it is not a standalone deployment-safety guarantee.
 
 Taken together, the classification gains in Table~\ref{tab:results_classification} and the uncertainty behavior in Table~\ref{tab:results_uncertainty} suggest that the proposed topology adaptation may help improve classification performance under structured sparsity, though its calibration characteristics warrant further research.
 
-\section{Planned Generalization Protocol and Limitations}\label{sec:planned_protocol}
-\subsection{Controlled Long-Tailed Recognition}
-To test whether the proposed topology adaptation generalizes beyond the ISIC case study, we define a planned evaluation protocol for controlled long-tailed recognition. We will evaluate GUDS-EDL on CIFAR-100-LT with varying imbalance profiles (imbalance ratios of 1:10, 1:50, 1:100). The protocol will evaluate accuracy, balanced accuracy, macro-F1, many/medium/few-shot accuracy, macro-AUROC, macro-PR-AUC, NLL, Brier score, ECE, and AURC against standard long-tailed methods (CE, Focal Loss, Logit Adjustment, Class-Balanced Loss, Balanced Softmax, LDAM-DRW, cRT-style retraining, and MiSLAS-style label-aware smoothing), evidential methods, and sparse baselines (Dense EDL, Fisher EDL, Flexible EDL, R-EDL, Static 2:4 EDL, and RigL-style dynamic sparsity). Until these results are reported, this protocol should be viewed as planned validation rather than evidence of domain-general performance.
-
-\subsection{Industrial Rare-Event Detection}
-To assess performance on rare anomalous events outside of medical domains, we plan to use the MVTec AD benchmark under two image-level protocols. The GUDS-compatible protocol treats MVTec as supervised few-shot rare-defect classification (Normal vs. Defective), while the anomaly-detection references use the official normal-only training split with PatchCore-style and SimpleNet-style image-level anomaly scoring. MVTec results will be reported with image AUROC, image average precision, F1-max, calibration, and failure-detection metrics, not with ISIC-specific clinical operating-point metrics.
-
-\subsection{Hardware Efficiency and Topology Dynamics}
-Efficiency will be profiled to measure active parameters, valid 2:4 block fraction, theoretical active-density reduction, peak VRAM during structural updates, and forward-pass throughput. Standard masked PyTorch execution can diagnose structural feasibility and implementation overhead, but real 2:4 Tensor Core acceleration requires specialized sparse kernels such as cuSPARSELt or TensorRT. Therefore, any measured masked-PyTorch throughput is reported as an implementation diagnostic rather than a hardware-acceleration claim.
-
-\subsection{Limitations and Broader Impact}
+\section{Limitations and Broader Impact}\label{sec:limitations}
 Key limitations of the current framework include: (1) empirical validation is currently centered on the ISIC 2024 case study; (2) GUDS-EDL enforces a fixed Top-2-of-4 pattern over eligible complete blocks after warmup, whereas early stages might benefit from an annealed sparsity schedule; (3) while valid-block 2:4 structured sparsity reduces active density in wrapped layers, achieving real hardware acceleration requires specialized 2:4 sparse Tensor Core kernels; and (4) minority-class probability calibration remains challenging under extreme prevalence shifts even when rare-event ranking improves.
 
 Rare-event learning systems deployed in high-stakes domains carry significant societal responsibility. A primary risk is the extreme cost of false negatives; thus, such models must act as decision-support tools that integrate selective classification to route ambiguous cases to human experts. Algorithmic bias is also a concern: dermatological datasets are often heavily skewed toward lighter Fitzpatrick skin types, and performance may not generalize equally to patients with darker skin tones.
@@ -693,7 +648,7 @@ A.~K. Menon, S.~Jayasumana, A.~S. Rawat, H.~Jain, A.~Veit, and S.~Kumar.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2021.
 
 \bibitem{ren2020balanced}
-J.~Ren, C.~Yu, X.~Ma, H.~Zhao, S.~Yi, and H.~Li.
+J.~Ren, C.~Yu, S.~Sheng, X.~Ma, H.~Zhao, S.~Yi, and H.~Li.
 \newblock Balanced meta-softmax for long-tailed visual recognition.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
 
@@ -727,6 +682,11 @@ M.~Chen, J.~Gao, and C.~Xu.
 \newblock R-EDL: Relaxing nonessential settings of evidential deep learning.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
 
+\bibitem{chen2024reedl}
+M.~Chen, J.~Gao, and C.~Xu.
+\newblock Revisiting essential and nonessential settings of evidential deep learning.
+\newblock {\em arXiv preprint arXiv:2410.00393}, 2024.
+
 \bibitem{yoon2025flexible}
 T.~Yoon and H.~Kim.
 \newblock Uncertainty estimation by flexible evidential deep learning.
@@ -734,11 +694,11 @@ T.~Yoon and H.~Kim.
 
 \bibitem{yu2024anedl}
 Y.~Yu, D.~Deng, F.~Liu, Y.~Jin, Q.~Dou, G.~Chen, and P.-A. Heng.
-\newblock Adaptive negative evidential deep learning for open-set semi-supervised learning.
+\newblock ANEDL: Adaptive negative evidential deep learning for open-set semi-supervised learning.
 \newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
 
 \bibitem{wu2024evidence}
-J.~Wu, J.~Lee, and K.~Jung.
+Y.~Wu, B.~Shi, B.~Dong, Q.~Zheng, and H.~Wei.
 \newblock The evidence contraction issue in deep evidential regression: Discussion and solution.
 \newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
 
@@ -758,14 +718,14 @@ Y.~Geifman and R.~El-Yaniv.
 \newblock In {\em International Conference on Machine Learning (ICML)}, 2019.
 
 \bibitem{ding2020revisiting}
-X.~Ding, G.~Ding, Y.~Guo, and J.~Han.
-\newblock Revisiting the evaluation of uncertainty estimation and failure detection.
+Y.~Ding, J.~Liu, J.~Xiong, and Y.~Shi.
+\newblock Revisiting the evaluation of uncertainty estimation and its application to explore model complexity-uncertainty trade-off.
 \newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW)}, 2020.
 
 \bibitem{traub2024overcoming}
-J.~Traub, M.~Minderer, and N.~Houlsby.
-\newblock Overcoming calibration and failure-detection challenges in long-tailed recognition.
-\newblock In {\em International Conference on Machine Learning (ICML)}, 2024.
+J.~Traub, T.~J. Bungert, C.~T. L{\"u}th, M.~Baumgartner, K.~H. Maier-Hein, L.~Maier-Hein, and P.~F. Jaeger.
+\newblock Overcoming common flaws in the evaluation of selective classification systems.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
 
 \bibitem{dettmers2019sparse}
 T.~Dettmers and L.~Zettlemoyer.
@@ -778,17 +738,17 @@ N.~Lee, T.~Ajanthan, and P.~H.~S. Torr.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
 
 \bibitem{li2025pffdst}
-L.~Li et~al.
+L.~Li, H.~Yang, J.~Guo, H.~Yu, M.~Qin, and T.~Zhang.
 \newblock An efficient and accurate dynamic sparse training framework based on parameter-freezing.
 \newblock In {\em AAAI Conference on Artificial Intelligence}, 2025.
 
 \bibitem{lasby2023srigl}
 M.~Lasby, A.~Golubeva, U.~Evci, M.~Nica, and Y.~Ioannou.
 \newblock Dynamic sparse training with structured sparsity.
-\newblock {\em arXiv preprint arXiv:2305.02299}, 2023.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
 
 \bibitem{mishra2021accelerating}
-A.~Mishra, J.~A. Latorre, J.~Pool, D.~Stosic, D.~Stosic, G.~Venkatesh, C.~Yu, and P.~Micikevicius.
+Asit Mishra, Jorge Albericio Latorre, Jeff Pool, Darko Stosic, Dusan Stosic, Ganesh Venkatesh, Chong Yu, and Paulius Micikevicius.
 \newblock Accelerating sparse deep neural networks.
 \newblock {\em arXiv preprint arXiv:2104.08378}, 2021.
 
@@ -839,7 +799,7 @@ P.~F. Jaeger, C.~T. L{\"u}th, L.~Klein, and T.~J. Bungert.
 
 \bibitem{zhou2023domain}
 M.~Zhou, A.~Jamzad, J.~Izard, A.~Menard, R.~Siemens, and P.~Mousavi.
-\newblock Domain transfer through image-to-image translation for Prostate Cancer Classification.
+\newblock Domain transfer through image-to-image translation for uncertainty-aware prostate cancer classification.
 \newblock {\em arXiv preprint arXiv:2307.00479}, 2023.
 
 \bibitem{lin2017focal}
