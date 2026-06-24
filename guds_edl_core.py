@@ -190,7 +190,7 @@ class EvidentialFocalLoss(nn.Module):
     The focal weight modulates the CE term — not the evidence space directly —
     so the Dirichlet structure stays valid even on highly imbalanced data.
     """
-    def __init__(self, gamma=1.2, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100, disable_efl=False, kl_scaling='asymmetric'):
+    def __init__(self, gamma=1.2, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100, disable_efl=False, kl_scaling='asymmetric', class_weight_cap=10.0):
         super(EvidentialFocalLoss, self).__init__()
         self.base_gamma = gamma
         self.gamma = gamma
@@ -201,6 +201,7 @@ class EvidentialFocalLoss(nn.Module):
         self.total_epochs = total_epochs
         self.disable_efl = disable_efl
         self.kl_scaling = kl_scaling
+        self.class_weight_cap = class_weight_cap
         # class_weights: tensor of shape (num_classes,) — higher weight for rare classes
         if class_weights is not None:
             self.register_buffer('class_weights', class_weights)
@@ -246,6 +247,7 @@ class EvidentialFocalLoss(nn.Module):
         # Per-sample class weight: look up weight for the true class.
         if self.class_weights is not None:
             true_class_weight = torch.sum(targets * self.class_weights.unsqueeze(0), dim=1, keepdim=True)
+            true_class_weight = torch.clamp(true_class_weight, max=self.class_weight_cap)
             ce_weight = true_class_weight
         else:
             true_class_weight = torch.ones_like(loss_ce)
@@ -283,25 +285,41 @@ class EvidentialFocalLoss(nn.Module):
 def generate_2_4_mask(scores):
     """
     Generates an NVIDIA 2:4 structured sparsity mask.
-    For every contiguous block of 4 elements the top-2 (by score) survive.
-    This replaces a single global threshold tau with a dynamic, local one.
-    
-    NOTE ON SPARSITY SCHEDULING:
-    The research proposal main (36).pdf mentions a gradual cosine pruning schedule. However, to comply with the 
-    hard hardware-enforced 2:4 structured sparsity (exactly 50% non-zero parameters per block of 4) required for
-    acceleration on Tensor Cores, a hard 50% mask is applied immediately after the warmup phase. The cosine 
-    schedule is instead applied to the exploration temperature (gamma) of the Smoothed STE to control the dynamic 
-    structural exploration rate (mask flips), rather than the sparsity ratio itself.
+    For every complete row-wise block of 4 entries along the flattened inner
+    dimension, the top-2 entries by score survive. Trailing coordinates that
+    do not form a complete block are kept dense and excluded from the 2:4
+    validity fraction, matching the paper's "complete valid block" wording.
     """
-    if scores.numel() % 4 != 0:
+    if scores.ndim < 2:
         return torch.ones_like(scores)
 
     shape = scores.shape
-    scores_flat = scores.view(-1, 4)
-    _, indices = torch.topk(scores_flat, 2, dim=-1)
-    mask_flat = torch.zeros_like(scores_flat)
-    mask_flat.scatter_(1, indices, 1.0)
-    return mask_flat.view(shape)
+    scores_rows = scores.reshape(shape[0], -1)
+    inner_dim = scores_rows.shape[1]
+    complete_dim = (inner_dim // 4) * 4
+    mask_rows = torch.ones_like(scores_rows)
+    if complete_dim == 0:
+        return mask_rows.reshape(shape)
+
+    complete_scores = scores_rows[:, :complete_dim].reshape(-1, 4)
+    _, indices = torch.topk(complete_scores, 2, dim=-1)
+    complete_mask = torch.zeros_like(complete_scores)
+    complete_mask.scatter_(1, indices, 1.0)
+    mask_rows[:, :complete_dim] = complete_mask.reshape(scores_rows.shape[0], complete_dim)
+    return mask_rows.reshape(shape)
+
+
+def valid_2_4_block_stats(mask):
+    """Return (valid_blocks, total_complete_blocks) for row-wise valid 2:4 blocks."""
+    if mask.ndim < 2:
+        return 0, 0
+    rows = mask.reshape(mask.shape[0], -1)
+    complete_dim = (rows.shape[1] // 4) * 4
+    if complete_dim == 0:
+        return 0, 0
+    blocks = rows[:, :complete_dim].reshape(-1, 4)
+    valid = int((blocks.sum(dim=1) == 2).sum().item())
+    return valid, int(blocks.shape[0])
 
 
 class MDEPLinear(nn.Linear):
@@ -837,7 +855,8 @@ class MDEPTrainer:
                 sample_gate = self.criterion.class_weights[targets.long()].view(-1, 1)
             else:
                 sample_gate = torch.sum(targets * self.criterion.class_weights.unsqueeze(0), dim=1, keepdim=True)
-            sample_gate = torch.clamp(sample_gate, max=10.0)
+            class_weight_cap = getattr(self.criterion, 'class_weight_cap', 10.0)
+            sample_gate = torch.clamp(sample_gate, max=class_weight_cap)
             loss_astrocyte = torch.mean(sample_gate * uncertainties['epistemic'] * kl_divergence(alpha_base, num_classes))
         else:
             loss_astrocyte = torch.mean(kl_divergence(alpha_base, num_classes))
@@ -1596,24 +1615,20 @@ def print_sparsity_report(model, detail=False):
             total_zeros  += z
             sparsity = z / n * 100 if n > 0 else 0.0
             
-            # Simple MACs heuristic based on input/output size if possible
-            # We assume MACs scales linearly with the number of non-zero parameters
-            # for a given input size. We use parameter count as a proxy for MACs savings
-            # on Tensor Cores which accelerate 2:4 structured sparsity by exactly 2x.
+            # Simple MACs heuristic based on active parameter density. This is
+            # a structural diagnostic, not a sparse-kernel acceleration claim.
             macs_dense = n
             macs_sparse = n - z
             total_macs_dense += macs_dense
             total_macs_sparse += macs_sparse
             
-            # Check 2:4 pattern
-            if n % 4 == 0:
-                blocks = mask.view(-1, 4)
-                valid = (blocks.sum(dim=1) == 2).all().item()
-                checked_24 += 1
-                valid_24 += int(valid)
-                pattern = "✅ 2:4 (TensorCore Ready)" if valid else "❌ Not 2:4"
+            valid_blocks, total_blocks = valid_2_4_block_stats(mask)
+            if total_blocks > 0:
+                checked_24 += total_blocks
+                valid_24 += valid_blocks
+                pattern = f"2:4 valid blocks {valid_blocks}/{total_blocks}"
             else:
-                pattern = "⚠ skip (size%4≠0)"
+                pattern = "no complete 4-blocks"
             if detail:
                 print(f"  {name:30s} | {sparsity:5.1f}% sparse | {pattern}")
             
@@ -1621,9 +1636,9 @@ def print_sparsity_report(model, detail=False):
     macs_saved = (total_macs_dense - total_macs_sparse) / total_macs_dense * 100 if total_macs_dense > 0 else 0.0
     print("-" * 75)
     print(f"  {'TOTAL PARAMS':30s} | {overall:5.1f}% sparse")
-    print(f"  {'VALID 2:4 LAYERS':30s} | {valid_24}/{checked_24}")
+    print(f"  {'VALID 2:4 BLOCKS':30s} | {valid_24}/{checked_24}")
     print(f"  {'THEORETICAL MACs SAVED':30s} | {macs_saved:5.1f}% reduction in MDEP layers")
-    print("  *(Note: Ampere GPU Tensor Cores provide 2x speedup for strict 2:4 sparsity)*")
+    print("  *(Masked PyTorch diagnostic; real speedup requires sparse Tensor Core kernels.)*")
     print()
     
     # Run Advanced Collapse Diagnostics

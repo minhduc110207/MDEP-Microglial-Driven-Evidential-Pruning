@@ -22,7 +22,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from guds_edl_core import MDEPConv2d, MDEPLinear, generate_2_4_mask, replace_conv2d_with_mdep  # noqa: E402
+from guds_edl_core import (  # noqa: E402
+    MDEPConv2d,
+    MDEPLinear,
+    generate_2_4_mask,
+    replace_conv2d_with_mdep,
+    valid_2_4_block_stats,
+)
 from experiments.generalization_paper_suite import EvidenceResNet  # noqa: E402
 from experiments.isic_paper_experiments import json_safe  # noqa: E402
 
@@ -56,10 +62,9 @@ def structural_stats(model: nn.Module) -> dict[str, float]:
             sparse_active += active
             total_params += n
             active_params += active
-            if n % 4 == 0:
-                blocks = mask.view(-1, 4)
-                total_24_blocks += blocks.shape[0]
-                valid_24_blocks += int((blocks.sum(dim=1) == 2).sum().item())
+            valid_blocks, total_blocks = valid_2_4_block_stats(mask)
+            valid_24_blocks += valid_blocks
+            total_24_blocks += total_blocks
         else:
             for param in module.parameters(recurse=False):
                 n = param.numel()
