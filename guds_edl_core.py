@@ -1068,11 +1068,16 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     image_dir = None
     
     # List of possible base directories to search for the dataset
-    search_dirs = [
+    search_dirs = []
+    if os.environ.get('ISIC_ROOT'):
+        search_dirs.append(os.environ['ISIC_ROOT'])
+    search_dirs.extend([
         r'E:\Testing\mdep\isic-2024-challenge',  # User local path
+        './data/isic-2024-challenge',
+        './data/isic2024',
         '/kaggle/input',                         # Kaggle root
         '/kaggle/input/competitions',            # Kaggle competitions
-    ]
+    ])
     
     def _try_find_dataset(base_dir):
         """Search for train-metadata.csv in a directory and return (csv_path, image_dir) or (None, None)."""
