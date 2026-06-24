@@ -147,6 +147,8 @@ def calibrate_multiclass(
         device=logits.device,
         dtype=logits.dtype,
     )
+    if mode == "none":
+        prior_delta = torch.zeros_like(prior_delta)
     logits_for_calibration = logits + prior_delta
     evidence_layer = model.fc[1]
 
@@ -207,6 +209,8 @@ def calibrate_binary_image(
         device=logits.device,
         dtype=logits.dtype,
     )
+    if mode == "none":
+        prior_delta = torch.zeros_like(prior_delta)
     logits_for_calibration = logits + prior_delta
     evidence_layer = model.fc[1]
 
@@ -439,6 +443,8 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         device=device,
         dtype=torch.float32,
     )
+    if spec.calibration_mode == "none":
+        prior_delta = torch.zeros_like(prior_delta)
     eval_bias = prior_delta / max(temperature, 1e-8)
     if bias is not None:
         eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)

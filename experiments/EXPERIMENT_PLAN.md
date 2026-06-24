@@ -49,7 +49,7 @@ pip install torch torchvision numpy pandas scikit-learn matplotlib jupyter h5py 
 
 ### Giai đoạn 2: Cấu hình Mô hình (Model Initialization & Sparsification)
 - Khởi tạo mạng nền (ví dụ: ResNet-18) và thay thế lớp phân loại Dense bằng `EvidenceLayer`.
-- Gọi hàm `replace_conv2d_with_mdep(model)` để chuyển đổi toàn bộ các lớp tích chập thành cấu trúc thưa thớt 2:4 (NVIDIA 2:4 Structured Sparsity).
+- Gọi hàm `replace_conv2d_with_mdep(model)` để chuyển đổi các lớp tích chập/linear đủ điều kiện thành cấu trúc thưa thớt valid-block 2:4; stem conv RGB đầu vào được giữ dense theo mô tả trong paper.
 
 ### Giai đoạn 3: Huấn luyện (Training)
 - **Warmup (Dense Phase):** Các epoch đầu được huấn luyện với dạng Dense mask để tích lũy tín hiệu gradient ổn định.

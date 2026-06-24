@@ -559,6 +559,8 @@ def run_calibration(
         device=logits.device,
         dtype=logits.dtype,
     )
+    if mode == "none":
+        prior_delta = torch.zeros_like(prior_delta)
     logits_for_calibration = logits + prior_delta
 
     def evidential_nll(scaled_logits: torch.Tensor) -> torch.Tensor:
@@ -672,6 +674,8 @@ def run_softmax_calibration(
 ) -> tuple[float, torch.Tensor | None, dict[str, float], torch.Tensor]:
     logits, labels = collect_logits_labels(model, cal_loader, device)
     prior_delta = prior_logit_delta(p_true, p_train, logits.shape[1], device=logits.device, dtype=logits.dtype)
+    if mode == "none":
+        prior_delta = torch.zeros_like(prior_delta)
     logits_for_calibration = logits + prior_delta
 
     if mode == "none":

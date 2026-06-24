@@ -44,7 +44,7 @@
 \usepackage{algorithmic}
 \usepackage{enumitem}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta, positioning}
+\usetikzlibrary{arrows.meta, positioning, calc}
 \usepackage[table]{xcolor}
 \usepackage{colortbl}
 \usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
@@ -84,18 +84,18 @@
 \begin{document}
 
 \begin{abstract}
-Extreme imbalanced classification requires rare-event sensitivity, calibrated uncertainty, and efficient deployment. We propose \textbf{GUDS-EDL}, an uncertainty-guided sparse evidential learning framework that couples Dirichlet-derived structural signals with NVIDIA 2:4 sparsity over eligible complete blocks. GUDS-EDL updates latent topology scores through two first-order modules: an uncertainty-guided pruner that down-ranks active connections whose removal is locally predicted to reduce an evidential risk ratio, and an evidence-seeking regrower that up-ranks candidate connections with high local influence on evidential growth. An imbalance-aware evidential objective with capped class-dependent modulation supports rare-event learning without changing the Dirichlet prior. We instantiate the method on ISIC 2024 as a high-stakes case study and keep the empirical scope conservative: the current claims are limited to this case study and implemented ablations, while broader long-tailed, anomaly-detection, and hardware-kernel validation remain explicit protocols.
+Extreme imbalanced classification requires rare-event sensitivity, uncertainty awareness, and hardware-compatible structured sparsity. We propose \textbf{GUDS-EDL}, an uncertainty-guided sparse evidential learning framework that couples Dirichlet-derived structural signals with valid-block 2:4 sparsity. GUDS-EDL updates latent topology scores through two first-order modules: a signed evidential-risk pruner for active connections and an evidence-seeking regrower for candidate connections. Mask refresh is driven by vacuity, expected entropy, and KL-based evidence-growth saliency, while a capped imbalance-aware evidential objective supports rare-event learning without changing the Dirichlet prior. We instantiate the method on ISIC 2024 as an extreme-prevalence medical screening case study. Current claims are limited to this setting; ablations, broader long-tailed and anomaly-detection benchmarks, and hardware-kernel validation are treated as explicit protocols unless reported.
 \end{abstract}
 
 \section{Introduction}\label{sec:intro}
 
-The deployment of large-scale deep learning models in real-world systems often faces extreme class imbalance, where rare but high-cost events are vastly underrepresented. This phenomenon, known as the long-tailed distribution, occurs naturally across critical domains including industrial defect detection, financial fraud, autonomous driving edge cases, safety violations, and medical abnormalities. In these high-stakes regimes, models must be accurate on rare classes, uncertainty-aware when evidence is weak, calibration-conscious at decision time, and efficient enough for low-latency deployment.
+Extreme imbalanced classification appears in rare-event screening, industrial inspection, fraud detection, and other settings where minority errors are costly. In these regimes, a model must classify rare cases, express uncertainty when evidence is weak, remain calibration-conscious at decision time, and stay compatible with deployment-constrained inference. Standard softmax models often overfit majority-class regularities and become overconfident under class imbalance or distribution shift~\cite{guo2017calibration}. Dense models also leave open the question of whether scarce capacity should be redistributed toward rare and uncertain regions when structured sparsity is required.
 
-Standard softmax-based neural networks are notoriously vulnerable to these challenges, tending to overfit majority classes and produce overconfident predictions on out-of-distribution or ambiguous minority samples~\cite{guo2017calibration}. Evidential Deep Learning (EDL)~\cite{sensoy2018evidential} mitigates overconfidence by parameterizing a higher-order Dirichlet distribution, providing vacuity and expected categorical entropy signals~\cite{malinin2018predictive}. Concurrently, Dynamic Sparse Training (DST)~\cite{evci2020rigging} addresses computational constraints by dynamically exploring sparse network topologies from scratch. However, existing DST methods prune connections based solely on weight magnitudes or task gradients, remaining entirely blind to uncertainty signals.
+Evidential Deep Learning (EDL)~\cite{sensoy2018evidential} parameterizes a Dirichlet distribution over class probabilities and exposes vacuity and expected categorical entropy in a single forward pass~\cite{malinin2018predictive}. These signals are useful for uncertainty-aware prediction, but are usually not used to modify network topology. Dynamic Sparse Training (DST)~\cite{evci2020rigging} adapts sparse structure during optimization, yet most DST rules rely on magnitude or task-gradient criteria and do not explicitly use evidential uncertainty signals. Thus, uncertainty-aware classifiers rarely adapt their sparse structure, while sparse learners remain uncertainty-agnostic.
 
-To bridge this gap, we introduce \textbf{GUDS-EDL}, a framework that integrates evidential learning with NVIDIA 2:4 structured sparsity on eligible complete blocks. The network topology is controlled by latent connection scores updated from two amortized proxy gradients: a signed risk-ratio pruning signal and a KL/evidence-seeking regrowth signal. The 2:4 mask is then refreshed by Top-2 selection within each valid hardware block. Medical screening is used as a representative high-stakes instantiation; broader rare-event validation is specified as an evaluation protocol rather than assumed from the current case study.
+We introduce \textbf{GUDS-EDL}, a valid-block 2:4 dynamic sparse evidential framework. The network topology is controlled by latent connection scores updated from two amortized proxy gradients: a signed batch evidential-risk pruning signal and a KL/evidence-seeking regrowth signal. The mask is refreshed by Top-2 selection within each eligible 4-block. ISIC 2024 is used as a safety-critical case study; broader rare-event validation is specified as protocol rather than assumed from the current evidence.
 
-\paragraph{Main Contributions.} We present a framework for using Dirichlet-derived structural signals to guide NVIDIA 2:4 structured dynamic sparse training under extreme class imbalance. Specifically, our primary contributions are:
+\paragraph{Main Contributions.} Our primary contributions are:
 \begin{itemize}
     \item \textbf{Imbalance-aware evidential objective:} We combine dampened class weights, stop-gradient focal modulation, and a capped asymmetric KL multiplier to target rare-event sensitivity without uncontrolled KL pressure.
     \item \textbf{Uncertainty-guided 2:4 topology adaptation:} We introduce rank-normalized first-order pruning and regrowth signals driven by Dirichlet vacuity, expected entropy, and evidence-growth proxies under valid-block 2:4 sparsity.
@@ -114,54 +114,26 @@ To bridge this gap, we introduce \textbf{GUDS-EDL}, a framework that integrates 
 
 \paragraph{Rare-Event Benchmarks and High-Stakes Case Studies.} CIFAR-LT, iNaturalist~\cite{liu2019large}, and MVTec AD~\cite{bergmann2019mvtec} are common rare-event or long-tailed evaluation surfaces, with PatchCore~\cite{roth2022total} and SimpleNet~\cite{liu2023simplenet} as strong anomaly-detection references. This paper reports ISIC 2024 as an initial high-stakes case study and treats CIFAR-100-LT and MVTec AD as planned validation protocols rather than completed evidence of domain generality.
 
-\section{Mathematical Foundations: Subjective Logic and Dirichlet Distribution}\label{sec:math}
+\section{Preliminaries: Dirichlet Evidential Signals}\label{sec:math}
 
-We replace the traditional softmax activation with mathematical foundations from Subjective Logic (SL)~\cite{josang2016subjective}, mapping network outputs to the parameters of a Dirichlet distribution conjugate prior~\cite{sensoy2018evidential}.
-
-\subsection{Dirichlet Distribution Parameterization}
-For a $K$-class problem, we parameterize the non-negative evidence vector $\bm{e} \ge \bm{0}$ from logits $\bm{z} \in \R^K$ using the Softplus activation:
+For logits $\bm{z}\in\R^K$, GUDS-EDL maps each class logit to non-negative evidence using Softplus,
 \begin{equation}\label{eq:softplus}
-    e_c = \ln(1 + \exp(z_c)), \quad c = 1, \ldots, K
+    e_c=\ln(1+\exp z_c),\qquad
+    \alpha_c=e_c+1,\qquad
+    S=\sum_{c=1}^K\alpha_c .
 \end{equation}
-\begin{remark}[Why not use ReLU?]
-ReLU truncates negative logits to zero, resulting in zero gradients for those activations and permanently trapping evidence at $e_c = 0$, which freezes the Dirichlet state on the zero-evidence simplex.
-\end{remark}
-The Dirichlet concentration parameters $\bm{\alpha}$ are defined by adding a uniform prior to the evidence:
-\begin{equation}\label{eq:alpha}
-    \alpha_c = e_c + 1.0
-\end{equation}
-where $S = \sum_{c=1}^K \alpha_c$ is the Dirichlet strength (total evidence). In Subjective Logic (SL), a multinomial opinion maps this evidence to belief masses $b_c \ge 0$ and a vacant belief mass (uncertainty) $u_e \ge 0$. The belief mass for class $c$ is defined as:
-\begin{equation}\label{eq:belief}
-    b_c = \frac{e_c}{S}
-\end{equation}
-The core identity of Subjective Logic guarantees that the sum of belief masses and vacuity equals unity:
-\begin{equation}\label{eq:sl_identity}
-    \sum_{c=1}^K b_c + u_e = 1
-\end{equation}
-which establishes the strict mathematical coupling between the evidence vector $\bm{e}$, class belief representations, and the vacant belief mass. Under this formulation, the expected probability for class $c$ is:
+Softplus is used instead of an output ReLU because ReLU can create zero-gradient regions for negative evidence logits, making evidence recovery less stable. The predictive mean is $\hat p_c=\alpha_c/S$. With uniform Subjective-Logic base rate $a_c=1/K$, this equals
 \begin{equation}\label{eq:p_hat}
-    a_c=\frac{1}{K},\qquad
-    \hat{p}_c = b_c+a_cu_e
-    = \frac{e_c+1}{S}
-    = \E[p_c] = \frac{\alpha_c}{S}
+    \hat p_c=b_c+a_cu_e=\frac{e_c+1}{S},
+    \qquad b_c=\frac{e_c}{S},\qquad u_e=\frac{K}{S}.
 \end{equation}
-where $a_c$ is the uniform Subjective-Logic base rate. This identity makes explicit that the Dirichlet predictive mean and the Subjective-Logic opinion map are the same under the uniform prior used in EDL.
-The effects of extreme class imbalance are handled via Evidential Focal Loss (which modulates loss gradients based on class frequencies) rather than by altering the Dirichlet prior. This ensures that the total evidence $S$ remains well-bounded ($S \ge K$), preserving the mathematical consistency of the vacuity limits.
+Since imbalance is handled through the loss rather than by changing the Dirichlet prior, the identity $\alpha_c=e_c+1$ and the lower bound $S\ge K$ are preserved.
 
-\subsection{Decomposition of Predictive Uncertainty}\label{subsec:uncertainties}
-Under Subjective Logic, predictive uncertainty can be decomposed into complementary components that capture different aspects of the predicted distribution. Following recent critiques of Evidential Deep Learning \cite{shen2024mirage}, we explicitly state that we do not claim true Bayesian posterior uncertainty. Instead, we define mathematically well-formed uncertainty proxies that are used as structural adaptation signals.
-
-\paragraph{Dirichlet Vacuity / Evidence-Based Uncertainty ($u_e$):} Serves as a low-evidence structural proxy defined as the vacant belief mass in Subjective Logic:
-\begin{equation}\label{eq:u_e}
-    u_e = \frac{K}{S} = \frac{K}{\sum_{c=1}^K \alpha_c}
-\end{equation}
-For finite logits under Eq.~\ref{eq:softplus}, $u_e \in (0, 1)$, with supremum $1$ approached in the zero-evidence limit. We utilize this vacuity metric as a structural adaptation signal rather than a Bayesian uncertainty bound.
-
-\paragraph{Entropy-Based Ambiguity Proxy ($u_a$):} Used as a Dirichlet expected-entropy structural proxy, this measures the expected Shannon entropy of the multinomial distribution under the Dirichlet conjugate prior \cite{malinin2018predictive}:
+Following recent critiques of Evidential Deep Learning~\cite{shen2024mirage}, we do not interpret EDL signals as exact Bayesian posterior uncertainty. We use Dirichlet vacuity $u_e=K/S$ as a low-evidence structural proxy and expected categorical entropy
 \begin{equation}\label{eq:u_a}
     u_a = \sum_{c=1}^K \frac{\alpha_c}{S} \left[\psi(S + 1) - \psi(\alpha_c + 1)\right]
 \end{equation}
-where $\psi(x)$ is the digamma function. For any $K > 1$, $u_a \ge 0$ due to the strict monotonicity of the digamma function. In practical implementations, to protect against floating-point inaccuracies, $u_a \leftarrow \max(u_a, 0.0)$ is applied.
+as an ambiguity proxy. In implementation, $u_a$ is clamped below at zero to guard against floating-point error.
 
 \begin{proposition}[Validity of Evidential State]
 \label{prop:evidential_validity}
@@ -169,49 +141,49 @@ For any logits $\bm{z}\in\R^K$ under the Softplus evidence map in Eq.~\ref{eq:so
 \end{proposition}
 
 \paragraph{Theoretical Scope.}
-The quantities $u_e$ and $u_a$ are therefore valid bounded/non-negative signals derived from a proper Dirichlet distribution. We use them to drive topology adaptation and selective prediction; we do not require or assert that they are exact posterior uncertainty decompositions. Full proofs of all propositions are provided in Appendix~\ref{app:proofs}.
+The quantities $u_e$ and $u_a$ are valid bounded/non-negative signals derived from a proper Dirichlet state. We use them to drive topology adaptation and selective prediction; full proofs are provided in Appendix~\ref{app:proofs}.
 
 
 \section{GUDS-EDL Framework}\label{sec:methodology}
 
 \textbf{Terminology}: Earlier drafts used biological mnemonics for topology evolution. In this paper, we use the technical terms \textbf{Uncertainty-Guided Pruner} and \textbf{Evidence-Seeking Regrower}; any biological analogy is non-technical.
 
-GUDS-EDL separates training into two coupled loops. The prediction loop uses a cached 2:4 mask $\bm{M}$, performs ordinary mini-batch optimization of the active weights $\bm{W}$, and evaluates the evidential objective. The structural loop runs at refresh points on an amortized proxy batch: it computes $u_e,u_a$, forms the pruning risk ratio $R$ and the regrowth objective $L_{\text{grow}}$, updates latent scores $\bm{V}$ through rank-normalized first-order saliency, and refreshes $\bm{M}$ by blockwise Top-2 selection. This separation keeps the main training path simple while allowing dormant candidates to receive structural saliency estimates during refresh.
+GUDS-EDL separates training into two coupled loops. The prediction loop uses a cached 2:4 mask $\bm{M}$, performs ordinary mini-batch optimization of the active weights $\bm{W}$, and evaluates the evidential objective. The structural loop runs at refresh points on an amortized proxy batch: it computes $u_e,u_a$, forms the batch pruning risk ratio $R_{\mathcal B}$ and the regrowth objective $L_{\text{grow}}$, updates latent scores $\bm{V}$ through rank-normalized first-order saliency, and refreshes $\bm{M}$ by blockwise Top-2 selection. This separation keeps the main training path simple while allowing dormant candidates to receive structural saliency estimates during refresh.
 
 
 \begin{figure}[t]
 \centering
 \resizebox{\columnwidth}{!}{%
 \begin{tikzpicture}[
-    node distance=1.2cm and 1.0cm,
+    node distance=0.8cm and 0.7cm,
     box/.style={
         draw=blue!70!black,
         fill=blue!5,
         rounded corners,
         align=center,
-        minimum width=2.2cm,
-        minimum height=0.9cm,
-        font=\small\sffamily\bfseries,
+        minimum width=1.95cm,
+        minimum height=0.72cm,
+        font=\scriptsize\sffamily\bfseries,
         thick
     },
-    agent/.style={
-        draw=green!60!black,
-        fill=green!5,
-        rounded corners,
-        align=center,
-        minimum width=2.4cm,
-        minimum height=1.0cm,
-        font=\small\sffamily\bfseries,
-        thick
-    },
-    pred/.style={
+    opt/.style={
         draw=red!70!black,
         fill=red!5,
         rounded corners,
         align=center,
-        minimum width=2.2cm,
-        minimum height=0.9cm,
-        font=\small\sffamily\bfseries,
+        minimum width=1.95cm,
+        minimum height=0.72cm,
+        font=\scriptsize\sffamily\bfseries,
+        thick
+    },
+    struct/.style={
+        draw=green!60!black,
+        fill=green!5,
+        rounded corners,
+        align=center,
+        minimum width=1.95cm,
+        minimum height=0.72cm,
+        font=\scriptsize\sffamily\bfseries,
         thick
     },
     arrow/.style={
@@ -230,24 +202,35 @@ GUDS-EDL separates training into two coupled loops. The prediction loop uses a c
 ]
 
 % Nodes
-\node (img) [box, fill=gray!10, draw=gray!60] {Input\\Sample};
-\node (backbone) [box, right=of img] {Deep Neural\\Backbone};
-\node (head) [box, right=of backbone] {Dirichlet\\Evidential Head};
-\node (signals) [box, right=of head] {Vacuity /\\Entropy Signals};
-\node (agents) [agent, below=of signals] {Pruner / Regrower\\2:4 Update};
-\node (pred) [pred, below=of head] {Calibrated\\Prediction};
+\node (x) [box, fill=gray!10, draw=gray!60] {mini-batch\\$x,y$};
+\node (f) [box, right=of x] {$f_\theta$ with\\cached $\bm{M}$};
+\node (za) [box, right=of f] {$z\to\alpha$\\Dirichlet};
+\node (loss) [opt, right=of za] {$L_{\text{EFL}}$};
+\node (wup) [opt, right=of loss] {$\bm{W}$\\update};
+
+\node (sig) [struct, below=of za] {$u_e,u_a$\\proxy signals};
+\node (risk) [struct, right=of sig] {$R,\ L_{\text{grow}}$};
+\node (cg) [struct, right=of risk] {$C,\ G$\\saliency};
+\node (dv) [struct, right=of cg] {$\Delta\bm{V}$};
+\node (top) [struct, right=of dv] {Top-2\\refresh $\bm{M}$};
 
 % Paths
-\draw [arrow] (img) -- (backbone);
-\draw [arrow] (backbone) -- (head);
-\draw [arrow] (head) -- (signals);
-\draw [arrow] (head) -- (pred);
-\draw [arrow] (signals) -- (agents);
-\draw [feedback] (agents.south) -- ++(0,-0.6) -| node[above, pos=0.25, font=\footnotesize\sffamily] {2:4 masks \& updates} (backbone.south);
+\draw [arrow] (x) -- (f);
+\draw [arrow] (f) -- (za);
+\draw [arrow] (za) -- (loss);
+\draw [arrow] (loss) -- (wup);
+\draw [arrow] (za) -- (sig);
+\draw [arrow] (sig) -- (risk);
+\draw [arrow] (risk) -- (cg);
+\draw [arrow] (cg) -- (dv);
+\draw [arrow] (dv) -- (top);
+\draw [feedback] (top.north) |- node[above, pos=0.18, font=\scriptsize\sffamily] {cache for prediction loop} (f.south);
+\node[font=\scriptsize\sffamily\bfseries, anchor=south west] at ($(x.north west)+(0,0.18)$) {Prediction loop};
+\node[font=\scriptsize\sffamily\bfseries, anchor=south west, green!45!black] at ($(sig.north west)+(0,0.18)$) {Structural refresh loop};
 
 \end{tikzpicture}%
 }
-\caption{Overview of the GUDS-EDL framework. Evidential uncertainty proxies are used both for prediction and for dynamic sparse topology adaptation.}
+\caption{Two-loop GUDS-EDL mechanism. The prediction loop updates active weights under a cached mask, while the structural refresh loop uses Dirichlet-derived proxy signals to update latent topology scores and refresh the valid-block 2:4 mask.}
 \label{fig:overview}
 \end{figure}
 
@@ -287,23 +270,34 @@ Assume each eligible wrapped weight tensor is flattened along its inner dimensio
 \end{proposition}
 
 \subsection{Uncertainty-Guided Pruning and Evidence-Seeking Regrowth}
-GUDS-EDL implements topology evolution as a rank-normalized first-order saliency update, matching the experimental implementation and ablations in Sec.~\ref{sec:experiment}. It should be read as a practical dynamic sparse training rule, not as a proof of globally optimal sparse architecture search. At each structural refresh, an amortized proxy batch computes two differentiable signals through $\bm{W}_{\text{eff}}$: an evidential risk-ratio signal for pruning and an evidence-seeking KL signal for regrowth.
+GUDS-EDL implements topology evolution as a rank-normalized first-order saliency update, matching the implemented training rule and ablation protocol in Appendix~C. It should be read as a practical dynamic sparse training rule, not as a proof of globally optimal sparse architecture search. At each structural refresh, an amortized proxy batch computes two differentiable signals through $\bm{W}_{\text{eff}}$: a batch evidential risk-ratio signal for pruning and an evidence-seeking KL signal for regrowth.
 
-For pruning, we define the evidential risk ratio $R=u_a/(u_e+\epsilon)$. With the current mask fixed during the proxy pass, the chain rule gives
-\begin{equation}\label{eq:r_chain_main}
-    \frac{\partial R}{\partial w_{\text{eff},ij}}
+For pruning, we define the proxy-batch evidential risk ratio
+\begin{equation}\label{eq:batch_risk}
+    R_{\mathcal{B}}
     =
-    \frac{1}{u_e+\epsilon}\frac{\partial u_a}{\partial w_{\text{eff},ij}}
-    -\frac{u_a}{(u_e+\epsilon)^2}
-    \frac{\partial u_e}{\partial w_{\text{eff},ij}} .
+    \frac{1}{|\mathcal{B}|}
+    \sum_{n\in\mathcal{B}}
+    \frac{u_a^{(n)}}{u_e^{(n)}+\epsilon}.
 \end{equation}
-Removing an active connection has first-order effect $\Delta R\approx -w_{ij}\partial R/\partial w_{\text{eff},ij}$. Hence positive $w_{ij}\partial R/\partial w_{\text{eff},ij}$ indicates that setting the connection to zero is locally predicted to reduce the risk ratio. The implemented pruning score is
+With the current mask fixed during the proxy pass, the chain rule gives
+\begin{equation}\label{eq:r_chain_main}
+    \frac{\partial R_{\mathcal{B}}}{\partial w_{\text{eff},ij}}
+    =
+    \frac{1}{|\mathcal{B}|}\sum_{n\in\mathcal{B}}
+    \left[
+    \frac{1}{u_e^{(n)}+\epsilon}\frac{\partial u_a^{(n)}}{\partial w_{\text{eff},ij}}
+    -\frac{u_a^{(n)}}{(u_e^{(n)}+\epsilon)^2}
+    \frac{\partial u_e^{(n)}}{\partial w_{\text{eff},ij}}
+    \right].
+\end{equation}
+Removing an active connection has first-order effect $\Delta R_{\mathcal B}\approx -w_{ij}\partial R_{\mathcal B}/\partial w_{\text{eff},ij}$. Hence positive $w_{ij}\partial R_{\mathcal B}/\partial w_{\text{eff},ij}$ indicates that setting the connection to zero is locally predicted to reduce the batch risk ratio. The implemented pruning score is
 \begin{equation}\label{eq:C_ij}
     C_{ij}
     =
     \operatorname{Rank}_{l}\!\left(
     \pospart{w_{ij}
-    \frac{\partial R}{\partial w_{\text{eff},ij}}}
+    \frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}}
     \right),
     \qquad
     \pospart{x}=\max(x,0).
@@ -320,7 +314,7 @@ where $\Omega_l$ denotes the trainable entries in layer $l$ and $\tilde{s}$ deno
 
 \begin{proposition}[Signed First-Order Pruning Criterion]
 \label{prop:signed_pruning}
-If $R$ is differentiable with respect to the effective weight and $w_{ij}\frac{\partial R}{\partial w_{\text{eff},ij}}>0$, then removing the connection decreases $R$ to first order. If the product is negative, removal increases $R$ to first order.
+If $R_{\mathcal B}$ is differentiable with respect to the effective weight and $w_{ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}>0$, then removing the connection decreases $R_{\mathcal B}$ to first order. If the product is negative, removal increases $R_{\mathcal B}$ to first order.
 \end{proposition}
 
 For regrowth, the implementation uses a KL-to-uniform evidence signal. The full GUDS-EDL run optionally applies class conditioning only as a scalar sample gate; it does not multiply, rescale, or otherwise alter the Dirichlet concentration vector:
@@ -480,38 +474,16 @@ The overall training objective is simply
 For each sample $n$, the stop-gradient focal factor $\mathcal{F}_n(t)$ makes the EFL gradient a non-negative sample reweighting of the Dirichlet CE/KL gradients with respect to the evidence parameters, rather than introducing an additional derivative path through $\hat{p}_{y_n}^{(n)}$. The supervised class weight is bounded by $\bar{\omega}_{y_n}\le\omega_{\max}$, and the additional asymmetric KL multiplier is explicitly capped by $\Lambda_{\max}$.
 \end{proposition}
 
-\paragraph{Learning Rate and Loss-Scale Warmup.}
-During the first epoch, the learning rate is linearly warmed from $\eta_{\text{init}}=10^{-6}$ to $\eta_{\text{base}}=4\times10^{-5}$, while an initial loss multiplier decays from $S_{\max}=4.0$ to $1.0$:
-\begin{equation}\label{eq:warmup_main}
-    \eta_s=\eta_{\text{init}}+(\eta_{\text{base}}-\eta_{\text{init}})
-    \frac{s}{S_{\text{warmup}}},
-    \qquad
-    S_{\text{loss}}(s)=S_{\max}-(S_{\max}-1)
-    \frac{s}{S_{\text{warmup}}}.
-\end{equation}
-We optimize $L_{\text{scaled}}=S_{\text{loss}}(s)L_{\text{total}}$ during warmup and use $L_{\text{total}}$ afterward.
+\paragraph{Training Warmup.}
+We use a short learning-rate and loss-scale warmup for numerical stability. Its schedule is an implementation detail and is given with the full training algorithm in Appendix~B.
 
 \subsection{Post-hoc Calibration and Decision Thresholding}
-To decouple representational weight learning from probability calibration under extreme class imbalance, we employ a post-hoc logit temperature/bias calibration step inspired by Temperature Scaling (TS) \cite{guo2017calibration}, alongside validation-based decision threshold sweeps. Because this transformation is applied before the Softplus evidence map, it changes both the expected probabilities and the total Dirichlet strength; it should therefore be interpreted as evidential post-hoc calibration, not as ordinary softmax temperature scaling.
+Post-hoc calibration is applied to logits before the Softplus evidence map. Because this changes both predictive probabilities and Dirichlet strength, we treat it as evidential post-hoc calibration rather than ordinary softmax temperature scaling. The implementation supports temperature-only and bias-temperature modes, with prior-shift correction fitted on the calibration partition; the full formula is given in Appendix~B.
 
-\paragraph{Bias-Corrected Temperature Scaling.} After training, the model parameters are frozen. We compute a fixed prior-shift vector
-\begin{equation}
-    \Delta_c^{\pi}=\ln(\pi_{\text{true},c}+\epsilon)-\ln(\pi_{\text{train},c}+\epsilon),
-\end{equation}
-and optimize a scalar temperature parameter $T_{\text{cal}} > 0$ plus an optional residual bias vector $\bm{b}_{\text{res}}\in\R^K$ on the calibration partition:
-\begin{equation}
-    z^{\text{calib}}_c
-    =
-    \frac{z^{\text{base}}_c+\Delta_c^{\pi}}{T_{\text{cal}}}
-    + b_{\text{res},c},
-    \quad c = 1, \ldots, K .
-\end{equation}
-The scaled evidence is then computed as $e^{\text{calib}}_c = \ln(1 + \exp(z^{\text{calib}}_c))$. The fixed $\Delta^\pi$ term counteracts train/deployment prior shift, while $\bm{b}_{\text{res}}$ is learned only in the bias-temperature calibration mode. Both $T_{\text{cal}}$ and $\bm{b}_{\text{res}}$ are fitted by minimizing NLL on the calibration partition. We report the calibration mode used for each experiment separately from the operating-threshold sweep so that post-hoc probability calibration is not conflated with threshold selection.
-
-\paragraph{Decision Thresholding.} To select the adaptive operating point without altering the calibrated evidence values, we sweep classification thresholds $\tau$ on the validation set's expected probability $\hat{p}_c = \alpha_c/S$. Shifting the decision boundary $\tau$ optimizes Sensitivity and Specificity for rare-event detection, but does not calibrate the underlying Dirichlet probabilities themselves.
+Operating thresholds are selected separately by sweeping validation probabilities $\hat p_c=\alpha_c/S$. Threshold selection changes the decision rule used for Sensitivity/Specificity trade-offs but does not recalibrate the underlying evidence values.
 
 \paragraph{Scope of Claims.}
-The theoretical statements above establish that the proposed structural update is well-defined, mask-feasible, and motivated by local first-order saliency under a proper Dirichlet evidence state. They do not prove convergence, optimal topology discovery, Bayesian epistemic correctness, or realized sparse-kernel acceleration. The empirical claims in the current manuscript are limited to the reported ISIC 2024 case study and the implemented ablations; CIFAR-100-LT, MVTec AD, additional backbones, and hardware profiling are treated as explicit validation protocols until their results are reported.
+The theoretical statements above establish that the proposed structural update is well-defined, mask-feasible, and motivated by local first-order saliency under a proper Dirichlet evidence state. They do not prove convergence, optimal topology discovery, Bayesian epistemic correctness, or realized sparse-kernel acceleration. Empirical claims are limited to the reported ISIC 2024 case study; ablations and broader validation protocols are treated as supporting evidence only when explicitly reported.
 
 \section{Experimental Setup}\label{sec:experiment}
 
@@ -524,7 +496,7 @@ The main paper reports a high-stakes ISIC 2024 case study. CIFAR-100-LT, MVTec A
 \paragraph{Baselines.} The reported ISIC tables compare evidential baselines for which the same split, calibration protocol, and threshold sweep are available: Fisher EDL, Flexible EDL, R-EDL, and GUDS-EDL. The implemented extended suite additionally includes long-tailed, sparse, and MVTec reference baselines, but those results are treated as appendix/supplementary validation until fully reported. We therefore do not make SOTA-level claims beyond the evidential comparison.
 
 \paragraph{Backbone Instantiation and Wrapping.}
-The reported case study uses a ResNet-18 instantiation. Inside each residual block, the $3 \times 3$ convolutional layers are replaced with sparse convolutional wrappers that apply masks generated by latent scores; the first input convolution is kept dense. The structural proxy pass computes the risk-ratio gradient for the pruner and the KL/evidence gradient for the regrower. Optional channel permutation and activation-gradient pooling are treated as implementation details for grouping diagnostics and anti-crystallization, not as separate claimed contributions.
+The reported case study uses a ResNet-18 instantiation. Inside each residual block, the $3 \times 3$ convolutional layers are replaced with sparse convolutional wrappers that apply masks generated by latent scores; the first input convolution is kept dense. The structural proxy pass computes the risk-ratio gradient for the pruner and the KL/evidence gradient for the regrower. Additional grouping diagnostics are documented in Appendix~B and are not separate claimed contributions.
 
 \paragraph{Implementation Details.} Models are trained using 16-bit mixed precision (AMP)~\cite{micikevicius2018mixed}, while evidential losses are evaluated in FP32. We apply square-root balanced sampling on majority classes (subsampled at 1:20 in training) and employ validation-based decision threshold sweeps to select operating points. We compute Expected Calibration Error (ECE) using standard equal-width binning with $M=15$ bins.
 
@@ -585,9 +557,9 @@ R-EDL        & $0.8741$ & $0.1126$ & $0.0183$ & $\mathbf{0.0989}$ & $0.3583$ & $
 \end{adjustbox}
 \end{table*}
 
-As presented in Table~\ref{tab:results_classification}, evidential models exhibit highly variable diagnostic utility depending on the decision threshold strategy. Under the default threshold ($\tau = 0.50$), standard evidential baselines show low Sensitivity (ranging from $0.3117$ to $0.3506$). In contrast, our proposed \textbf{GUDS-EDL} achieves a Sensitivity of $\mathbf{0.4286}$ and Specificity of $\mathbf{0.9854}$ (F2-Score = $\mathbf{0.1265}$) at default thresholds. This result is consistent with the intended effect of dampened class weighting, focal modulation, capped asymmetric KL pressure, and uncertainty-guided topology adaptation, although the ablations are required to attribute the gain to individual components.
+As presented in Table~\ref{tab:results_classification}, evidential models exhibit highly variable diagnostic utility depending on the decision threshold strategy. Under the default threshold ($\tau = 0.50$), standard evidential baselines show low Sensitivity (ranging from $0.3117$ to $0.3506$). In contrast, \textbf{GUDS-EDL} achieves a Sensitivity of $\mathbf{0.4286}$ and Specificity of $\mathbf{0.9854}$ (F2-Score = $\mathbf{0.1265}$). This result is consistent with the design goal of improving rare-event decision behavior under structured sparsity, although component-level attribution requires the ablation protocol in Appendix~C.
 
-However, adjusting the decision threshold further restores utility. When optimizing for Balanced Accuracy, GUDS-EDL achieves a Sensitivity of $\mathbf{0.8312}$ and Specificity of $\mathbf{0.8828}$ (F2-score = $\mathbf{0.0396}$). In the critical High-Recall Fail-Safe regime (Sensitivity $\ge 80\%$), where screening algorithms must maintain extreme sensitivity to prevent high-cost false negatives, GUDS-EDL achieves a Sensitivity of $0.8052$ (corresponding to $62/77$ rare-event test cases), a Specificity of $\mathbf{0.9030}$, and an F2-score of $\mathbf{0.0459}$. This suggests that the proposed topology adaptation may help recover minority-class representation under valid-block 2:4 structured sparsity.
+However, adjusting the decision threshold further restores utility. When optimizing for Balanced Accuracy, GUDS-EDL achieves a Sensitivity of $\mathbf{0.8312}$ and Specificity of $\mathbf{0.8828}$ (F2-score = $\mathbf{0.0396}$). In the High-Recall Fail-Safe regime (Sensitivity $\ge 80\%$), GUDS-EDL achieves a Sensitivity of $0.8052$ (corresponding to $62/77$ rare-event test cases), a Specificity of $\mathbf{0.9030}$, and an F2-score of $\mathbf{0.0459}$. This suggests that the proposed topology adaptation may improve rare-event decision behavior under valid-block 2:4 structured sparsity.
 
 We report the 95\% Wilson confidence interval for this Sensitivity, which is $[0.703, 0.878]$. This interval highlights the high statistical sensitivity of the small number of positive samples ($N_{\text{minority}} = 77$) in the test set: a shift of just 3 or 4 false negatives could significantly reduce the observed sensitivity, demonstrating the statistical instability inherent in screening under extreme class imbalance.
 
@@ -802,11 +774,6 @@ M.~Zhou, A.~Jamzad, J.~Izard, A.~Menard, R.~Siemens, and P.~Mousavi.
 \newblock Domain transfer through image-to-image translation for uncertainty-aware prostate cancer classification.
 \newblock {\em arXiv preprint arXiv:2307.00479}, 2023.
 
-\bibitem{lin2017focal}
-T.~Lin, P.~Goyal, R.~Girshick, K.~He, and P.~Doll{\'a}r.
-\newblock Focal loss for dense object detection.
-\newblock In {\em IEEE International Conference on Computer Vision (ICCV)}, 2017.
-
 \bibitem{micikevicius2018mixed}
 P.~Micikevicius, S.~Narang, J.~Alben, G.~Diamos, E.~Elsen, D.~Garcia, B.~Ginsburg, M.~Houston, O.~Kuchaiev, G.~Venkatesh, and H.~Wu.
 \newblock Mixed precision training.
@@ -826,11 +793,6 @@ D.~P. Kingma and J.~Ba.
 B.~Charpentier, D.~Z{\"u}gner, and S.~G{\"u}nnemann.
 \newblock Posterior Network: Uncertainty estimation without OOD samples via density-based pseudo-counts.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
-
-\bibitem{josang2016subjective}
-A.~J{\o}sang.
-\newblock {\em Subjective Logic: A Formalism for Reasoning Under Uncertainty}.
-\newblock Springer, 2016.
 
 \end{thebibliography}
 
@@ -860,14 +822,17 @@ Under the Softplus evidence parameterization, $\alpha_c>1$ and therefore $S>K$ f
 
 \subsection{Structural Risk-Ratio Chain Rule}
 \label{app:r_chain}
-The structural risk ratio $R=u_a/(u_e+\epsilon)$ is differentiable for $\epsilon>0$ under the Softplus evidence map when the current mask is held fixed during the proxy structural pass. Its weight derivative is
+The batch structural risk ratio $R_{\mathcal B}$ in Eq.~\ref{eq:batch_risk} is differentiable for $\epsilon>0$ under the Softplus evidence map when the current mask is held fixed during the proxy structural pass. Its weight derivative is the batch average of the per-sample ratio derivatives:
 \begin{equation}
-    \frac{\partial R}{\partial w_{ij}}
+    \frac{\partial R_{\mathcal B}}{\partial w_{ij}}
     =
+    \frac{1}{|\mathcal B|}\sum_{n\in\mathcal B}
+    \left[
     \frac{1}{u_e+\epsilon}\frac{\partial u_a}{\partial w_{ij}}
     -
     \frac{u_a}{(u_e+\epsilon)^2}
-    \frac{\partial u_e}{\partial w_{ij}} .
+    \frac{\partial u_e}{\partial w_{ij}}
+    \right]^{(n)} .
 \end{equation}
 The vacuity derivative expands through the Dirichlet parameters as
 \begin{equation}
@@ -907,7 +872,7 @@ and therefore
     \frac{\partial \alpha_m}{\partial z_m}
     \frac{\partial z_m}{\partial w_{ij}} .
 \end{equation}
-This expansion provides the risk-ratio derivative used by the signed pruning score in Eq.~\ref{eq:C_ij}. It combines local vacuity and expected-entropy derivatives through the ordinary network Jacobian $\partial z_m/\partial w_{ij}$, rather than relying on an unspecified pruning signal.
+This expansion provides the batch risk-ratio derivative used by the signed pruning score in Eq.~\ref{eq:C_ij}. It combines local vacuity and expected-entropy derivatives through the ordinary network Jacobian $\partial z_m/\partial w_{ij}$, rather than relying on an unspecified pruning signal.
 
 \subsection{Asymmetric KL Note}
 The adjusted false-evidence parameter $\tilde{\alpha}_c^{(n)}=y_c^{(n)}+(1-y_c^{(n)})\alpha_c^{(n)}$ defines the compact KL term in Eq.~\ref{eq:kl_loss_main}. Its expanded form is the standard Dirichlet-to-Dirichlet KL with the true-class concentration removed from the shrinkage penalty:
@@ -945,14 +910,14 @@ For each entry, $W_{\text{eff},ij}=W_{ij}M_{ij}$ while the mask is fixed during 
 Stacking this entry-wise identity over the tensor gives Eq.~\ref{eq:masked_gradient}. If $M_{ij}=0$, the instantaneous task gradient with respect to $W_{ij}$ is zero, which motivates the separate structural proxy pass used by the pruning/regrowth update.
 
 \subsection{Proof of Proposition~\ref{prop:signed_pruning}}
-The first-order Taylor expansion of $R$ after replacing $w_{ij}$ by $0$ is
+The first-order Taylor expansion of $R_{\mathcal B}$ after replacing $w_{ij}$ by $0$ is
 \begin{equation}
-    R(w_{ij}=0)-R(w_{ij})
+    R_{\mathcal B}(w_{ij}=0)-R_{\mathcal B}(w_{ij})
     =
-    -w_{ij}\frac{\partial R}{\partial w_{\text{eff},ij}}
+    -w_{ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}
     + o(|w_{ij}|).
 \end{equation}
-The leading term is negative exactly when $w_{ij}\frac{\partial R}{\partial w_{\text{eff},ij}}>0$. Thus, to first order, removing such a connection decreases the evidential risk ratio. Conversely, when the product is negative, the leading term is positive and removal increases the risk ratio. The positive-part operator in Eq.~\ref{eq:C_ij} keeps only the first case as a pruning candidate.
+The leading term is negative exactly when $w_{ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}>0$. Thus, to first order, removing such a connection decreases the batch evidential risk ratio. Conversely, when the product is negative, the leading term is positive and removal increases the risk ratio. The positive-part operator in Eq.~\ref{eq:C_ij} keeps only the first case as a pruning candidate.
 
 \subsection{Proof of Proposition~\ref{prop:regrowth_saliency}}
 Let $Q(\bm{W}_{\text{eff}})=L_{\text{grow}}(\bm{W}_{\text{eff}})$. For a scalar perturbation $\delta_{ij}$ at connection $(i,j)$,
@@ -981,6 +946,29 @@ Moreover, $\mathcal{F}_n(t)\ge0$, $\mu(t)\in[0,1]$, $\bar{\omega}_{y_n}\le\omega
 
 \FloatBarrier
 \section{Appendix B: Full GUDS-EDL Algorithm and Implementation}
+\paragraph{Learning-rate and loss-scale warmup.}
+During the first epoch, the learning rate is linearly warmed from $\eta_{\text{init}}=10^{-6}$ to $\eta_{\text{base}}=4\times10^{-5}$, while an initial loss multiplier decays from $S_{\max}=4.0$ to $1.0$:
+\begin{equation}\label{eq:warmup_main}
+    \eta_s=\eta_{\text{init}}+(\eta_{\text{base}}-\eta_{\text{init}})
+    \frac{s}{S_{\text{warmup}}},
+    \qquad
+    S_{\text{loss}}(s)=S_{\max}-(S_{\max}-1)
+    \frac{s}{S_{\text{warmup}}}.
+\end{equation}
+The scaled objective $L_{\text{scaled}}=S_{\text{loss}}(s)L_{\text{total}}$ is used during warmup and $L_{\text{total}}$ afterward.
+
+\paragraph{Bias-corrected evidential calibration.}
+After training, logits are corrected before the Softplus evidence map by
+\begin{equation}
+    z^{\mathrm{cal}}_c
+    =
+    \frac{z^{\mathrm{base}}_c+\Delta^\pi_c}{T_{\mathrm{cal}}}
+    + b_{\mathrm{res},c},
+    \qquad
+    \Delta^\pi_c=\log(\pi_{\mathrm{true},c}+\epsilon)-\log(\pi_{\mathrm{train},c}+\epsilon).
+\end{equation}
+Temperature-only calibration sets $\bm{b}_{\mathrm{res}}=\bm{0}$; bias-temperature calibration learns both $T_{\mathrm{cal}}$ and $\bm{b}_{\mathrm{res}}$ on the calibration partition.
+
 \begin{algorithm}[H]
 \caption{GUDS-EDL Training and Optimization Loop}
 \label{alg:guds_edl}
@@ -992,7 +980,7 @@ Moreover, $\mathcal{F}_n(t)\ge0$, $\mu(t)\in[0,1]$, $\bar{\omega}_{y_n}\le\omega
     \ENDIF
     \IF{$t \ge T_w$}
         \STATE Sample a proxy batch $(\bm{X}, \bm{y}) \sim \mathcal{D}$ for amortized topology computation.
-        \STATE Compute $R=u_a/(u_e+\epsilon)$ and store $\nabla_{\bm{W}_{\text{eff}}}R$ for the pruner.
+        \STATE Compute $R_{\mathcal B}$ by Eq.~\ref{eq:batch_risk} and store $\nabla_{\bm{W}_{\text{eff}}}R_{\mathcal B}$ for the pruner.
         \STATE Compute $L_{\text{grow}}$ by Eq.~\ref{eq:grow_objective} and store $\nabla_{\bm{W}_{\text{eff}}}L_{\text{grow}}$ for the regrower.
         \STATE Compute $C_{ij}$ by Eq.~\ref{eq:C_ij} and $G_{ij}$ by Eq.~\ref{eq:G_ij}.
         \STATE Optionally add vacuity-scaled exploration noise when $G_{ij}$ is nearly flat.

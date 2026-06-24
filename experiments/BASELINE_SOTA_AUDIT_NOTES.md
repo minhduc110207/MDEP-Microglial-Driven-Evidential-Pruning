@@ -97,7 +97,7 @@ Important paper-writing caveat:
 
 - `static_24_edl`
   - Static 2:4 sparse EDL with fixed magnitude-derived masks.
-  - Useful for separating the effect of strict 2:4 sparsity from dynamic
+  - Useful for separating the effect of valid-block 2:4 sparsity from dynamic
     topology adaptation.
 
 - `rigl_style_24`

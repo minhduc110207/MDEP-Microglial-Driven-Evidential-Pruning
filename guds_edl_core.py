@@ -841,7 +841,7 @@ class MDEPTrainer:
         num_classes = outputs.shape[1]
         
         # Phase 5: Support class_conditioned vs uniform KL for Astrocyte
-        regrower_type = getattr(self.args, 'regrower_type', 'kl_uniform') if self.args else 'kl_uniform'
+        regrower_type = getattr(self.args, 'regrower_type', 'class_conditioned') if self.args else 'class_conditioned'
         alpha_base = uncertainties['alpha']
         
         if (
@@ -1351,6 +1351,9 @@ def replace_conv2d_with_mdep(model):
     """Recursively swap nn.Conv2d / nn.Linear → MDEPConv2d / MDEPLinear."""
     for name, module in model.named_children():
         if isinstance(module, nn.Conv2d):
+            # Keep the RGB input stem dense, matching the paper protocol.
+            if module.in_channels == 3 and module.groups == 1:
+                continue
             new = MDEPConv2d(
                 module.in_channels, module.out_channels, module.kernel_size,
                 stride=module.stride, padding=module.padding,
@@ -2272,7 +2275,7 @@ def main():
     parser.add_argument('--disable_pruner', action='store_true', help="Disable Microglia pruning")
     parser.add_argument('--disable_regrower', action='store_true', help="Disable Astrocyte regrowing")
     parser.add_argument('--pruner_type', type=str, default='signed_first_order', choices=['signed_first_order', 'absolute_grad', 'magnitude', 'random'])
-    parser.add_argument('--regrower_type', type=str, default='kl_uniform', choices=['kl_uniform', 'class_conditioned', 'gradient', 'random'])
+    parser.add_argument('--regrower_type', type=str, default='class_conditioned', choices=['kl_uniform', 'class_conditioned', 'gradient', 'random'])
     parser.add_argument('--kl_scaling', type=str, default='asymmetric', choices=['asymmetric', 'symmetric'])
     parser.add_argument('--disable_efl', action='store_true', help="Disable Evidential Focal Loss weighting")
     parser.add_argument('--disable_anticryst', action='store_true', help="Disable Astrocyte anti-crystallization")
