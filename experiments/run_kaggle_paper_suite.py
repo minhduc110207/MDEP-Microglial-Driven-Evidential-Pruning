@@ -26,6 +26,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,8 +50,9 @@ def run_command(spec: CommandSpec) -> int:
     env.setdefault("WANDB_SILENT", "true")
     env.setdefault("PYTHONUNBUFFERED", "1")
 
+    start = time.time()
     print("\n" + "=" * 96)
-    print(f"Running {spec.name}")
+    print(f"[START] {spec.name}")
     print("Command:", " ".join(spec.command))
     print("Log:", log_path)
     print("=" * 96)
@@ -71,7 +73,13 @@ def run_command(spec: CommandSpec) -> int:
         for line in process.stdout:
             print(line, end="")
             log_file.write(line)
-    return process.wait()
+    code = process.wait()
+    elapsed = time.time() - start
+    status = "OK" if code == 0 else f"FAILED exit={code}"
+    print("-" * 96)
+    print(f"[END] {spec.name} | {status} | elapsed={elapsed / 60:.1f} min | log={log_path}")
+    print("-" * 96)
+    return code
 
 
 def build_commands(args: argparse.Namespace) -> list[CommandSpec]:

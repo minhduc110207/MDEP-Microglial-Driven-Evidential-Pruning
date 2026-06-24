@@ -46,12 +46,15 @@ from guds_edl_core import (  # noqa: E402
 from experiments.cifar_lt_runner import get_cifar100_lt_dataloaders  # noqa: E402
 from experiments.isic_paper_experiments import (  # noqa: E402
     EXPERIMENTS,
+    collect_softmax_outputs,
     json_safe,
     prior_logit_delta,
     run_calibration,
+    run_softmax_calibration,
     seed_everything,
     train_guds,
     train_standard,
+    uses_softmax_evaluation,
 )
 from experiments.metrics_ext import (  # noqa: E402
     binary_extended_metrics,
@@ -131,6 +134,7 @@ def calibrate_multiclass(
     mode: str,
     p_true: list[float],
     p_train: list[float],
+    probability_family: str = "evidential",
 ) -> tuple[float, torch.Tensor | None, dict[str, float]]:
     logits, labels = collect_multiclass_logits(model, cal_loader, device)
     prior_delta = prior_logit_delta(
@@ -143,7 +147,9 @@ def calibrate_multiclass(
     logits_for_calibration = logits + prior_delta
     evidence_layer = model.fc[1]
 
-    def evidential_nll(scaled_logits: torch.Tensor) -> torch.Tensor:
+    def calibration_loss(scaled_logits: torch.Tensor) -> torch.Tensor:
+        if probability_family == "softmax":
+            return F.cross_entropy(scaled_logits, labels)
         evidence = evidence_layer(scaled_logits)
         unc = compute_uncertainties(evidence)
         probs = (unc["alpha"] / unc["S"]).clamp_min(1e-8)
@@ -158,7 +164,7 @@ def calibrate_multiclass(
         def closure():
             optimizer.zero_grad()
             model.zero_grad(set_to_none=True)
-            loss = evidential_nll(logits_for_calibration / temp_param.clamp_min(0.1))
+            loss = calibration_loss(logits_for_calibration / temp_param.clamp_min(0.1))
             loss.backward()
             return loss
 
@@ -172,7 +178,7 @@ def calibrate_multiclass(
         def closure():
             optimizer.zero_grad()
             model.zero_grad(set_to_none=True)
-            loss = evidential_nll(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param)
+            loss = calibration_loss(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param)
             loss.backward()
             return loss
 
@@ -197,6 +203,7 @@ def evaluate_multiclass(
     temperature: float,
     bias: torch.Tensor | None,
     class_counts: list[int] | None = None,
+    probability_family: str = "evidential",
 ) -> dict[str, float]:
     model.eval()
     linear = model.fc[0]
@@ -208,9 +215,12 @@ def evaluate_multiclass(
         logits = linear(model.backbone(inputs)) / temperature
         if bias is not None:
             logits = logits + bias
-        evidence = evidence_layer(logits)
-        unc = compute_uncertainties(evidence)
-        probs = unc["alpha"] / unc["S"]
+        if probability_family == "softmax":
+            probs = F.softmax(logits, dim=1)
+        else:
+            evidence = evidence_layer(logits)
+            unc = compute_uncertainties(evidence)
+            probs = unc["alpha"] / unc["S"]
         targets_all.append(targets.numpy())
         probs_all.append(probs.detach().cpu().numpy())
 
@@ -279,6 +289,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     train_loader, val_loader, cal_loader, test_loader, class_weights, p_true, p_train = loaders
     num_classes = 100 if benchmark == "cifar" else 2
     class_counts = cifar_class_counts(args.ratio) if benchmark == "cifar" else None
+    softmax_eval = uses_softmax_evaluation(spec)
 
     pretrained = benchmark != "cifar" and not args.no_pretrained
     model = EvidenceResNet(num_classes=num_classes, dataset=benchmark, pretrained=pretrained)
@@ -293,10 +304,20 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     run_name = f"ir{args.ratio}" if benchmark == "cifar" else args.category
     run_dir = output_root(benchmark) / run_name / experiment_name / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\n{'=' * 90}\n{benchmark} | {run_name} | {experiment_name} | seed={seed}\nOutput: {run_dir}\n{'=' * 90}")
+    print(f"\n[RUN] benchmark={benchmark} case={run_name} experiment={experiment_name} seed={seed} epochs={args.epochs} output={run_dir}")
 
     if spec.use_mdep_trainer:
-        history = train_guds(model, train_loader, device, spec, class_weights, args.epochs, lr)
+        history = train_guds(
+            model,
+            train_loader,
+            device,
+            spec,
+            class_weights,
+            args.epochs,
+            lr,
+            log_every=args.log_every,
+            verbose_structural_logs=args.verbose_structural_logs,
+        )
     else:
         history = train_standard(
             model,
@@ -308,6 +329,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             p_train,
             args.epochs,
             lr,
+            log_every=args.log_every,
         )
 
     if benchmark == "cifar":
@@ -318,17 +340,29 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             spec.calibration_mode,
             p_true,
             p_train,
+            probability_family="softmax" if softmax_eval else "evidential",
         )
     else:
-        temperature, bias, thresholds = run_calibration(
-            model,
-            cal_loader,
-            val_loader,
-            device,
-            spec.calibration_mode,
-            p_true,
-            p_train,
-        )
+        if softmax_eval:
+            temperature, bias, thresholds, _ = run_softmax_calibration(
+                model,
+                cal_loader,
+                val_loader,
+                device,
+                spec.calibration_mode,
+                p_true,
+                p_train,
+            )
+        else:
+            temperature, bias, thresholds = run_calibration(
+                model,
+                cal_loader,
+                val_loader,
+                device,
+                spec.calibration_mode,
+                p_true,
+                p_train,
+            )
     prior_delta = prior_logit_delta(
         p_true,
         p_train,
@@ -351,19 +385,36 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             temperature=temperature,
             bias=eval_bias,
             class_counts=class_counts,
+            probability_family="softmax" if softmax_eval else "evidential",
         )
     else:
-        _, metrics = evaluate(
-            model,
-            val_loader,
-            test_loader,
-            device,
-            num_classes=num_classes,
-            temperature=temperature,
-            bias=eval_bias,
-            plot=False,
-        )
-        outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
+        if softmax_eval:
+            outputs = collect_softmax_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
+            y_true = outputs["y_true"]
+            probs = outputs["probs"]
+            y_pred = (probs[:, 1] >= 0.5).astype(int)
+            confidences = probs.max(axis=1)
+            correct = (y_pred == y_true).astype(float)
+            ece_adaptive, _, _, _ = compute_adaptive_ece(confidences, correct)
+            ece_eq_width, _, _, _ = compute_ece(confidences, correct)
+            metrics = {
+                "macro_auroc": float(roc_auc_score(y_true, probs[:, 1])),
+                "pr_auc": float(average_precision_score(y_true, probs[:, 1])),
+                "ece_adaptive": float(ece_adaptive),
+                "ece_eq_width": float(ece_eq_width),
+            }
+        else:
+            _, metrics = evaluate(
+                model,
+                val_loader,
+                test_loader,
+                device,
+                num_classes=num_classes,
+                temperature=temperature,
+                bias=eval_bias,
+                plot=False,
+            )
+            outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
         metrics.update(binary_extended_metrics(
             outputs["y_true"],
             outputs["probs"],
@@ -398,6 +449,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         "p_train": p_train,
         "history": history,
         "metrics": metrics,
+        "evaluator": "softmax" if softmax_eval else "evidential",
     }
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
     if args.save_model:
@@ -425,6 +477,8 @@ def main() -> int:
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--save_model", action="store_true")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
+    parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
+    parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

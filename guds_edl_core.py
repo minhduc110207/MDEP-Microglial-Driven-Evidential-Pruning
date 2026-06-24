@@ -433,7 +433,7 @@ class MDEPConv2d(nn.Conv2d):
         )
 
 
-def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disable_regrower=False, pruner_type='signed_first_order', use_anticryst=True):
+def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disable_regrower=False, pruner_type='signed_first_order', use_anticryst=True, verbose=False):
     """
     Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals.
     Also computes and returns the Mask Flop Rate (structural convergence) and Dead Channel Ratio.
@@ -445,12 +445,14 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
     total_channels = 0
     delta_s_dict = {}
     
-    print("\n🔍 [DEBUG - update_scores_agents]")
-    print("-" * 75)
+    if verbose:
+        print("\n🔍 [DEBUG - update_scores_agents]")
+        print("-" * 75)
     for name, module in model.named_modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
             if not hasattr(module, 'grad_microglia_w'):
-                print(f"  Layer {name}: ⚠️ Missing grad_microglia_w")
+                if verbose:
+                    print(f"  Layer {name}: ⚠️ Missing grad_microglia_w")
                 continue
 
             # Capture old mask before score update
@@ -559,22 +561,23 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
             total_dead_channels += dead
             total_channels += c_count
 
-            # Print diagnostic info for each layer
-            print(f"  Layer: {name}")
-            print(f"    grad_microglia : min={c1_min:.2e}, max={c1_max:.2e}")
-            print(f"    grad_astrocyte : min={g2_min:.2e}, max={g2_max:.2e}")
-            print(f"    u_e_node   : max={g1_max:.2e}")
-            print(f"    delta_S    : min={delta_S.min().item():.4f}, max={delta_S.max().item():.4f}")
-            print(f"    Flips/Total: {flops} / {old_mask.numel()} ({flops / old_mask.numel() * 100:.4f}%) | Dead Ch: {dead}/{c_count}")
-            print("-" * 50)
+            if verbose:
+                print(f"  Layer: {name}")
+                print(f"    grad_microglia : min={c1_min:.2e}, max={c1_max:.2e}")
+                print(f"    grad_astrocyte : min={g2_min:.2e}, max={g2_max:.2e}")
+                print(f"    u_e_node   : max={g1_max:.2e}")
+                print(f"    delta_S    : min={delta_S.min().item():.4f}, max={delta_S.max().item():.4f}")
+                print(f"    Flips/Total: {flops} / {old_mask.numel()} ({flops / old_mask.numel() * 100:.4f}%) | Dead Ch: {dead}/{c_count}")
+                print("-" * 50)
 
     flop_rate = total_flops / (total_elements + 1e-8)
     dead_ratio = total_dead_channels / (total_channels + 1e-8)
-    print(f"  >>> TOTAL FLOP RATE: {flop_rate*100:.6f}% ({total_flops} / {total_elements})")
-    print(f"  >>> TOTAL DEAD CHANNEL RATIO: {dead_ratio*100:.2f}% ({total_dead_channels} / {total_channels})")
+    if verbose:
+        print(f"  >>> TOTAL FLOP RATE: {flop_rate*100:.6f}% ({total_flops} / {total_elements})")
+        print(f"  >>> TOTAL DEAD CHANNEL RATIO: {dead_ratio*100:.2f}% ({total_dead_channels} / {total_channels})")
     
     # Layer-wise Visualization of Delta S
-    if epoch is not None and len(delta_s_dict) > 0:
+    if verbose and epoch is not None and len(delta_s_dict) > 0:
         try:
             import os
             import math
@@ -617,7 +620,8 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
         except Exception as e:
             print(f"  >>> Failed to save delta_S plot: {e}")
 
-    print("-" * 75)
+    if verbose:
+        print("-" * 75)
     return flop_rate
 
 
@@ -931,7 +935,9 @@ class MDEPTrainer:
                         else:
                             m.grad_L_w = torch.zeros_like(m.weight)
 
-            if not is_warmup and batch_idx == 0:
+            verbose_structural_logs = getattr(self.args, 'verbose_structural_logs', False) if self.args else False
+
+            if not is_warmup and batch_idx == 0 and verbose_structural_logs:
                 self.check_gradient_flow(epoch)
 
             self.scaler.step(self.optimizer)
@@ -949,7 +955,8 @@ class MDEPTrainer:
                     disable_pruner=disable_pruner,
                     disable_regrower=disable_regrower,
                     pruner_type=pruner_type,
-                    use_anticryst=use_anticryst
+                    use_anticryst=use_anticryst,
+                    verbose=verbose_structural_logs,
                 )
                 self.last_flop_rate = mask_flop_rate
 
@@ -1454,7 +1461,7 @@ def plot_risk_coverage_curve(y_true, y_pred, confidences):
     plt.show()
 
 
-def check_representational_collapse(model):
+def check_representational_collapse(model, detail=False):
     """
     Diagnoses Representational Collapse in 2:4 structured sparsity.
     A collapse occurs not when sparsity reaches 100% (which is impossible under 2:4),
@@ -1470,12 +1477,17 @@ def check_representational_collapse(model):
     """
     print("\n🔬 Representational Collapse Diagnostics")
     print("-" * 105)
-    print(f"  {'Layer':30s} | {'Score Std':12s} | {'Score Mean':12s} | {'Struct Grad':12s} | {'Status'}")
-    print("-" * 105)
+    if detail:
+        print(f"  {'Layer':30s} | {'Score Std':12s} | {'Score Mean':12s} | {'Struct Grad':12s} | {'Status'}")
+        print("-" * 105)
     
     all_pass = True
+    issue_counts = {}
+    static_layers = 0
+    total_layers = 0
     for name, module in model.named_modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
+            total_layers += 1
             scores = module.scores.data
             std = scores.std().item() if scores.numel() > 1 else 0.0
             mean = scores.mean().item()
@@ -1498,12 +1510,19 @@ def check_representational_collapse(model):
             if issues:
                 status = "❌ FAIL (" + ", ".join(issues) + ")"
                 all_pass = False
+                for issue in issues:
+                    issue_counts[issue] = issue_counts.get(issue, 0) + 1
             elif is_static_baseline:
                 status = "ℹ️ STATIC 2:4 (grad N/A)"
+                static_layers += 1
                 
-            print(f"  {name:30s} | {std:12.4e} | {mean:12.4f} | {grad_norm:12.4e} | {status}")
+            if detail:
+                print(f"  {name:30s} | {std:12.4e} | {mean:12.4f} | {grad_norm:12.4e} | {status}")
             
     print("-" * 105)
+    if not detail:
+        issue_text = ", ".join(f"{key}: {value}" for key, value in sorted(issue_counts.items())) if issue_counts else "none"
+        print(f"  Layers checked: {total_layers} | static grad-N/A layers: {static_layers} | issues: {issue_text}")
     if all_pass:
         print("  🌟 OVERALL STATUS: HEALTHY (No Representational Collapse Detected)")
     else:
@@ -1511,7 +1530,7 @@ def check_representational_collapse(model):
     print()
 
 
-def print_sparsity_report(model):
+def print_sparsity_report(model, detail=False):
     """Per-layer and total sparsity stats + 2:4 pattern check + MACs estimation."""
     print("\n📐 Sparsity & Hardware Metrics Report")
     print("-" * 75)
@@ -1519,6 +1538,8 @@ def print_sparsity_report(model):
     total_zeros  = 0
     total_macs_dense = 0
     total_macs_sparse = 0
+    valid_24 = 0
+    checked_24 = 0
     
     for name, module in model.named_modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
@@ -1542,21 +1563,25 @@ def print_sparsity_report(model):
             if n % 4 == 0:
                 blocks = mask.view(-1, 4)
                 valid = (blocks.sum(dim=1) == 2).all().item()
+                checked_24 += 1
+                valid_24 += int(valid)
                 pattern = "✅ 2:4 (TensorCore Ready)" if valid else "❌ Not 2:4"
             else:
                 pattern = "⚠ skip (size%4≠0)"
-            print(f"  {name:30s} | {sparsity:5.1f}% sparse | {pattern}")
+            if detail:
+                print(f"  {name:30s} | {sparsity:5.1f}% sparse | {pattern}")
             
     overall = total_zeros / total_params * 100 if total_params > 0 else 0.0
     macs_saved = (total_macs_dense - total_macs_sparse) / total_macs_dense * 100 if total_macs_dense > 0 else 0.0
     print("-" * 75)
     print(f"  {'TOTAL PARAMS':30s} | {overall:5.1f}% sparse")
+    print(f"  {'VALID 2:4 LAYERS':30s} | {valid_24}/{checked_24}")
     print(f"  {'THEORETICAL MACs SAVED':30s} | {macs_saved:5.1f}% reduction in MDEP layers")
     print("  *(Note: Ampere GPU Tensor Cores provide 2x speedup for strict 2:4 sparsity)*")
     print()
     
     # Run Advanced Collapse Diagnostics
-    check_representational_collapse(model)
+    check_representational_collapse(model, detail=detail)
 
 
 def compute_patient_level_se_top15(df, probs):
@@ -1875,7 +1900,7 @@ def evaluate(model, val_loader, test_loader, device, num_classes, temperature=1.
 
 
 
-def calibrate_temperature(model, val_loader, device):
+def calibrate_temperature(model, val_loader, device, p_true=None, p_train=None):
     """
     Calibrates the temperature parameter T on the validation set using L-BFGS,
     and dynamically optimizes decision thresholds for clinical support.
@@ -1912,6 +1937,21 @@ def calibrate_temperature(model, val_loader, device):
         
     logits = torch.cat(logits_list, dim=0).detach()
     labels = torch.cat(labels_list, dim=0).to(device)
+    if p_true is not None and p_train is not None:
+        prior_delta = torch.tensor(
+            [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(logits.shape[1])],
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+    else:
+        prior_delta = torch.zeros(logits.shape[1], dtype=logits.dtype, device=logits.device)
+    logits_for_calibration = logits + prior_delta
+
+    def evidential_nll(scaled_logits):
+        evidence = evidence_layer(scaled_logits)
+        unc = compute_uncertainties(evidence)
+        probs = (unc['alpha'] / unc['S']).clamp_min(1e-8)
+        return F.nll_loss(torch.log(probs), labels)
     
     # Optimize temperature parameter T and bias parameter b (Bias-Corrected TS)
     temperature = nn.Parameter(torch.ones(1, device=device) * 1.5)
@@ -1920,8 +1960,9 @@ def calibrate_temperature(model, val_loader, device):
     
     def eval_loss():
         optimizer.zero_grad()
-        scaled_logits = logits / temperature + bias
-        loss = F.cross_entropy(scaled_logits, labels)
+        model.zero_grad(set_to_none=True)
+        scaled_logits = logits_for_calibration / temperature.clamp_min(0.1) + bias
+        loss = evidential_nll(scaled_logits)
         loss.backward()
         return loss
         
@@ -1929,10 +1970,10 @@ def calibrate_temperature(model, val_loader, device):
     
     T = max(0.1, temperature.item())
     b = bias.detach()
-    print(f"[INFO] Calibrated Temperature T: {T:.4f}, Bias: {b.cpu().numpy()}")
+    print(f"[INFO] Calibrated Temperature T: {T:.4f}, Prior Delta: {prior_delta.cpu().numpy()}, Bias: {b.cpu().numpy()}")
     
     # Optimize thresholds dynamically on calibrated validation predictions
-    scaled_logits = logits / T + b
+    scaled_logits = logits_for_calibration / T + b
     with torch.no_grad():
         evidence = evidence_layer(scaled_logits)
         unc = compute_uncertainties(evidence)
@@ -2350,7 +2391,7 @@ def main():
             print(f"⚠️ Error loading best checkpoint: {e}. Evaluating with final weights.")
 
     # 1. Calibrate temperature and optimize thresholds dynamically on Calibration Hold-out set
-    temperature, bias, thresholds = calibrate_temperature(model, cal_loader, device)
+    temperature, bias, thresholds = calibrate_temperature(model, cal_loader, device, p_true=p_true, p_train=p_train)
 
     # 2. Wrap model in Adaptive Decision Support using calibrated temperature and thresholds
     decision_support = AdaptiveThresholdDecisionSupport(
@@ -2365,6 +2406,7 @@ def main():
     calibrated_checkpoint = {
         'model_state_dict': model.state_dict(),
         'temperature': temperature,
+        'bias': bias,
         'thresholds': thresholds,
         'p_true': p_true,
         'p_train': p_train
@@ -2377,14 +2419,19 @@ def main():
     decision_support.restore_model()
 
     # ── Evaluation ─────────────────────────────────────────────────
-    p_true = [0.9985, 0.0015] if num_classes == 2 else [1.0 / num_classes] * num_classes
-    adj = [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(num_classes)]
-    logit_adj = torch.tensor(adj, dtype=torch.float32, device=device)
+    prior_delta = torch.tensor(
+        [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(num_classes)],
+        dtype=torch.float32,
+        device=device,
+    )
+    eval_bias = prior_delta / max(temperature, 1e-8)
+    if bias is not None:
+        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
     if hasattr(model.fc[1], 'logit_adjustment'):
-        model.fc[1].logit_adjustment = logit_adj
-        print(f"⚖️ Applied Log-Prior Adjustment: {adj}")
+        model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
+        print(f"⚖️ Applied explicit evaluation prior delta: {prior_delta.cpu().numpy()}")
     
-    _, eval_metrics = evaluate(model, val_loader, test_loader, device, num_classes, temperature=temperature, bias=bias, plot=True)
+    _, eval_metrics = evaluate(model, val_loader, test_loader, device, num_classes, temperature=temperature, bias=eval_bias, plot=True)
     print_sparsity_report(model)
     
     if has_wandb:

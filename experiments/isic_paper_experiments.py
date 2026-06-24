@@ -40,7 +40,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import average_precision_score, balanced_accuracy_score, confusion_matrix, roc_auc_score
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,12 @@ from guds_edl_core import (  # noqa: E402
     MDEPTrainer,
     MDEPConv2d,
     MDEPLinear,
+    compute_adaptive_ece,
+    compute_aurc,
+    compute_class_conditional_ece,
+    compute_ece,
+    compute_isic_pauc,
+    compute_patient_level_se_top15,
     compute_uncertainties,
     evaluate,
     evaluate_adaptive_modes,
@@ -324,6 +330,13 @@ SUITES: dict[str, list[str]] = {
 SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"]))
 
 
+DISCRIMINATIVE_LOSS_NAMES = {"ce", "focal", "class_balanced_ce", "balanced_softmax", "ldam_drw"}
+
+
+def uses_softmax_evaluation(spec: ExperimentSpec) -> bool:
+    return spec.loss_name in DISCRIMINATIVE_LOSS_NAMES or spec.classifier_retrain
+
+
 class FlexibleEvidenceLayer(EvidenceLayer):
     """Softplus evidence with a learnable positive logit scale."""
 
@@ -588,6 +601,165 @@ def run_calibration(
 
 
 @torch.no_grad()
+def collect_softmax_outputs(
+    model: nn.Module,
+    loader,
+    device: torch.device,
+    temperature: float,
+    bias: torch.Tensor | None,
+) -> dict[str, np.ndarray]:
+    logits, labels = collect_logits_labels(model, loader, device)
+    scaled_logits = logits / temperature
+    if bias is not None:
+        scaled_logits = scaled_logits + bias.to(device=scaled_logits.device, dtype=scaled_logits.dtype)
+    probs = F.softmax(scaled_logits, dim=1).detach().cpu().numpy()
+    y_true = labels.detach().cpu().numpy().astype(int)
+    return {
+        "y_true": y_true,
+        "probs": probs,
+        "y_pred": probs.argmax(axis=1),
+        "confidences": probs.max(axis=1),
+    }
+
+
+def thresholds_from_probabilities(y_true: np.ndarray, probs: np.ndarray) -> dict[str, float]:
+    best_t_bal_acc = 0.5
+    best_bal_acc = 0.0
+    best_t_clinical = 0.5
+    best_spec_at_sens80 = 0.0
+    found_sens80 = False
+    for threshold in np.linspace(0.01, 0.99, 199):
+        y_pred = (probs[:, 1] >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+        sens = tp / (tp + fn + 1e-8)
+        spec = tn / (tn + fp + 1e-8)
+        bal_acc = 0.5 * (sens + spec)
+        if bal_acc > best_bal_acc:
+            best_bal_acc = bal_acc
+            best_t_bal_acc = float(threshold)
+        if sens >= 0.80 and (spec > best_spec_at_sens80 or not found_sens80):
+            best_spec_at_sens80 = spec
+            best_t_clinical = float(threshold)
+            found_sens80 = True
+    return {
+        "rule_out": best_t_clinical,
+        "high_recall": best_t_clinical,
+        "double_read": best_t_clinical,
+        "balanced": best_t_bal_acc,
+        "rule_in": 0.5,
+    }
+
+
+def run_softmax_calibration(
+    model: nn.Module,
+    cal_loader,
+    val_loader,
+    device: torch.device,
+    mode: str,
+    p_true: list[float],
+    p_train: list[float],
+) -> tuple[float, torch.Tensor | None, dict[str, float], torch.Tensor]:
+    logits, labels = collect_logits_labels(model, cal_loader, device)
+    prior_delta = prior_logit_delta(p_true, p_train, logits.shape[1], device=logits.device, dtype=logits.dtype)
+    logits_for_calibration = logits + prior_delta
+
+    if mode == "none":
+        temperature = 1.0
+        bias = None
+    elif mode == "temperature_only":
+        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
+        optimizer = optim.LBFGS([temp_param], lr=0.01, max_iter=50)
+
+        def closure():
+            optimizer.zero_grad()
+            loss = F.cross_entropy(logits_for_calibration / temp_param.clamp_min(0.1), labels)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        temperature = max(0.1, float(temp_param.detach().item()))
+        bias = None
+    elif mode == "bias_temperature":
+        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
+        bias_param = nn.Parameter(torch.zeros(logits.shape[1], device=device))
+        optimizer = optim.LBFGS([temp_param, bias_param], lr=0.01, max_iter=50)
+
+        def closure():
+            optimizer.zero_grad()
+            loss = F.cross_entropy(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param, labels)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        temperature = max(0.1, float(temp_param.detach().item()))
+        bias = bias_param.detach()
+    else:
+        raise ValueError(f"Unknown calibration_mode: {mode}")
+
+    eval_bias = prior_delta / max(temperature, 1e-8)
+    if bias is not None:
+        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
+    val_outputs = collect_softmax_outputs(model, val_loader, device, temperature, eval_bias)
+    thresholds = thresholds_from_probabilities(val_outputs["y_true"], val_outputs["probs"])
+    print(f"[CAL] mode={mode} | evaluator=softmax | T={temperature:.4f} | thresholds={thresholds}")
+    return temperature, bias, thresholds, prior_delta
+
+
+def test_frame_from_loader(test_loader) -> pd.DataFrame:
+    if isinstance(test_loader.dataset, torch.utils.data.Subset) and hasattr(test_loader.dataset.dataset, "data_frame"):
+        return test_loader.dataset.dataset.data_frame.iloc[test_loader.dataset.indices]
+    if hasattr(test_loader.dataset, "data_frame"):
+        return test_loader.dataset.data_frame
+    return pd.DataFrame({
+        "target": [test_loader.dataset[i][1].item() for i in range(len(test_loader.dataset))],
+        "patient_id": [f"patient_{i // 5}" for i in range(len(test_loader.dataset))],
+    })
+
+
+def evaluate_softmax_baseline(
+    model: nn.Module,
+    test_loader,
+    device: torch.device,
+    temperature: float,
+    eval_bias: torch.Tensor,
+    thresholds: dict[str, float],
+    deployment_prevalence: float,
+) -> dict[str, float]:
+    outputs = collect_softmax_outputs(model, test_loader, device, temperature, eval_bias)
+    y_true = outputs["y_true"]
+    probs = outputs["probs"]
+    y_pred = (probs[:, 1] >= 0.5).astype(int)
+    confidences = probs.max(axis=1)
+    correct = (y_pred == y_true).astype(float)
+    ece_adaptive, _, _, _ = compute_adaptive_ece(confidences, correct)
+    ece_eq_width, _, _, _ = compute_ece(confidences, correct)
+    class_eces = compute_class_conditional_ece(probs, y_true)
+    threshold_report = {
+        "balanced": float(thresholds.get("balanced", 0.5)),
+        "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
+    }
+    metrics = {
+        "pauc": compute_isic_pauc(y_true, probs[:, 1], min_tpr=0.80),
+        "se_top15": compute_patient_level_se_top15(test_frame_from_loader(test_loader), probs),
+        "pr_auc": average_precision_score(y_true, probs[:, 1]),
+        "macro_auroc": roc_auc_score(y_true, probs[:, 1]),
+        "aurc": compute_aurc(y_true, y_pred, confidences),
+        "ece_adaptive": float(ece_adaptive),
+        "ece_eq_width": float(ece_eq_width),
+        "class_ece_0": float(class_eces[0]),
+        "class_ece_1": float(class_eces[1]),
+        "balanced_accuracy_default": float(balanced_accuracy_score(y_true, y_pred)),
+    }
+    metrics.update(binary_extended_metrics(
+        y_true,
+        probs,
+        thresholds=threshold_report,
+        deployment_prevalence=deployment_prevalence,
+    ))
+    return metrics
+
+
+@torch.no_grad()
 def quality_gate_report(decision_support: AdaptiveThresholdDecisionSupport, test_loader, device: torch.device) -> dict[str, float]:
     targets_all = []
     decisions_all = []
@@ -762,6 +934,7 @@ def train_standard(
     p_train: list[float],
     total_epochs: int,
     lr: float,
+    log_every: int = 5,
 ) -> list[dict[str, float]]:
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
@@ -772,8 +945,7 @@ def train_standard(
         set_static_sparse_mode(model)
 
     criterion = None
-    standard_loss_names = {"ce", "focal", "class_balanced_ce", "balanced_softmax", "ldam_drw"}
-    if spec.loss_name not in standard_loss_names:
+    if spec.loss_name not in DISCRIMINATIVE_LOSS_NAMES:
         criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
 
     for epoch in range(total_epochs):
@@ -787,7 +959,7 @@ def train_standard(
             targets = targets.to(device)
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
-                if spec.loss_name in standard_loss_names:
+                if spec.loss_name in DISCRIMINATIVE_LOSS_NAMES:
                     logits = logits_from_model(model, inputs)
                     loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train, epoch, total_epochs)
                 else:
@@ -802,7 +974,8 @@ def train_standard(
         avg_loss = float(np.mean(losses)) if losses else 0.0
         elapsed = time.time() - start
         history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed})
-        print(f"Epoch [{epoch + 1:>2}/{total_epochs}] | loss={avg_loss:.4f} | {elapsed:.1f}s")
+        if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
+            print(f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} loss={avg_loss:.4f} time={elapsed:.1f}s")
     if spec.classifier_retrain:
         history.extend(retrain_classifier_crt(model, train_loader, device, class_weights, total_epochs, lr))
     return history
@@ -816,6 +989,8 @@ def train_guds(
     class_weights: torch.Tensor,
     total_epochs: int,
     lr: float,
+    log_every: int = 5,
+    verbose_structural_logs: bool = False,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
@@ -831,13 +1006,15 @@ def train_guds(
         disable_anticryst=spec.disable_anticryst,
         use_anticryst=not spec.disable_anticryst,
         disable_topology_cache=spec.disable_topology_cache,
+        verbose_structural_logs=verbose_structural_logs,
     )
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args)
     history = []
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
         history.append({"epoch": epoch + 1, "loss": float(loss), "gamma": float(trainer.step_gamma(epoch))})
-        print(f"Epoch [{epoch + 1:>2}/{total_epochs}] | loss={loss:.4f} | gamma={trainer.step_gamma(epoch):.4f}")
+        if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
+            print(f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} loss={loss:.4f} gamma={trainer.step_gamma(epoch):.4f}")
     return history
 
 
@@ -846,7 +1023,11 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     run_dir = output_root() / spec.name / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\n{'=' * 90}\nRunning {spec.name}: {spec.description}\nOutput: {run_dir}\nDevice: {device}\n{'=' * 90}")
+    print(
+        f"\n[RUN] dataset=isic experiment={spec.name} family={spec.family} "
+        f"evaluator={'softmax' if uses_softmax_evaluation(spec) else 'evidential'} "
+        f"seed={seed} epochs={args.epochs} device={device} output={run_dir}"
+    )
 
     loaders = get_imbalanced_dataloaders(
         batch_size=args.batch_size,
@@ -867,7 +1048,17 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     model = model.to(device)
 
     if spec.use_mdep_trainer:
-        history = train_guds(model, train_loader, device, spec, class_weights, args.epochs, args.lr)
+        history = train_guds(
+            model,
+            train_loader,
+            device,
+            spec,
+            class_weights,
+            args.epochs,
+            args.lr,
+            log_every=args.log_every,
+            verbose_structural_logs=args.verbose_structural_logs,
+        )
     else:
         history = train_standard(
             model,
@@ -879,70 +1070,97 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             p_train,
             args.epochs,
             args.lr,
+            log_every=args.log_every,
         )
 
-    temperature, bias, thresholds = run_calibration(
-        model,
-        cal_loader,
-        val_loader,
-        device,
-        spec.calibration_mode,
-        p_true,
-        p_train,
-    )
-    decision_support = AdaptiveThresholdDecisionSupport(
-        model,
-        is_resnet=True,
-        thresholds=thresholds,
-        temperature=temperature,
-        bias=bias,
-        true_class_prior=p_true,
-        train_class_prior=p_train,
-    )
-    evaluate_adaptive_modes(decision_support, test_loader, device)
-    quality_metrics = quality_gate_report(decision_support, test_loader, device)
-    decision_support.restore_model()
+    quality_metrics = {}
+    if uses_softmax_evaluation(spec):
+        temperature, bias, thresholds, prior_delta = run_softmax_calibration(
+            model,
+            cal_loader,
+            val_loader,
+            device,
+            spec.calibration_mode,
+            p_true,
+            p_train,
+        )
+        eval_bias = prior_delta / max(temperature, 1e-8)
+        if bias is not None:
+            eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
+        if hasattr(model.fc[1], "logit_adjustment"):
+            model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
+        metrics = evaluate_softmax_baseline(
+            model,
+            test_loader,
+            device,
+            temperature,
+            eval_bias,
+            thresholds,
+            args.deployment_prevalence,
+        )
+    else:
+        temperature, bias, thresholds = run_calibration(
+            model,
+            cal_loader,
+            val_loader,
+            device,
+            spec.calibration_mode,
+            p_true,
+            p_train,
+        )
+        decision_support = AdaptiveThresholdDecisionSupport(
+            model,
+            is_resnet=True,
+            thresholds=thresholds,
+            temperature=temperature,
+            bias=bias,
+            true_class_prior=p_true,
+            train_class_prior=p_train,
+        )
+        evaluate_adaptive_modes(decision_support, test_loader, device)
+        quality_metrics = quality_gate_report(decision_support, test_loader, device)
+        decision_support.restore_model()
 
-    prior_delta = prior_logit_delta(
-        p_true,
-        p_train,
-        num_classes,
-        device=device,
-        dtype=torch.float32,
-    )
-    eval_bias = prior_delta / max(temperature, 1e-8)
-    if bias is not None:
-        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
-    if hasattr(model.fc[1], "logit_adjustment"):
-        model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
+        prior_delta = prior_logit_delta(
+            p_true,
+            p_train,
+            num_classes,
+            device=device,
+            dtype=torch.float32,
+        )
+        eval_bias = prior_delta / max(temperature, 1e-8)
+        if bias is not None:
+            eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
+        if hasattr(model.fc[1], "logit_adjustment"):
+            model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
-    _, metrics = evaluate(
-        model,
-        val_loader,
-        test_loader,
-        device,
-        num_classes=num_classes,
-        temperature=temperature,
-        bias=eval_bias,
-        plot=False,
-    )
-    outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
-    threshold_report = {
-        "balanced": float(thresholds.get("balanced", 0.5)),
-        "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
-    }
-    metrics.update(binary_extended_metrics(
-        outputs["y_true"],
-        outputs["probs"],
-        thresholds=threshold_report,
-        deployment_prevalence=args.deployment_prevalence,
-    ))
-    metrics.update(uncertainty_separation_metrics(
-        outputs["y_true"],
-        outputs["y_pred"],
-        outputs["u_e"],
-        outputs["u_a"],
-    ))
+        _, metrics = evaluate(
+            model,
+            val_loader,
+            test_loader,
+            device,
+            num_classes=num_classes,
+            temperature=temperature,
+            bias=eval_bias,
+            plot=False,
+        )
+        outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
+        threshold_report = {
+            "balanced": float(thresholds.get("balanced", 0.5)),
+            "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
+        }
+        metrics.update(binary_extended_metrics(
+            outputs["y_true"],
+            outputs["probs"],
+            thresholds=threshold_report,
+            deployment_prevalence=args.deployment_prevalence,
+        ))
+        metrics.update(uncertainty_separation_metrics(
+            outputs["y_true"],
+            outputs["y_pred"],
+            outputs["u_e"],
+            outputs["u_a"],
+        ))
     if spec.sparse:
         print_sparsity_report(model)
 
@@ -962,6 +1180,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "history": history,
         "metrics": metrics,
         "quality_gate": quality_metrics,
+        "evaluator": "softmax" if uses_softmax_evaluation(spec) else "evidential",
     }
     (run_dir / "run_config.json").write_text(json.dumps(json_safe(asdict(spec)), indent=2), encoding="utf-8")
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
@@ -993,6 +1212,8 @@ def main() -> int:
     parser.add_argument("--no_save_model", action="store_true")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     parser.add_argument("--deployment_prevalence", type=float, default=0.0015, help="Prevalence used for PPV/NPV/NNB reporting.")
+    parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
+    parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
