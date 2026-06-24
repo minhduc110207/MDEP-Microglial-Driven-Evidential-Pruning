@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -47,8 +46,9 @@ from guds_edl_core import (  # noqa: E402
 from experiments.cifar_lt_runner import get_cifar100_lt_dataloaders  # noqa: E402
 from experiments.isic_paper_experiments import (  # noqa: E402
     EXPERIMENTS,
-    run_calibration,
     json_safe,
+    prior_logit_delta,
+    run_calibration,
     seed_everything,
     train_guds,
     train_standard,
@@ -129,8 +129,26 @@ def calibrate_multiclass(
     cal_loader,
     device: torch.device,
     mode: str,
+    p_true: list[float],
+    p_train: list[float],
 ) -> tuple[float, torch.Tensor | None, dict[str, float]]:
     logits, labels = collect_multiclass_logits(model, cal_loader, device)
+    prior_delta = prior_logit_delta(
+        p_true,
+        p_train,
+        logits.shape[1],
+        device=logits.device,
+        dtype=logits.dtype,
+    )
+    logits_for_calibration = logits + prior_delta
+    evidence_layer = model.fc[1]
+
+    def evidential_nll(scaled_logits: torch.Tensor) -> torch.Tensor:
+        evidence = evidence_layer(scaled_logits)
+        unc = compute_uncertainties(evidence)
+        probs = (unc["alpha"] / unc["S"]).clamp_min(1e-8)
+        return F.nll_loss(torch.log(probs), labels)
+
     if mode == "none":
         return 1.0, None, {}
     if mode == "temperature_only":
@@ -139,7 +157,8 @@ def calibrate_multiclass(
 
         def closure():
             optimizer.zero_grad()
-            loss = F.cross_entropy(logits / temp_param.clamp_min(0.1), labels)
+            model.zero_grad(set_to_none=True)
+            loss = evidential_nll(logits_for_calibration / temp_param.clamp_min(0.1))
             loss.backward()
             return loss
 
@@ -152,7 +171,8 @@ def calibrate_multiclass(
 
         def closure():
             optimizer.zero_grad()
-            loss = F.cross_entropy(logits / temp_param.clamp_min(0.1) + bias_param, labels)
+            model.zero_grad(set_to_none=True)
+            loss = evidential_nll(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param)
             loss.backward()
             return loss
 
@@ -291,12 +311,36 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         )
 
     if benchmark == "cifar":
-        temperature, bias, thresholds = calibrate_multiclass(model, cal_loader, device, spec.calibration_mode)
+        temperature, bias, thresholds = calibrate_multiclass(
+            model,
+            cal_loader,
+            device,
+            spec.calibration_mode,
+            p_true,
+            p_train,
+        )
     else:
-        temperature, bias, thresholds = run_calibration(model, cal_loader, val_loader, device, spec.calibration_mode)
+        temperature, bias, thresholds = run_calibration(
+            model,
+            cal_loader,
+            val_loader,
+            device,
+            spec.calibration_mode,
+            p_true,
+            p_train,
+        )
+    prior_delta = prior_logit_delta(
+        p_true,
+        p_train,
+        num_classes,
+        device=device,
+        dtype=torch.float32,
+    )
+    eval_bias = prior_delta / max(temperature, 1e-8)
+    if bias is not None:
+        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
     if hasattr(model.fc[1], "logit_adjustment"):
-        adjustment = [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(num_classes)]
-        model.fc[1].logit_adjustment = torch.tensor(adjustment, dtype=torch.float32, device=device)
+        model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
     if benchmark == "cifar":
         metrics = evaluate_multiclass(
@@ -305,7 +349,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             device,
             num_classes=num_classes,
             temperature=temperature,
-            bias=bias,
+            bias=eval_bias,
             class_counts=class_counts,
         )
     else:
@@ -316,10 +360,10 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             device,
             num_classes=num_classes,
             temperature=temperature,
-            bias=bias,
+            bias=eval_bias,
             plot=False,
         )
-        outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=bias)
+        outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
         metrics.update(binary_extended_metrics(
             outputs["y_true"],
             outputs["probs"],
@@ -347,6 +391,8 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         "batch_size": args.batch_size,
         "temperature": temperature,
         "bias": bias,
+        "evaluation_bias": eval_bias,
+        "prior_delta": prior_delta,
         "thresholds": thresholds,
         "p_true": p_true,
         "p_train": p_train,

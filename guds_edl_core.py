@@ -1462,11 +1462,15 @@ def check_representational_collapse(model):
     We check for:
     1. Score Variance Tracking (Zero Variance)
     2. Mean Drift Control (Negative Drift)
-    3. Gradient Vitality (Dead Gradient)
+    3. Structural-gradient vitality for dynamic sparse runs.
+
+    Static 2:4 baselines intentionally keep the score tensor fixed after mask
+    initialization, so missing structural gradients are reported as N/A rather
+    than representational collapse.
     """
     print("\n🔬 Representational Collapse Diagnostics")
     print("-" * 105)
-    print(f"  {'Layer':30s} | {'Score Std':12s} | {'Score Mean':12s} | {'Grad Norm':12s} | {'Status'}")
+    print(f"  {'Layer':30s} | {'Score Std':12s} | {'Score Mean':12s} | {'Struct Grad':12s} | {'Status'}")
     print("-" * 105)
     
     all_pass = True
@@ -1480,6 +1484,7 @@ def check_representational_collapse(model):
             grad_L = getattr(module, 'grad_L_w', None)
             if grad_L is not None:
                 grad_norm = grad_L.norm().item()
+            is_static_baseline = bool(getattr(module, 'static_24_baseline', False))
                 
             status = "✅ PASS"
             issues = []
@@ -1487,12 +1492,14 @@ def check_representational_collapse(model):
                 issues.append("Zero Variance")
             if mean <= -10.0:
                 issues.append("Negative Drift")
-            if grad_norm <= 1e-6:
+            if (not is_static_baseline) and grad_norm <= 1e-6:
                 issues.append("Dead Gradient")
                 
             if issues:
                 status = "❌ FAIL (" + ", ".join(issues) + ")"
                 all_pass = False
+            elif is_static_baseline:
+                status = "ℹ️ STATIC 2:4 (grad N/A)"
                 
             print(f"  {name:30s} | {std:12.4e} | {mean:12.4f} | {grad_norm:12.4e} | {status}")
             

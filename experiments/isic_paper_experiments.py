@@ -54,7 +54,6 @@ from guds_edl_core import (  # noqa: E402
     MDEPTrainer,
     MDEPConv2d,
     MDEPLinear,
-    calibrate_temperature,
     compute_uncertainties,
     evaluate,
     evaluate_adaptive_modes,
@@ -425,11 +424,23 @@ def set_static_sparse_mode(model: nn.Module) -> None:
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
             module.warmup = False
             module.gamma = 0.15
+            module.static_24_baseline = True
 
 
 def model_head(model: nn.Module) -> tuple[nn.Module, nn.Module]:
     head = model.fc if hasattr(model, "fc") else model.head
     return head[0], head[1]
+
+
+def prior_logit_delta(
+    p_true: list[float],
+    p_train: list[float],
+    num_classes: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    values = [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(num_classes)]
+    return torch.tensor(values, dtype=dtype, device=device)
 
 
 @torch.no_grad()
@@ -463,10 +474,13 @@ def optimize_thresholds(
     device: torch.device,
     temperature: float,
     bias: torch.Tensor | None,
+    prior_delta: torch.Tensor | None = None,
 ) -> dict[str, float]:
     linear, evidence_layer = model_head(model)
     logits, labels = collect_logits_labels(model, val_loader, device)
     with torch.no_grad():
+        if prior_delta is not None:
+            logits = logits + prior_delta.to(device=logits.device, dtype=logits.dtype)
         scaled_logits = logits / temperature
         if bias is not None:
             scaled_logits = scaled_logits + bias
@@ -509,9 +523,25 @@ def run_calibration(
     val_loader,
     device: torch.device,
     mode: str,
+    p_true: list[float],
+    p_train: list[float],
 ) -> tuple[float, torch.Tensor | None, dict[str, float]]:
-    linear, _ = model_head(model)
+    linear, evidence_layer = model_head(model)
     logits, labels = collect_logits_labels(model, cal_loader, device)
+    prior_delta = prior_logit_delta(
+        p_true,
+        p_train,
+        linear.out_features,
+        device=logits.device,
+        dtype=logits.dtype,
+    )
+    logits_for_calibration = logits + prior_delta
+
+    def evidential_nll(scaled_logits: torch.Tensor) -> torch.Tensor:
+        evidence = evidence_layer(scaled_logits)
+        unc = compute_uncertainties(evidence)
+        probs = (unc["alpha"] / unc["S"]).clamp_min(1e-8)
+        return F.nll_loss(torch.log(probs), labels)
 
     if mode == "none":
         temperature = 1.0
@@ -522,7 +552,8 @@ def run_calibration(
 
         def closure():
             optimizer.zero_grad()
-            loss = F.cross_entropy(logits / temp_param.clamp_min(0.1), labels)
+            model.zero_grad(set_to_none=True)
+            loss = evidential_nll(logits_for_calibration / temp_param.clamp_min(0.1))
             loss.backward()
             return loss
 
@@ -536,7 +567,8 @@ def run_calibration(
 
         def closure():
             optimizer.zero_grad()
-            loss = F.cross_entropy(logits / temp_param.clamp_min(0.1) + bias_param, labels)
+            model.zero_grad(set_to_none=True)
+            loss = evidential_nll(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param)
             loss.backward()
             return loss
 
@@ -546,8 +578,12 @@ def run_calibration(
     else:
         raise ValueError(f"Unknown calibration_mode: {mode}")
 
-    thresholds = optimize_thresholds(model, val_loader, device, temperature, bias)
-    print(f"[CAL] mode={mode} | T={temperature:.4f} | bias={None if bias is None else bias.detach().cpu().numpy()} | thresholds={thresholds}")
+    thresholds = optimize_thresholds(model, val_loader, device, temperature, bias, prior_delta=prior_delta)
+    print(
+        f"[CAL] mode={mode} | T={temperature:.4f} | "
+        f"prior_delta={prior_delta.detach().cpu().numpy()} | "
+        f"bias={None if bias is None else bias.detach().cpu().numpy()} | thresholds={thresholds}"
+    )
     return temperature, bias, thresholds
 
 
@@ -845,7 +881,15 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             args.lr,
         )
 
-    temperature, bias, thresholds = run_calibration(model, cal_loader, val_loader, device, spec.calibration_mode)
+    temperature, bias, thresholds = run_calibration(
+        model,
+        cal_loader,
+        val_loader,
+        device,
+        spec.calibration_mode,
+        p_true,
+        p_train,
+    )
     decision_support = AdaptiveThresholdDecisionSupport(
         model,
         is_resnet=True,
@@ -859,9 +903,18 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     quality_metrics = quality_gate_report(decision_support, test_loader, device)
     decision_support.restore_model()
 
+    prior_delta = prior_logit_delta(
+        p_true,
+        p_train,
+        num_classes,
+        device=device,
+        dtype=torch.float32,
+    )
+    eval_bias = prior_delta / max(temperature, 1e-8)
+    if bias is not None:
+        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
     if hasattr(model.fc[1], "logit_adjustment"):
-        adjustment = [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(num_classes)]
-        model.fc[1].logit_adjustment = torch.tensor(adjustment, dtype=torch.float32, device=device)
+        model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
     _, metrics = evaluate(
         model,
@@ -870,10 +923,10 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         device,
         num_classes=num_classes,
         temperature=temperature,
-        bias=bias,
+        bias=eval_bias,
         plot=False,
     )
-    outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=bias)
+    outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
     threshold_report = {
         "balanced": float(thresholds.get("balanced", 0.5)),
         "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
@@ -900,6 +953,9 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "batch_size": args.batch_size,
         "temperature": temperature,
         "bias": bias,
+        "calibration_bias": bias,
+        "evaluation_bias": eval_bias,
+        "prior_delta": prior_delta,
         "thresholds": thresholds,
         "p_true": p_true,
         "p_train": p_train,

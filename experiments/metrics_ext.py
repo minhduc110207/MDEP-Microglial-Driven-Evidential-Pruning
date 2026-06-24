@@ -304,9 +304,9 @@ def multiclass_extended_metrics(
 
     class_eces = []
     for cls in range(num_classes):
-        cls_mask = y_true == cls
-        if cls_mask.any():
-            class_eces.append(_ece(probs[cls_mask, cls], (y_pred[cls_mask] == y_true[cls_mask]).astype(float)))
+        class_targets = (y_true == cls).astype(float)
+        if class_targets.any():
+            class_eces.append(_ece(probs[:, cls], class_targets))
     metrics[f"{prefix}classwise_ece_mean"] = float(np.mean(class_eces)) if class_eces else float("nan")
     metrics[f"{prefix}classwise_ece_max"] = float(np.max(class_eces)) if class_eces else float("nan")
 

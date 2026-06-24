@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -36,6 +35,7 @@ from experiments.generalization_paper_suite import EvidenceResNet  # noqa: E402
 from experiments.isic_paper_experiments import (  # noqa: E402
     EXPERIMENTS,
     json_safe,
+    prior_logit_delta,
     quality_gate_report,
     run_calibration,
     seed_everything,
@@ -118,7 +118,15 @@ def run_one(backbone: str, args: argparse.Namespace, seed: int) -> dict:
     print(f"\n{'=' * 90}\nBackbone protocol | {backbone} | seed={seed}\nOutput: {run_dir}\n{'=' * 90}")
 
     history = train_guds(model, train_loader, device, spec, class_weights, args.epochs, args.lr)
-    temperature, bias, thresholds = run_calibration(model, cal_loader, val_loader, device, spec.calibration_mode)
+    temperature, bias, thresholds = run_calibration(
+        model,
+        cal_loader,
+        val_loader,
+        device,
+        spec.calibration_mode,
+        p_true,
+        p_train,
+    )
     decision_support = AdaptiveThresholdDecisionSupport(
         model,
         is_resnet=True,
@@ -131,11 +139,20 @@ def run_one(backbone: str, args: argparse.Namespace, seed: int) -> dict:
     quality_metrics = quality_gate_report(decision_support, test_loader, device)
     decision_support.restore_model()
 
+    prior_delta = prior_logit_delta(
+        p_true,
+        p_train,
+        num_classes,
+        device=device,
+        dtype=torch.float32,
+    )
+    eval_bias = prior_delta / max(temperature, 1e-8)
+    if bias is not None:
+        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
     if hasattr(model.fc[1], "logit_adjustment"):
-        adjustment = [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(num_classes)]
-        model.fc[1].logit_adjustment = torch.tensor(adjustment, dtype=torch.float32, device=device)
+        model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
-    _, metrics = evaluate(model, val_loader, test_loader, device, num_classes, temperature=temperature, bias=bias, plot=False)
+    _, metrics = evaluate(model, val_loader, test_loader, device, num_classes, temperature=temperature, bias=eval_bias, plot=False)
     print_sparsity_report(model)
 
     result = {
@@ -146,6 +163,8 @@ def run_one(backbone: str, args: argparse.Namespace, seed: int) -> dict:
         "batch_size": args.batch_size,
         "temperature": temperature,
         "bias": bias,
+        "evaluation_bias": eval_bias,
+        "prior_delta": prior_delta,
         "thresholds": thresholds,
         "p_true": p_true,
         "p_train": p_train,

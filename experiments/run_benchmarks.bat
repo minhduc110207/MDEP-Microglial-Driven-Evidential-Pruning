@@ -32,7 +32,7 @@ python ..\guds_edl_core.py
 echo.
 echo ==========================================================
 echo  All Benchmarks Completed!
-echo  To run the comprehensive Component Ablation Study, 
-echo  please execute the Jupyter Notebook: ablation_experiments.ipynb
+echo  To run the comprehensive Component Ablation Study,
+echo  run: python isic_paper_experiments.py --suite ablations --seeds 42 43 44 --no_save_model
 echo ==========================================================
 pause

@@ -119,10 +119,15 @@ You can automatically execute the full suite of runners across datasets using th
 2. Execute: `.\run_benchmarks.bat`
 
 ### Component Ablation Study
-To investigate the contribution of individual GUDS-EDL components (Microglia Pruner, Astrocyte Regrower, Structural Baselines), we provide a dedicated Jupyter Notebook:
-1. Open terminal in this folder.
-2. Run `jupyter notebook ablation_experiments.ipynb`.
-3. Follow the cells to train and evaluate the model under different ablation settings.
+To investigate the contribution of individual GUDS-EDL components, run the
+paper-facing ablation suite:
+
+```bash
+python experiments/isic_paper_experiments.py --suite ablations --seeds 42 43 44 --no_save_model
+```
+
+The notebook `experiments/ablation_experiments.ipynb` is only a thin wrapper
+around this command; it does not define separate metrics or simulated results.
 
 ### Manual CLI Execution
 You can also run any of the benchmarks manually from the terminal. The core and runners support argparse flags to toggle ablations.

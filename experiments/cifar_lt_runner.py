@@ -14,7 +14,7 @@ from torchvision import transforms, models
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from guds_edl_core import (
     EvidenceLayer, replace_conv2d_with_mdep, EvidentialFocalLoss, 
-    MDEPTrainer, evaluate, calibrate_temperature, AdaptiveThresholdDecisionSupport
+    MDEPTrainer
 )
 
 def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
@@ -62,7 +62,7 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
         test_ds, [val_len, cal_len, test_final_len], 
         generator=torch.Generator().manual_seed(seed)
     )
-    
+
     # Use 0 workers on Windows to avoid multiprocess issues during testing
     workers = 0 if os.name == 'nt' else 4
     
@@ -150,17 +150,35 @@ if __name__ == "__main__":
     
     # 5. Calibration & Testing
     print("\n--- Running Bias-Corrected Temperature Calibration ---")
-    temperature, bias, thresholds = calibrate_temperature(model, cal_loader, device)
+    from experiments.generalization_paper_suite import calibrate_multiclass, cifar_class_counts, evaluate_multiclass
+    from experiments.isic_paper_experiments import prior_logit_delta
+
+    temperature, bias, _ = calibrate_multiclass(
+        model,
+        cal_loader,
+        device,
+        "bias_temperature",
+        p_true,
+        p_train,
+    )
     
     print("\n--- Final Test Evaluation ---")
-    # Add prior shift adjustment
-    import math
-    adj = [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(100)]
-    model.fc[1].logit_adjustment = torch.tensor(adj, dtype=torch.float32, device=device)
-    
-    # Evaluate (plot=False because CIFAR-100 metrics layout might be large for PR-curves)
-    _, metrics = evaluate(model, val_loader, test_loader, device, num_classes=100, temperature=temperature, bias=bias, plot=False)
-    
+    prior_delta = prior_logit_delta(p_true, p_train, 100, device=device, dtype=torch.float32)
+    eval_bias = prior_delta / max(temperature, 1e-8)
+    if bias is not None:
+        eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
+    model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
+
+    metrics = evaluate_multiclass(
+        model,
+        test_loader,
+        device,
+        num_classes=100,
+        temperature=temperature,
+        bias=eval_bias,
+        class_counts=cifar_class_counts(args.imbalance_ratio),
+    )
+
     print("\n✅ CIFAR-100-LT Summary Results:")
     print(f"  Macro-AUROC: {metrics.get('macro_auroc', 0):.4f}")
     print(f"  AURC:        {metrics.get('aurc', 0):.4f}")
