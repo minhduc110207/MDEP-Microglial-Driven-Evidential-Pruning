@@ -19,11 +19,12 @@ We provide targeted runners to evaluate GUDS-EDL on different benchmarks. Each r
 
 ### Group A: Controlled Long-Tailed Recognition
 - **`cifar_lt_runner.py`**: Runs CIFAR-100 with exponential class imbalance (Ratios 1:10, 1:50, 1:100). Automatically downloads the dataset if not present.
-- **`generalization_paper_suite.py`**: Runs the paper-facing CIFAR/MVTec suites, including CE, Focal Loss, Logit Adjustment, Class-Balanced CE, Balanced Softmax, LDAM-DRW, cRT-style retraining, Dense EDL, Static 2:4, RigL-style 2:4, and GUDS-EDL.
+- **`generalization_paper_suite.py`**: Runs the paper-facing CIFAR/MVTec suites, including CE, Focal Loss, Logit Adjustment, Class-Balanced CE, Balanced Softmax, LDAM-DRW, cRT-style retraining, MiSLAS-style LAS+cRT, Dense EDL, Fisher EDL, Flexible EDL, R-EDL, Static 2:4, RigL-style 2:4, and GUDS-EDL.
 
 ### Group B: Industrial Defect / Anomaly Detection
 - **`mvtec_ad_runner.py`**: Runs real MVTec AD image-level binary rare-defect classification. It now fails fast if a real category is not found; dummy tensors are available only with `--allow_dummy_data` for dry-runs.
-- **`mvtec_patchcore_reference.py`**: Runs a normal-only PatchCore-lite ResNet-18 feature baseline as an anomaly-detection reference for MVTec AD.
+- **`mvtec_patchcore_reference.py`**: Runs a normal-only PatchCore-style ResNet-18 multi-layer feature baseline as an anomaly-detection reference for MVTec AD.
+- **`mvtec_simplenet_reference.py`**: Runs a SimpleNet-style reference with pretrained patch features, a feature adapter, synthetic feature anomalies, and a discriminator.
 
 ### Group C: High-Stakes Rare-Event Case Study
 - **ISIC 2024**: Evaluated via the main core file `../guds_edl_core.py`. Requires the real ISIC 2024 Kaggle competition input; dummy tensors are available only with `--allow_dummy_data` for dry-runs.
@@ -104,6 +105,7 @@ The complete planned CIFAR/MVTec baseline suites are run through:
 python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
 python experiments/generalization_paper_suite.py --benchmark mvtec --category hazelnut --epochs 20 --seeds 42 43 44
 python experiments/mvtec_patchcore_reference.py --category hazelnut --seeds 42 43 44
+python experiments/mvtec_simplenet_reference.py --category hazelnut --epochs 10 --seeds 42 43 44
 ```
 
 Hardware profiling and summary aggregation:
@@ -149,4 +151,13 @@ During training and evaluation, the scripts will generate:
 - Optional model checkpoints unless `--no_save_model` is passed.
 - Logs for each all-in-one suite command under `paper_experiment_outputs/logs/`.
 
-The metric records now include paper-facing long-tail, calibration, failure-detection, uncertainty-separation, clinical utility, MVTec image-level, and hardware structural/profiling metrics where applicable.
+The metric records are benchmark-specific: ISIC runs include clinical utility metrics; CIFAR-100-LT runs include long-tail multiclass, calibration, and selective-risk metrics; MVTec AD runs include image-level anomaly/classification metrics such as image AUROC, image AP, F1-max, calibration, and failure-detection metrics.
+
+Baseline fairness note: all in-repo baselines share the same dataset splits,
+backbone family, seed protocol, calibration/evaluation surface, and epoch
+budget as GUDS-EDL. CE/Focal/Logit Adjustment/Class-Balanced/Balanced
+Softmax/LDAM/cRT/MiSLAS-style LAS+cRT follow standard reproducible
+formulations, while Fisher EDL, Flexible EDL, R-EDL, RigL-style 2:4,
+PatchCore-style, and SimpleNet-style are in-repo reference/proxy
+implementations rather than official external-code reproductions with
+paper-specific hyperparameter searches.

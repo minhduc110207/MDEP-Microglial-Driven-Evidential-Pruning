@@ -39,25 +39,23 @@ from guds_edl_core import (  # noqa: E402
     compute_aurc,
     compute_ece,
     compute_uncertainties,
-    evaluate,
     print_sparsity_report,
     replace_conv2d_with_mdep,
 )
 from experiments.cifar_lt_runner import get_cifar100_lt_dataloaders  # noqa: E402
 from experiments.isic_paper_experiments import (  # noqa: E402
     EXPERIMENTS,
+    FlexibleEvidenceLayer,
     collect_softmax_outputs,
     json_safe,
     prior_logit_delta,
-    run_calibration,
-    run_softmax_calibration,
     seed_everything,
     train_guds,
     train_standard,
     uses_softmax_evaluation,
 )
 from experiments.metrics_ext import (  # noqa: E402
-    binary_extended_metrics,
+    binary_image_anomaly_metrics,
     collect_evidential_outputs,
     multiclass_extended_metrics,
     uncertainty_separation_metrics,
@@ -73,7 +71,11 @@ PLANNED_EXPERIMENTS = [
     "balanced_softmax",
     "ldam_drw",
     "decoupled_crt",
+    "mislas",
     "dense_edl",
+    "fisher_edl",
+    "flexible_edl",
+    "r_edl",
     "static_24_edl",
     "rigl_style_24",
     "full_guds",
@@ -81,7 +83,7 @@ PLANNED_EXPERIMENTS = [
 
 
 class EvidenceResNet(nn.Module):
-    def __init__(self, num_classes: int, dataset: str, pretrained: bool):
+    def __init__(self, num_classes: int, dataset: str, pretrained: bool, flexible: bool = False):
         super().__init__()
         weights = None
         if pretrained:
@@ -101,7 +103,8 @@ class EvidenceResNet(nn.Module):
 
         in_features = self.backbone.fc.in_features
         self.backbone.fc = nn.Identity()
-        self.fc = nn.Sequential(nn.Linear(in_features, num_classes), EvidenceLayer(activation="softplus"))
+        evidence_layer = FlexibleEvidenceLayer() if flexible else EvidenceLayer(activation="softplus")
+        self.fc = nn.Sequential(nn.Linear(in_features, num_classes), evidence_layer)
         nn.init.normal_(self.fc[0].weight, mean=0.0, std=0.001)
         nn.init.constant_(self.fc[0].bias, 0.0)
 
@@ -185,6 +188,77 @@ def calibrate_multiclass(
         optimizer.step(closure)
         return max(0.1, float(temp_param.detach().item())), bias_param.detach(), {}
     raise ValueError(f"Unknown calibration mode: {mode}")
+
+
+def calibrate_binary_image(
+    model: nn.Module,
+    cal_loader,
+    device: torch.device,
+    mode: str,
+    p_true: list[float],
+    p_train: list[float],
+    probability_family: str = "evidential",
+) -> tuple[float, torch.Tensor | None, dict[str, float]]:
+    logits, labels = collect_multiclass_logits(model, cal_loader, device)
+    prior_delta = prior_logit_delta(
+        p_true,
+        p_train,
+        logits.shape[1],
+        device=logits.device,
+        dtype=logits.dtype,
+    )
+    logits_for_calibration = logits + prior_delta
+    evidence_layer = model.fc[1]
+
+    def calibration_loss(scaled_logits: torch.Tensor) -> torch.Tensor:
+        if probability_family == "softmax":
+            return F.cross_entropy(scaled_logits, labels)
+        evidence = evidence_layer(scaled_logits)
+        unc = compute_uncertainties(evidence)
+        probs = (unc["alpha"] / unc["S"]).clamp_min(1e-8)
+        return F.nll_loss(torch.log(probs), labels)
+
+    if mode == "none":
+        temperature = 1.0
+        bias = None
+    elif mode == "temperature_only":
+        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
+        optimizer = torch.optim.LBFGS([temp_param], lr=0.01, max_iter=50)
+
+        def closure():
+            optimizer.zero_grad()
+            model.zero_grad(set_to_none=True)
+            loss = calibration_loss(logits_for_calibration / temp_param.clamp_min(0.1))
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        temperature = max(0.1, float(temp_param.detach().item()))
+        bias = None
+    elif mode == "bias_temperature":
+        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
+        bias_param = nn.Parameter(torch.zeros(logits.shape[1], device=device))
+        optimizer = torch.optim.LBFGS([temp_param, bias_param], lr=0.01, max_iter=50)
+
+        def closure():
+            optimizer.zero_grad()
+            model.zero_grad(set_to_none=True)
+            loss = calibration_loss(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        temperature = max(0.1, float(temp_param.detach().item()))
+        bias = bias_param.detach()
+    else:
+        raise ValueError(f"Unknown calibration mode: {mode}")
+
+    print(
+        f"[CAL] binary_image mode={mode} | T={temperature:.4f} | "
+        f"prior_delta={prior_delta.detach().cpu().numpy()} | "
+        f"bias={None if bias is None else bias.detach().cpu().numpy()}"
+    )
+    return temperature, bias, {}
 
 
 def cifar_class_counts(imbalance_ratio: int) -> list[int]:
@@ -277,6 +351,7 @@ def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
             args.batch_size,
             seed=seed,
             allow_dummy_data=args.allow_dummy_data,
+            defect_train_fraction=args.defect_train_fraction,
         )
     raise ValueError(f"Unsupported benchmark: {benchmark}")
 
@@ -292,7 +367,12 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     softmax_eval = uses_softmax_evaluation(spec)
 
     pretrained = benchmark != "cifar" and not args.no_pretrained
-    model = EvidenceResNet(num_classes=num_classes, dataset=benchmark, pretrained=pretrained)
+    model = EvidenceResNet(
+        num_classes=num_classes,
+        dataset=benchmark,
+        pretrained=pretrained,
+        flexible=(spec.name == "flexible_edl"),
+    )
     if spec.sparse:
         replace_conv2d_with_mdep(model)
     model = model.to(device)
@@ -343,26 +423,15 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             probability_family="softmax" if softmax_eval else "evidential",
         )
     else:
-        if softmax_eval:
-            temperature, bias, thresholds, _ = run_softmax_calibration(
-                model,
-                cal_loader,
-                val_loader,
-                device,
-                spec.calibration_mode,
-                p_true,
-                p_train,
-            )
-        else:
-            temperature, bias, thresholds = run_calibration(
-                model,
-                cal_loader,
-                val_loader,
-                device,
-                spec.calibration_mode,
-                p_true,
-                p_train,
-            )
+        temperature, bias, thresholds = calibrate_binary_image(
+            model,
+            cal_loader,
+            device,
+            spec.calibration_mode,
+            p_true,
+            p_train,
+            probability_family="softmax" if softmax_eval else "evidential",
+        )
     prior_delta = prior_logit_delta(
         p_true,
         p_train,
@@ -390,45 +459,26 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     else:
         if softmax_eval:
             outputs = collect_softmax_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
-            y_true = outputs["y_true"]
-            probs = outputs["probs"]
-            y_pred = (probs[:, 1] >= 0.5).astype(int)
-            confidences = probs.max(axis=1)
-            correct = (y_pred == y_true).astype(float)
-            ece_adaptive, _, _, _ = compute_adaptive_ece(confidences, correct)
-            ece_eq_width, _, _, _ = compute_ece(confidences, correct)
-            metrics = {
-                "macro_auroc": float(roc_auc_score(y_true, probs[:, 1])),
-                "pr_auc": float(average_precision_score(y_true, probs[:, 1])),
-                "ece_adaptive": float(ece_adaptive),
-                "ece_eq_width": float(ece_eq_width),
-            }
         else:
-            _, metrics = evaluate(
-                model,
-                val_loader,
-                test_loader,
-                device,
-                num_classes=num_classes,
-                temperature=temperature,
-                bias=eval_bias,
-                plot=False,
-            )
             outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
-        metrics.update(binary_extended_metrics(
-            outputs["y_true"],
-            outputs["probs"],
-            thresholds={
-                "balanced": float(thresholds.get("balanced", 0.5)),
-                "high_recall": float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5))),
-            },
-        ))
-        metrics.update(uncertainty_separation_metrics(
-            outputs["y_true"],
-            outputs["y_pred"],
-            outputs["u_e"],
-            outputs["u_a"],
-        ))
+        metrics = binary_image_anomaly_metrics(outputs["y_true"], outputs["probs"])
+        y_pred_default = (outputs["probs"][:, 1] >= 0.5).astype(int)
+        confidences = outputs["probs"].max(axis=1)
+        correct = (y_pred_default == outputs["y_true"]).astype(float)
+        ece_adaptive, _, _, _ = compute_adaptive_ece(confidences, correct)
+        ece_eq_width, _, _, _ = compute_ece(confidences, correct)
+        metrics["ece_adaptive"] = float(ece_adaptive)
+        metrics["ece_eq_width"] = float(ece_eq_width)
+        thresholds = {"default": 0.5}
+        if "threshold_f1_max" in metrics:
+            thresholds["f1_max"] = float(metrics["threshold_f1_max"])
+        if "u_e" in outputs and "u_a" in outputs:
+            metrics.update(uncertainty_separation_metrics(
+                outputs["y_true"],
+                outputs.get("y_pred", y_pred_default),
+                outputs["u_e"],
+                outputs["u_a"],
+            ))
 
     if spec.sparse:
         print_sparsity_report(model)
@@ -477,6 +527,7 @@ def main() -> int:
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--save_model", action="store_true")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
+    parser.add_argument("--defect_train_fraction", type=float, default=0.20, help="MVTec few-shot labeled defect fraction for supervised classifier runs.")
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--cpu", action="store_true")

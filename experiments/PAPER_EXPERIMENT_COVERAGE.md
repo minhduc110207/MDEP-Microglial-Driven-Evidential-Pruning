@@ -49,7 +49,8 @@ python experiments/isic_paper_experiments.py --suite baselines
 
 It includes Standard CE, Focal Loss, Logit Adjustment, Class-Balanced CE,
 Balanced Softmax, LDAM-DRW, cRT-style classifier retraining, Dense EDL, Fisher
-EDL, Flexible EDL, R-EDL, Static 2:4 EDL, and a RigL-style 2:4 proxy.
+EDL, Flexible EDL, R-EDL, MiSLAS-style LAS+cRT, Static 2:4 EDL, and a
+RigL-style 2:4 proxy.
 
 ## Appendix C Ablations
 
@@ -84,8 +85,10 @@ python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 -
 ```
 
 Each CIFAR run includes CE, Focal Loss, Logit Adjustment, Class-Balanced CE,
-Balanced Softmax, LDAM-DRW, cRT-style classifier retraining, Dense EDL, Static
-2:4 EDL, RigL-style 2:4, and full GUDS-EDL. The CIFAR metrics include top-1,
+Balanced Softmax, LDAM-DRW, cRT-style classifier retraining, MiSLAS-style
+LAS+cRT, Dense EDL, Fisher EDL, Flexible EDL, R-EDL, Static 2:4 EDL,
+RigL-style 2:4, and full GUDS-EDL.
+The CIFAR metrics include top-1,
 top-5, balanced accuracy, macro-F1, macro-AUROC, macro-PR-AUC, NLL, multiclass
 Brier, AURC/E-AURC, failure-detection AUROC/AUPR, many/medium/few-shot
 accuracy, group ECE, classwise ECE, and worst-group accuracy.
@@ -102,16 +105,19 @@ python experiments/generalization_paper_suite.py --benchmark mvtec --category bo
 found, it fails fast by default. Dummy tensors require the explicit
 `--allow_dummy_data` flag and should never be used for paper results.
 
-For an anomaly-detection reference baseline on the same real MVTec categories,
-run the PatchCore-lite protocol:
+For anomaly-detection reference baselines on the same real MVTec categories,
+run the PatchCore-style and SimpleNet-style protocols:
 
 ```bash
 python experiments/mvtec_patchcore_reference.py --category hazelnut --seeds 42 43 44
 python experiments/mvtec_patchcore_reference.py --category bottle --seeds 42 43 44
+python experiments/mvtec_simplenet_reference.py --category hazelnut --epochs 10 --seeds 42 43 44
+python experiments/mvtec_simplenet_reference.py --category bottle --epochs 10 --seeds 42 43 44
 ```
 
-The all-in-one suite runs this reference by default for each selected MVTec
-category. Pass `--skip_mvtec_reference` to skip it. The reference metrics include
+The all-in-one suite runs both references by default for each selected MVTec
+category. Pass `--skip_mvtec_reference` or `--skip_mvtec_simplenet` to skip one
+of them. The reference metrics include
 image-level AUROC, image-level AP, F1-max, NLL/Brier on normalized anomaly
 scores, risk-at-coverage, and failure-detection AUROC/AUPR.
 
@@ -149,9 +155,24 @@ python experiments/summarize_results.py
 - `Flexible EDL` and `R-EDL` are implemented as reproducible in-repo baseline
   variants so the paper table can be regenerated on the same split. They are
   not official external code releases.
+- `Fisher EDL` is implemented as a Fisher-regularized in-repo EDL proxy, not as
+  the original authors' training code.
+- `MiSLAS-style` implements the decoupled classifier-retraining and
+  label-aware smoothing parts of MiSLAS under the shared backbone/protocol; it
+  does not include every official training recipe detail such as the full
+  shifted-BN tuning grid.
 - `RigL-style 2:4` is a proxy using the available structured sparse update
-  surface. A fully faithful RigL implementation would require a separate update
-  engine.
+  surface with task-gradient regrowth and 2:4 masks. A fully faithful RigL
+  implementation would require a separate unstructured sparse update engine and
+  the original paper's tuning grid.
+- `PatchCore-style` uses multi-layer ResNet patch features and a memory-bank
+  nearest-neighbor score, but it is a compact in-repo reference rather than the
+  official PatchCore implementation with full coreset tuning.
+- `SimpleNet-style` implements the core adapter/synthetic-feature/discriminator
+  idea in-repo, not the official SimpleNet authors' training code.
+- All baselines share splits, backbone family, epoch budget, calibration, and
+  metrics with GUDS-EDL for controlled comparison. They are not individually
+  hyperparameter-searched reproductions of every original paper.
 - Real speedups for 2:4 sparsity still require sparse Tensor Core kernels; these
   scripts report training/evaluation metrics and structural sparsity, not
   guaranteed hardware acceleration.

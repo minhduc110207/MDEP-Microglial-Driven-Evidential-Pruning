@@ -1,5 +1,5 @@
 """
-PatchCore-lite reference baseline for MVTec AD image-level anomaly detection.
+PatchCore-style reference baseline for MVTec AD image-level anomaly detection.
 
 This is not part of the GUDS-EDL classifier family. It is a benchmark-reference
 runner so the paper can compare its image-level MVTec protocol against a
@@ -29,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.isic_paper_experiments import json_safe  # noqa: E402
-from experiments.metrics_ext import binary_extended_metrics  # noqa: E402
+from experiments.metrics_ext import binary_image_anomaly_metrics  # noqa: E402
 from experiments.mvtec_ad_runner import MVTecImageLevelDataset, _find_mvtec_category_dir  # noqa: E402
 
 
@@ -86,9 +86,16 @@ class ResNetPatchFeatures(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
         x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        return x.flatten(2).transpose(1, 2)
+        feat2 = self.layer2(x)
+        feat3 = self.layer3(feat2)
+        feat3 = torch.nn.functional.interpolate(
+            feat3,
+            size=feat2.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        feats = torch.cat([feat2, feat3], dim=1)
+        return feats.flatten(2).transpose(1, 2)
 
 
 @torch.no_grad()
@@ -180,7 +187,7 @@ def run_one(args: argparse.Namespace, seed: int) -> dict:
         "train_good_images": float(len(train_good)),
         "test_images": float(len(test_samples)),
     }
-    metrics.update(binary_extended_metrics(y_true, probs, thresholds={"default": 0.5}, prefix="patchcore_"))
+    metrics.update(binary_image_anomaly_metrics(y_true, probs, prefix="patchcore_"))
 
     run_dir = output_root() / args.category / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -188,9 +195,9 @@ def run_one(args: argparse.Namespace, seed: int) -> dict:
         "benchmark": "mvtec_patchcore",
         "run_name": args.category,
         "experiment": {
-            "name": "patchcore_lite_resnet18",
+            "name": "patchcore_style_resnet18",
             "family": "anomaly_detection_reference",
-            "description": "Normal-only PatchCore-lite image-level reference using pretrained ResNet-18 patch features.",
+            "description": "Normal-only PatchCore-style image-level reference using pretrained multi-layer ResNet-18 patch features.",
         },
         "seed": seed,
         "category_dir": category_dir,
@@ -202,7 +209,7 @@ def run_one(args: argparse.Namespace, seed: int) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run PatchCore-lite MVTec AD reference baseline.")
+    parser = argparse.ArgumentParser(description="Run PatchCore-style MVTec AD reference baseline.")
     parser.add_argument("--category", type=str, default="hazelnut")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--image_size", type=int, default=224)

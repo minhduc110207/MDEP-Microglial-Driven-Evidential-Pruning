@@ -7,7 +7,7 @@ This script runs the experiment groups referenced by main_text.tex:
    topology-cache ablation, and quality-gated reports.
 2. CIFAR-100-LT planned generalization baselines for ratios 1:10, 1:50, 1:100.
 3. MVTec AD image-level planned generalization baselines for selected categories.
-4. MVTec AD normal-only PatchCore-lite reference baseline.
+4. MVTec AD normal-only PatchCore-style reference baseline.
 5. Hardware profiling for dense/static-2:4/GUDS structural efficiency.
 
 Recommended Kaggle usage:
@@ -168,6 +168,24 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
                         ],
                     )
                 )
+            if not args.skip_mvtec_simplenet:
+                commands.append(
+                    CommandSpec(
+                        name=f"mvtec_simplenet_{category}",
+                        command=[
+                            sys.executable,
+                            str(REPO_ROOT / "experiments" / "mvtec_simplenet_reference.py"),
+                            "--category",
+                            category,
+                            "--batch_size",
+                            str(min(batch_size, 16)),
+                            "--epochs",
+                            str(1 if args.smoke else args.simplenet_epochs),
+                            "--seeds",
+                            *[str(seed) for seed in args.seeds],
+                        ],
+                    )
+                )
     if not args.skip_hardware:
         commands.append(
             CommandSpec(
@@ -220,6 +238,7 @@ def main() -> int:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--cifar_epochs", type=int, default=100)
     parser.add_argument("--mvtec_epochs", type=int, default=20)
+    parser.add_argument("--simplenet_epochs", type=int, default=10)
     parser.add_argument("--backbone_epochs", type=int, default=40)
     parser.add_argument("--hardware_iters", type=int, default=50)
     parser.add_argument("--hardware_warmup", type=int, default=10)
@@ -229,7 +248,8 @@ def main() -> int:
     parser.add_argument("--skip_isic", action="store_true")
     parser.add_argument("--skip_cifar", action="store_true")
     parser.add_argument("--skip_mvtec", action="store_true")
-    parser.add_argument("--skip_mvtec_reference", action="store_true", help="Skip PatchCore-lite MVTec reference runs.")
+    parser.add_argument("--skip_mvtec_reference", action="store_true", help="Skip PatchCore-style MVTec reference runs.")
+    parser.add_argument("--skip_mvtec_simplenet", action="store_true", help="Skip SimpleNet-style MVTec reference runs.")
     parser.add_argument("--skip_hardware", action="store_true")
     parser.add_argument("--skip_summary", action="store_true")
     parser.add_argument("--include_backbones", action="store_true", help="Also run the heavyweight ConvNeXt/Swin backbone protocol.")

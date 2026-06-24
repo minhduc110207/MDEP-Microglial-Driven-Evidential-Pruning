@@ -88,12 +88,15 @@ Run the complete MVTec AD baseline suite after attaching a real MVTec dataset:
 !python experiments/generalization_paper_suite.py --benchmark mvtec --category bottle --epochs 20 --seeds 42 43 44
 !python experiments/mvtec_patchcore_reference.py --category hazelnut --seeds 42 43 44
 !python experiments/mvtec_patchcore_reference.py --category bottle --seeds 42 43 44
+!python experiments/mvtec_simplenet_reference.py --category hazelnut --epochs 10 --seeds 42 43 44
+!python experiments/mvtec_simplenet_reference.py --category bottle --epochs 10 --seeds 42 43 44
 ```
 
 If no real MVTec category is found, the runner fails fast by default. This is
 intentional for paper experiments: all reported runs should use the real MVTec
 AD folders. Use `--allow_dummy_data` only for local dry-runs of the classifier
-runner; the PatchCore-lite reference always requires real MVTec images.
+runner; the PatchCore-style and SimpleNet-style references always require real
+MVTec images.
 
 Run hardware profiling and aggregate all seed results:
 

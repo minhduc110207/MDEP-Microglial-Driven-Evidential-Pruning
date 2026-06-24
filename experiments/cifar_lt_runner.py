@@ -71,8 +71,9 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
     cal_loader = DataLoader(cal_ds, batch_size=batch_size, shuffle=False, num_workers=workers)
     test_loader = DataLoader(test_final_ds, batch_size=batch_size, shuffle=False, num_workers=workers)
     
-    # Inverse frequency weights
-    cw = [500.0 / n for n in img_num_per_cls]
+    # Dampened inverse-frequency weights for GUDS/EDL. Standard CE-style
+    # baselines decide separately whether to use class weights.
+    cw = [np.sqrt(500.0 / n) for n in img_num_per_cls]
     cw = torch.tensor(cw, dtype=torch.float32)
     cw = cw / cw.min() # Normalize so majority class has weight 1.0
     

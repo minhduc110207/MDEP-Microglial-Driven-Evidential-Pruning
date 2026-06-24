@@ -243,11 +243,13 @@ class EvidentialFocalLoss(nn.Module):
         else:
             focal_weight = (1.0 - p_target.detach()) ** gamma_val
 
-        # Per-sample class weight: look up weight for the true class
+        # Per-sample class weight: look up weight for the true class.
         if self.class_weights is not None:
-            sample_weight = torch.sum(targets * self.class_weights.unsqueeze(0), dim=1, keepdim=True)
+            true_class_weight = torch.sum(targets * self.class_weights.unsqueeze(0), dim=1, keepdim=True)
+            ce_weight = true_class_weight
         else:
-            sample_weight = 1.0
+            true_class_weight = torch.ones_like(loss_ce)
+            ce_weight = torch.ones_like(loss_ce)
 
         # KL regularization — shrink evidence for *incorrect* classes toward 0
         alpha_tilde = targets + (1 - targets) * alpha
@@ -256,10 +258,9 @@ class EvidentialFocalLoss(nn.Module):
         # Bounded Asymmetric Scaling (Phase 4 & 5 Math update)
         if self.kl_scaling == 'asymmetric' and self.class_weights is not None:
             # Lambda_asym = min(omega_y, 10.0)
-            true_class_weight = torch.sum(targets * self.class_weights.unsqueeze(0), dim=1, keepdim=True)
             Lambda_asym = torch.clamp(true_class_weight, max=10.0)
         else:
-            Lambda_asym = 1.0
+            Lambda_asym = torch.ones_like(loss_ce)
 
         # KL Annealing
         if epoch is not None and self.annealing_epochs > 0:
@@ -267,7 +268,10 @@ class EvidentialFocalLoss(nn.Module):
         else:
             annealing_coef = 1.0
 
-        loss = sample_weight * focal_weight * (loss_ce + self.kl_lambda * annealing_coef * Lambda_asym * base_loss_kl)
+        loss = focal_weight * (
+            ce_weight * loss_ce
+            + self.kl_lambda * annealing_coef * Lambda_asym * base_loss_kl
+        )
         return torch.mean(loss)
 
 
@@ -433,7 +437,17 @@ class MDEPConv2d(nn.Conv2d):
         )
 
 
-def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disable_regrower=False, pruner_type='signed_first_order', use_anticryst=True, verbose=False):
+def update_scores_agents(
+    model,
+    beta=1.0,
+    epoch=None,
+    disable_pruner=False,
+    disable_regrower=False,
+    pruner_type='signed_first_order',
+    regrower_type='class_conditioned',
+    use_anticryst=True,
+    verbose=False,
+):
     """
     Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals.
     Also computes and returns the Mask Flop Rate (structural convergence) and Dead Channel Ratio.
@@ -467,7 +481,11 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
             else:
                 if pruner_type == 'signed_first_order':
                     c1 = torch.relu(w_val * module.grad_microglia_w)
-                else: # 'absolute_grad' (old baseline)
+                elif pruner_type == 'magnitude':
+                    c1 = torch.abs(w_val)
+                elif pruner_type == 'random':
+                    c1 = torch.rand_like(module.scores.data)
+                else: # 'absolute_grad' / RigL-style pruning proxy
                     c1 = torch.abs(w_val * module.grad_microglia_w)
                     
                 c1_min = c1.min().item()
@@ -483,7 +501,12 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
                 G_ij = torch.zeros_like(module.scores.data)
                 g2_min, g2_max = 0.0, 0.0
             else:
-                g2 = torch.abs(module.grad_astrocyte_w)
+                if regrower_type == 'gradient' and hasattr(module, 'grad_L_w'):
+                    g2 = torch.abs(module.grad_L_w)
+                elif regrower_type == 'random':
+                    g2 = torch.rand_like(module.scores.data)
+                else:
+                    g2 = torch.abs(module.grad_astrocyte_w)
                 g2_min = g2.min().item()
                 g2_max = g2.max().item()
                 if g2_max - g2_min > 1e-8:
@@ -493,8 +516,9 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
                     G_ij = torch.zeros_like(g2)
 
             # Khắc phục hiện tượng kết tinh Astrocyte (Phase 4 Action 2):
+            exploration_noise = torch.zeros_like(G_ij)
             g1_max = 0.0
-            if use_anticryst and not disable_regrower:
+            if use_anticryst and not disable_regrower and regrower_type not in {'gradient', 'random'}:
                 u_e_node = getattr(module, 'u_e_node', None)
                 if u_e_node is not None:
                     if isinstance(module, MDEPLinear):
@@ -522,10 +546,17 @@ def update_scores_agents(model, beta=1.0, epoch=None, disable_pruner=False, disa
 
                 if G_ij.max().item() <= 1e-8:
                     noise = 0.0316 * torch.randn_like(G_ij) * g1_norm
-                    G_ij = G_ij + torch.clamp(noise, min=0.0)
+                    exploration_noise = torch.clamp(noise, min=0.0)
 
-            # Calculate total driving force Delta S
-            delta_S = G_ij - C_ij
+            # Active links can be down-ranked by the pruner; dormant links are
+            # moved only by regrowth and controlled exploration.
+            active_mask = old_mask.to(dtype=G_ij.dtype)
+            dormant_mask = 1.0 - active_mask
+            dormant_growth_scale = 0.25
+            delta_S = (
+                active_mask * (G_ij - C_ij)
+                + dormant_mask * (dormant_growth_scale * G_ij + exploration_noise)
+            )
             
             # Save for visualization
             if epoch is not None:
@@ -751,7 +782,7 @@ class MDEPTrainer:
                 if hasattr(m, 'effective_weight') and m.effective_weight is not None:
                     m.effective_weight.grad = None
 
-    def compute_amortized_gradients(self, inputs):
+    def compute_amortized_gradients(self, inputs, targets=None):
         """
         Amortized backward passes that compute:
           • ∂(u_a/u_e) / ∂w   → signal for the Microglia agent (Relative Entropy Gradient)
@@ -795,10 +826,19 @@ class MDEPTrainer:
         regrower_type = getattr(self.args, 'regrower_type', 'kl_uniform') if self.args else 'kl_uniform'
         alpha_base = uncertainties['alpha']
         
-        if regrower_type == 'class_conditioned' and getattr(self.criterion, 'class_weights', None) is not None:
-            # We scale the alpha by class weights before computing KL, simulating focal expansion
-            cw = self.criterion.class_weights.unsqueeze(0)
-            loss_astrocyte = torch.mean(kl_divergence(alpha_base * cw, num_classes))
+        if (
+            regrower_type == 'class_conditioned'
+            and targets is not None
+            and getattr(self.criterion, 'class_weights', None) is not None
+        ):
+            # Class conditioning is a scalar sample gate; it never changes the
+            # Dirichlet concentration vector used in the KL.
+            if targets.dim() == 1:
+                sample_gate = self.criterion.class_weights[targets.long()].view(-1, 1)
+            else:
+                sample_gate = torch.sum(targets * self.criterion.class_weights.unsqueeze(0), dim=1, keepdim=True)
+            sample_gate = torch.clamp(sample_gate, max=10.0)
+            loss_astrocyte = torch.mean(sample_gate * uncertainties['epistemic'] * kl_divergence(alpha_base, num_classes))
         else:
             loss_astrocyte = torch.mean(kl_divergence(alpha_base, num_classes))
             
@@ -893,7 +933,7 @@ class MDEPTrainer:
             # pass per epoch; the no-cache ablation recomputes it for each batch.
             structural_probe_batch = batch_idx == 0 or (disable_topology_cache and not is_warmup)
             if (not is_warmup or epoch < 2) and structural_probe_batch:
-                self.compute_amortized_gradients(inputs)
+                self.compute_amortized_gradients(inputs, targets)
 
             self.model.zero_grad()
             self.reset_effective_weight_grads()
@@ -955,6 +995,7 @@ class MDEPTrainer:
                     disable_pruner=disable_pruner,
                     disable_regrower=disable_regrower,
                     pruner_type=pruner_type,
+                    regrower_type=getattr(self.args, 'regrower_type', 'class_conditioned') if self.args else 'class_conditioned',
                     use_anticryst=use_anticryst,
                     verbose=verbose_structural_logs,
                 )

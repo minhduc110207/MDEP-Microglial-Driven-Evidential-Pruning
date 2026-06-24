@@ -171,6 +171,45 @@ def python_cmd(args: list[str]) -> list[str]:
     return [sys.executable, *args]
 
 
+def run_git(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(REPO_ROOT),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=check,
+    )
+
+
+def git_pull_latest() -> None:
+    try:
+        before = run_git(["rev-parse", "--short", "HEAD"]).stdout.strip()
+        branch = run_git(["branch", "--show-current"]).stdout.strip() or "detached"
+    except Exception as exc:
+        raise RuntimeError(f"Could not inspect git repository at {REPO_ROOT}: {exc}") from exc
+
+    print("\nGit Update")
+    print("-" * 80)
+    print(f"Repo   : {REPO_ROOT}")
+    print(f"Branch : {branch}")
+    print(f"Before : {before}")
+
+    try:
+        result = run_git(["pull", "--ff-only"])
+    except subprocess.CalledProcessError as exc:
+        print(exc.stdout)
+        raise RuntimeError(
+            "git pull --ff-only failed. Commit/stash local changes first, or resolve "
+            "the branch state manually before running experiments."
+        ) from exc
+
+    after = run_git(["rev-parse", "--short", "HEAD"]).stdout.strip()
+    print(result.stdout.strip())
+    print(f"After  : {after}")
+    print("-" * 80)
+
+
 def build_commands(args: argparse.Namespace, mvtec_categories: list[str]) -> list[CommandSpec]:
     isic_epochs = 1 if args.smoke else args.epochs
     cifar_epochs = 1 if args.smoke else args.cifar_epochs
@@ -349,6 +388,7 @@ def main() -> int:
     parser.add_argument("--include_backbones", action="store_true")
     parser.add_argument("--no_save_model", action="store_true", help="Do not save model checkpoints for large sweeps.")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Only for dry-runs; never use for paper results.")
+    parser.add_argument("--pull_latest", action="store_true", help="Run git pull --ff-only before launching experiments.")
     parser.add_argument("--smoke", action="store_true", help="Run 1 epoch and seed 42 only.")
     parser.add_argument("--keep_going", action="store_true", help="Continue after failed sub-runs.")
     parser.add_argument("--verbose_structural_logs", action="store_true")
@@ -357,6 +397,9 @@ def main() -> int:
 
     if shutil.which(sys.executable) is None and not Path(sys.executable).exists():
         print(f"[WARN] Could not verify Python executable: {sys.executable}")
+
+    if args.pull_latest:
+        git_pull_latest()
 
     isic_root = detect_isic_root(args.isic_root)
     mvtec_root = detect_mvtec_root(args.mvtec_root)

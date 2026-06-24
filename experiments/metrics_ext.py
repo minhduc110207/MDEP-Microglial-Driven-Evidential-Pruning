@@ -14,12 +14,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import (
+    accuracy_score,
     average_precision_score,
+    balanced_accuracy_score,
     brier_score_loss,
     confusion_matrix,
     f1_score,
     log_loss,
+    precision_score,
     precision_recall_curve,
+    recall_score,
     roc_auc_score,
     top_k_accuracy_score,
 )
@@ -256,6 +260,55 @@ def binary_extended_metrics(
         n = max(len(y_true), 1)
         net_benefit = (tp / n) - (fp / n) * (pt / max(1.0 - pt, 1e-12))
         metrics[f"{prefix}decision_curve_net_benefit_pt{int(pt * 100):02d}"] = float(net_benefit)
+    return metrics
+
+
+def binary_image_anomaly_metrics(
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    prefix: str = "",
+) -> dict[str, float]:
+    """Standard image-level binary metrics for MVTec-style anomaly detection.
+
+    This deliberately excludes clinical reporting fields such as Wilson
+    sensitivity/specificity intervals, deployment-prevalence PPV/NPV, and
+    decision-curve net benefit. For MVTec AD image-level evaluation, AUROC and
+    average precision are the primary threshold-independent metrics; thresholded
+    classification metrics are reported at 0.5 and at the best F1 threshold.
+    """
+    pos = probs[:, 1]
+    y_pred_default = (pos >= 0.5).astype(int)
+    confidences = probs.max(axis=1)
+    correct = (y_pred_default == y_true).astype(float)
+    ece_default = _ece(confidences, correct)
+
+    metrics: dict[str, float] = {
+        f"{prefix}nll": _safe_metric(lambda: log_loss(y_true, probs, labels=[0, 1])),
+        f"{prefix}brier_pos": _safe_metric(lambda: brier_score_loss(y_true, pos)),
+        f"{prefix}image_auroc": _safe_metric(lambda: roc_auc_score(y_true, pos)),
+        f"{prefix}image_ap": _safe_metric(lambda: average_precision_score(y_true, pos)),
+        f"{prefix}accuracy_default": _safe_metric(lambda: accuracy_score(y_true, y_pred_default)),
+        f"{prefix}balanced_accuracy_default": _safe_metric(lambda: balanced_accuracy_score(y_true, y_pred_default)),
+        f"{prefix}precision_default": _safe_metric(lambda: precision_score(y_true, y_pred_default, zero_division=0)),
+        f"{prefix}recall_default": _safe_metric(lambda: recall_score(y_true, y_pred_default, zero_division=0)),
+        f"{prefix}f1_default": _safe_metric(lambda: f1_score(y_true, y_pred_default, zero_division=0)),
+        f"{prefix}ece_default": float(ece_default),
+    }
+
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred_default, labels=[0, 1]).ravel()
+    metrics[f"{prefix}specificity_default"] = float(tn / max(tn + fp, 1))
+    metrics[f"{prefix}false_positive_rate_default"] = float(fp / max(fp + tn, 1))
+    metrics[f"{prefix}false_negative_rate_default"] = float(fn / max(fn + tp, 1))
+
+    precision, recall, pr_thresholds = precision_recall_curve(y_true, pos)
+    f1_values = 2.0 * precision * recall / np.maximum(precision + recall, 1e-12)
+    best_idx = int(np.nanargmax(f1_values)) if len(f1_values) else 0
+    metrics[f"{prefix}f1_max"] = float(f1_values[best_idx]) if len(f1_values) else float("nan")
+    if len(pr_thresholds):
+        threshold_idx = min(best_idx, len(pr_thresholds) - 1)
+        metrics[f"{prefix}threshold_f1_max"] = float(pr_thresholds[threshold_idx])
+
+    metrics.update(failure_detection_metrics(y_true, y_pred_default, confidences, prefix=prefix))
     return metrics
 
 

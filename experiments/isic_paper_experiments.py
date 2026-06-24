@@ -41,6 +41,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
 from sklearn.metrics import average_precision_score, balanced_accuracy_score, confusion_matrix, roc_auc_score
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +95,7 @@ class ExperimentSpec:
     disable_topology_cache: bool = False
     calibration_mode: str = "bias_temperature"
     classifier_retrain: bool = False
+    label_aware_smoothing: bool = False
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
@@ -141,6 +143,14 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="cRT-style baseline: dense CE representation learning followed by classifier retraining.",
         loss_name="ce",
         classifier_retrain=True,
+    ),
+    "mislas": ExperimentSpec(
+        name="mislas",
+        family="long_tailed_sota_baseline",
+        description="MiSLAS-style baseline: decoupled classifier retraining with label-aware smoothing.",
+        loss_name="ce",
+        classifier_retrain=True,
+        label_aware_smoothing=True,
     ),
     "dense_edl": ExperimentSpec(
         name="dense_edl",
@@ -306,6 +316,7 @@ SUITES: dict[str, list[str]] = {
         "balanced_softmax",
         "ldam_drw",
         "decoupled_crt",
+        "mislas",
         "dense_edl",
         "fisher_edl",
         "flexible_edl",
@@ -833,6 +844,63 @@ def ldam_margins(p_train: list[float], max_margin: float = 0.5, device: torch.de
     return margins
 
 
+def _extract_dataset_labels(dataset) -> list[int]:
+    if hasattr(dataset, "indices") and hasattr(dataset, "dataset"):
+        base_labels = _extract_dataset_labels(dataset.dataset)
+        return [base_labels[int(idx)] for idx in dataset.indices]
+    if hasattr(dataset, "data_frame") and "target" in dataset.data_frame:
+        return [int(v) for v in dataset.data_frame["target"].tolist()]
+    if hasattr(dataset, "tensors") and len(dataset.tensors) >= 2:
+        return [int(v) for v in dataset.tensors[1].detach().cpu().tolist()]
+    labels = []
+    for idx in range(len(dataset)):
+        item = dataset[idx]
+        labels.append(int(item[1]))
+    return labels
+
+
+def make_class_balanced_loader(train_loader) -> DataLoader:
+    labels = _extract_dataset_labels(train_loader.dataset)
+    counts = np.bincount(labels)
+    sample_weights = [1.0 / max(counts[label], 1) for label in labels]
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+    return DataLoader(
+        train_loader.dataset,
+        batch_size=train_loader.batch_size,
+        sampler=sampler,
+        num_workers=getattr(train_loader, "num_workers", 0),
+        pin_memory=getattr(train_loader, "pin_memory", False),
+        drop_last=False,
+    )
+
+
+def label_aware_smoothing_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    p_train: list[float],
+    head_smoothing: float = 0.10,
+    tail_smoothing: float = 0.00,
+) -> torch.Tensor:
+    """Label-aware smoothing used by the MiSLAS-style classifier retraining baseline."""
+    num_classes = logits.shape[1]
+    freqs = torch.tensor(p_train, dtype=logits.dtype, device=logits.device)
+    if freqs.numel() != num_classes:
+        freqs = torch.ones(num_classes, dtype=logits.dtype, device=logits.device) / num_classes
+    denom = (freqs.max() - freqs.min()).clamp_min(1e-8)
+    class_smoothing = tail_smoothing + (head_smoothing - tail_smoothing) * ((freqs - freqs.min()) / denom)
+    eps = class_smoothing[targets].view(-1, 1)
+    off_value = eps / max(num_classes - 1, 1)
+    target_dist = torch.full_like(logits, 0.0)
+    target_dist.scatter_(1, targets.view(-1, 1), 1.0)
+    smooth_targets = target_dist * (1.0 - eps) + (1.0 - target_dist) * off_value
+    log_probs = F.log_softmax(logits, dim=1)
+    return torch.mean(torch.sum(-smooth_targets * log_probs, dim=1))
+
+
 def ce_or_focal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -853,7 +921,7 @@ def ce_or_focal_loss(
         adjusted = logits + delta
 
     if spec.loss_name == "ce":
-        return F.cross_entropy(adjusted, targets, weight=class_weights.to(logits.device))
+        return F.cross_entropy(adjusted, targets)
 
     if spec.loss_name == "class_balanced_ce":
         cb_weights = effective_number_weights(p_train, device=logits.device)
@@ -878,7 +946,7 @@ def ce_or_focal_loss(
 
     probs = F.softmax(adjusted, dim=1)
     pt = probs.gather(1, targets.view(-1, 1)).clamp_min(1e-8)
-    ce = F.cross_entropy(adjusted, targets, weight=class_weights.to(logits.device), reduction="none").view(-1, 1)
+    ce = F.cross_entropy(adjusted, targets, reduction="none").view(-1, 1)
     return torch.mean(((1.0 - pt) ** 2.0) * ce)
 
 
@@ -886,11 +954,14 @@ def retrain_classifier_crt(
     model: nn.Module,
     train_loader,
     device: torch.device,
-    class_weights: torch.Tensor,
+    spec: ExperimentSpec,
+    p_train: list[float],
     total_epochs: int,
     lr: float,
 ) -> list[dict[str, float]]:
     """Classifier re-training baseline inspired by cRT/decoupled classifiers."""
+    nn.init.normal_(model.fc[0].weight, mean=0.0, std=0.001)
+    nn.init.constant_(model.fc[0].bias, 0.0)
     for param in model.backbone.parameters():
         param.requires_grad = False
     for param in model.fc[0].parameters():
@@ -899,17 +970,20 @@ def retrain_classifier_crt(
     epochs = max(1, int(0.10 * total_epochs))
     optimizer = optim.AdamW(model.fc[0].parameters(), lr=lr, weight_decay=1e-4)
     history: list[dict[str, float]] = []
-    weights = class_weights.to(device)
+    crt_loader = make_class_balanced_loader(train_loader)
     for epoch in range(epochs):
         model.train()
         losses = []
         start = time.time()
-        for inputs, targets in train_loader:
+        for inputs, targets in crt_loader:
             inputs = inputs.to(device)
             targets = targets.to(device)
             optimizer.zero_grad(set_to_none=True)
             logits = logits_from_model(model, inputs)
-            loss = F.cross_entropy(logits, targets, weight=weights)
+            if spec.label_aware_smoothing:
+                loss = label_aware_smoothing_loss(logits, targets, p_train)
+            else:
+                loss = F.cross_entropy(logits, targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.fc[0].parameters(), max_norm=1.0)
             optimizer.step()
@@ -977,7 +1051,7 @@ def train_standard(
         if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
             print(f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} loss={avg_loss:.4f} time={elapsed:.1f}s")
     if spec.classifier_retrain:
-        history.extend(retrain_classifier_crt(model, train_loader, device, class_weights, total_epochs, lr))
+        history.extend(retrain_classifier_crt(model, train_loader, device, spec, p_train, total_epochs, lr))
     return history
 
 
