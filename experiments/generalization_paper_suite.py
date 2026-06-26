@@ -462,6 +462,16 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             class_counts=class_counts,
             probability_family="softmax" if softmax_eval else "evidential",
         )
+        print(
+            "[EVAL] "
+            f"acc={metrics.get('accuracy', float('nan')):.4f} "
+            f"bal_acc={metrics.get('balanced_accuracy', float('nan')):.4f} "
+            f"macro_f1={metrics.get('macro_f1', float('nan')):.4f} "
+            f"macro_auroc={metrics.get('macro_auroc', float('nan')):.4f} "
+            f"macro_pr_auc={metrics.get('macro_pr_auc', float('nan')):.4f} "
+            f"aurc={metrics.get('aurc', float('nan')):.4f} "
+            f"ece={metrics.get('ece_adaptive', float('nan')):.4f}"
+        )
     else:
         if softmax_eval:
             outputs = collect_softmax_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
