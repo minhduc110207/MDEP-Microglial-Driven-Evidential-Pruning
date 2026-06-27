@@ -259,8 +259,8 @@ class EvidentialFocalLoss(nn.Module):
         
         # Bounded Asymmetric Scaling (Phase 4 & 5 Math update)
         if self.kl_scaling == 'asymmetric' and self.class_weights is not None:
-            # Lambda_asym = min(omega_y, 10.0)
-            Lambda_asym = torch.clamp(true_class_weight, max=10.0)
+            # Lambda_asym = min(omega_y, class_weight_cap)
+            Lambda_asym = torch.clamp(true_class_weight, max=self.class_weight_cap)
         else:
             Lambda_asym = torch.ones_like(loss_ce)
 
@@ -465,6 +465,9 @@ def update_scores_agents(
     regrower_type='class_conditioned',
     use_anticryst=True,
     verbose=False,
+    pruner_strength=0.5,
+    pruner_warmup_epoch=15,
+    cache_ema_beta=0.95,
 ):
     """
     Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals.
@@ -513,6 +516,14 @@ def update_scores_agents(
                     C_ij = (c1_flat.argsort().argsort().float() / (c1_flat.numel() - 1)).view_as(c1)
                 else:
                     C_ij = torch.zeros_like(c1)
+
+                # Apply Pruner Warmup & Strength (Phase 3)
+                current_pruner_strength = pruner_strength
+                if epoch is not None and pruner_warmup_epoch > 0:
+                    warmup_factor = min(1.0, max(0.0, (epoch - pruner_warmup_epoch / 2) / (pruner_warmup_epoch / 2 + 1e-8)))
+                    current_pruner_strength *= warmup_factor
+                
+                C_ij = C_ij * current_pruner_strength
 
             # --- Astrocyte agent: growing score (§5.3) ---
             if disable_regrower:
@@ -580,8 +591,8 @@ def update_scores_agents(
             if epoch is not None:
                 delta_s_dict[name] = delta_S.detach().cpu().numpy()
             
-            # Step 1: Update Velocity (Momentum EMA)
-            beta_m = 0.95
+            # Step 1: Update Velocity (Momentum EMA Topology Cache)
+            beta_m = cache_ema_beta
             module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
             
             # Step 2: Update Latent Scores S
@@ -1017,6 +1028,9 @@ class MDEPTrainer:
                     regrower_type=getattr(self.args, 'regrower_type', 'class_conditioned') if self.args else 'class_conditioned',
                     use_anticryst=use_anticryst,
                     verbose=verbose_structural_logs,
+                    pruner_strength=getattr(self.args, 'pruner_strength', 0.5) if self.args else 0.5,
+                    pruner_warmup_epoch=getattr(self.args, 'pruner_warmup_epoch', 15) if self.args else 15,
+                    cache_ema_beta=getattr(self.args, 'cache_ema_beta', 0.95) if self.args else 0.95,
                 )
                 self.last_flop_rate = mask_flop_rate
 
@@ -1133,6 +1147,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         search_dirs.append(os.environ['ISIC_ROOT'])
     search_dirs.extend([
         r'E:\Testing\mdep\isic-2024-challenge',  # User local path
+        './isic-2024-challenge',                 # Added path
         './data/isic-2024-challenge',
         './data/isic2024',
         '/kaggle/input',                         # Kaggle root

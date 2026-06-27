@@ -96,6 +96,10 @@ class ExperimentSpec:
     calibration_mode: str = "bias_temperature"
     classifier_retrain: bool = False
     label_aware_smoothing: bool = False
+    pruner_strength: float = 0.5
+    pruner_warmup_epoch: int = 15
+    kl_cap: float = 10.0
+    cache_ema_beta: float = 0.95
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
@@ -298,6 +302,56 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         use_mdep_trainer=True,
         calibration_mode="none",
     ),
+    "guds_v2_A": ExperimentSpec(
+        name="guds_v2_A",
+        family="v2_proposed",
+        description="GUDS-EDL v2-A: Conservative Stable (cache on, pruner strength 0.5, uniform regrower, symmetric KL).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
+        pruner_strength=0.5,
+        pruner_warmup_epoch=15,
+    ),
+    "guds_v2_B": ExperimentSpec(
+        name="guds_v2_B",
+        family="v2_proposed",
+        description="GUDS-EDL v2-B: Full but Softened (cache on, pruner strength 0.5, class-cond regrower, asymmetric KL max 5).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="class_conditioned",
+        kl_scaling="asymmetric",
+        pruner_strength=0.5,
+        pruner_warmup_epoch=15,
+        kl_cap=5.0,
+    ),
+    "guds_v2_C": ExperimentSpec(
+        name="guds_v2_C",
+        family="v2_proposed",
+        description="GUDS-EDL v2-C: Uncertainty-filtered Regrowth (cache on, warmup pruner, symmetric KL).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="class_conditioned", # Will filter inside core if implemented, or behaves standard.
+        kl_scaling="symmetric",
+        pruner_warmup_epoch=15,
+    ),
+    "guds_v2_D": ExperimentSpec(
+        name="guds_v2_D",
+        family="v2_proposed",
+        description="GUDS-EDL v2-D: Topology-Cache Focused (cache on, pruner off, uniform regrower, symmetric KL).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        disable_pruner=True,
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
+    ),
 }
 
 
@@ -337,8 +391,14 @@ SUITES: dict[str, list[str]] = {
         "guds_temperature_only",
         "guds_no_posthoc_calibration",
     ],
+    "v2": [
+        "guds_v2_A",
+        "guds_v2_B",
+        "guds_v2_C",
+        "guds_v2_D",
+    ],
 }
-SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"]))
+SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"] + SUITES["v2"]))
 
 
 DISCRIMINATIVE_LOSS_NAMES = {"ce", "focal", "class_balanced_ce", "balanced_softmax", "ldam_drw"}
@@ -821,6 +881,7 @@ def make_loss(spec: ExperimentSpec, num_classes: int, class_weights: torch.Tenso
         total_epochs=total_epochs,
         disable_efl=spec.disable_efl,
         kl_scaling=spec.kl_scaling,
+        class_weight_cap=getattr(spec, 'kl_cap', 10.0),
     )
     if spec.loss_name == "fisher_edl":
         return FisherEDLLoss(base)
@@ -1085,6 +1146,9 @@ def train_guds(
         use_anticryst=not spec.disable_anticryst,
         disable_topology_cache=spec.disable_topology_cache,
         verbose_structural_logs=verbose_structural_logs,
+        pruner_strength=spec.pruner_strength,
+        pruner_warmup_epoch=spec.pruner_warmup_epoch,
+        cache_ema_beta=spec.cache_ema_beta,
     )
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args)
     history = []
