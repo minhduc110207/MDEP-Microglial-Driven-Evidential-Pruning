@@ -67,6 +67,7 @@ from guds_edl_core import (  # noqa: E402
     get_imbalanced_dataloaders,
     print_sparsity_report,
     replace_conv2d_with_mdep,
+    build_optimizer,
 )
 from experiments.metrics_ext import (  # noqa: E402
     binary_extended_metrics,
@@ -1130,11 +1131,21 @@ def train_guds(
     lr: float,
     log_every: int = 5,
     verbose_structural_logs: bool = False,
+    args: argparse.Namespace = None,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
-    params = [p for name, p in model.named_parameters() if "scores" not in name]
-    optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    
+    if args is not None and hasattr(args, 'optimizer'):
+        # args has optimizer configuration, use our unified factory
+        optimizer, scheduler, scaler = build_optimizer(model, args, total_epochs)
+    else:
+        # Fallback to hardcoded AdamW if args are missing
+        params = [p for name, p in model.named_parameters() if "scores" not in name]
+        optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+        scheduler = None
+        scaler = torch.amp.GradScaler('cuda', enabled=device.type == "cuda")
+
     trainer_args = SimpleNamespace(
         disable_pruner=spec.disable_pruner,
         disable_regrower=spec.disable_regrower,
@@ -1150,7 +1161,17 @@ def train_guds(
         pruner_warmup_epoch=spec.pruner_warmup_epoch,
         cache_ema_beta=spec.cache_ema_beta,
     )
-    trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args)
+    trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scaler=scaler)
+    
+    # Inject scheduler and use_sam from the factory setup if present
+    if scheduler is not None:
+        trainer.scheduler_type = getattr(args, 'scheduler', 'cosine')
+        if trainer.scheduler_type == 'cosine':
+            trainer.cosine_scheduler = scheduler
+        # OneCycleLR logic is handled per-batch which currently requires integration in MDEPTrainer
+        
+    trainer.use_sam = getattr(args, 'use_sam', False)
+
     history = []
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
@@ -1200,6 +1221,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             args.lr,
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
+            args=args,
         )
     else:
         history = train_standard(
@@ -1357,6 +1379,20 @@ def main() -> int:
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--cpu", action="store_true")
+    
+    # Optimizer/Scheduler/SAM flags mapped to build_optimizer
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'sgd', 'radam', 'lamb'])
+    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--sgd_momentum', type=float, default=0.9)
+    parser.add_argument('--use_sam', action='store_true')
+    parser.add_argument('--sam_rho', type=float, default=0.05)
+    parser.add_argument('--sam_adaptive', action='store_true')
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'cosine_warm_restarts', 'step', 'one_cycle'])
+    parser.add_argument('--cosine_t0', type=int, default=10)
+    parser.add_argument('--cosine_t_mult', type=int, default=2)
+    parser.add_argument('--step_lr_size', type=int, default=15)
+    parser.add_argument('--step_lr_gamma', type=float, default=0.1)
+
     args = parser.parse_args()
 
     output_root().mkdir(parents=True, exist_ok=True)
