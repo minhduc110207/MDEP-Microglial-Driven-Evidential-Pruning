@@ -1408,13 +1408,63 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42, allow_dummy_data=False):
+def get_imbalanced_dataloaders(dataset_name='isic2024', batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42, allow_dummy_data=False):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
-    Uses stratified splitting to create train, val, cal, and test sets.
-    Requires a real ISIC dataset by default. Dummy data is available only for
-    explicit dry-runs with allow_dummy_data=True.
+    Supports 'isic2024' (default imbalanced) and 'cifar10' (balanced benchmarking).
     """
+    if dataset_name.lower() == 'cifar10':
+        print("📥 Loading CIFAR-10 dataset...")
+        import torchvision.datasets as datasets
+        from torch.utils.data import random_split
+        import platform
+
+        train_tf = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        test_tf = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+        # CIFAR10 training set
+        train_full = datasets.CIFAR10(root='./data', train=True, download=True, transform=train_tf)
+        
+        # We need validation and calibration sets without data augmentation, so we load again
+        val_cal_full = datasets.CIFAR10(root='./data', train=True, download=True, transform=test_tf)
+        test_ds = datasets.CIFAR10(root='./data', train=False, download=True, transform=test_tf)
+
+        total_train = len(train_full)
+        val_size = int(0.1 * total_train)
+        cal_size = int(0.1 * total_train)
+        train_size = total_train - val_size - cal_size
+
+        # Generate indices for split
+        indices = torch.randperm(total_train, generator=torch.Generator().manual_seed(seed)).tolist()
+        
+        train_ds = Subset(train_full, indices[:train_size])
+        val_ds = Subset(val_cal_full, indices[train_size:train_size+val_size])
+        cal_ds = Subset(val_cal_full, indices[train_size+val_size:])
+
+        workers = 0 if platform.system() == 'Windows' else 4
+        
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True)
+        val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+        cal_loader   = DataLoader(cal_ds,   batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+        test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+
+        num_classes = 10
+        cw = torch.ones(num_classes, dtype=torch.float32)
+        p_true = [0.1] * 10
+        p_train = [0.1] * 10
+        
+        return train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train
+
     num_classes = 2
 
     csv_path = None
@@ -2567,6 +2617,10 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="GUDS-EDL Core Training")
     
+    # ── Dataset flags ──────────────────────────────────────────────
+    parser.add_argument('--dataset', type=str, default='isic2024', choices=['isic2024', 'cifar10'],
+                        help="Dataset to train on (default: isic2024)")
+    
     # ── Ablation flags ─────────────────────────────────────────────
     parser.add_argument('--disable_pruner', action='store_true', help="Disable Microglia pruning")
     parser.add_argument('--disable_regrower', action='store_true', help="Disable Astrocyte regrowing")
@@ -2617,7 +2671,9 @@ def main():
 
     # ── Data (stratified train / test split) ────────────────────────
     batch_size = 32
-    train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = get_imbalanced_dataloaders(batch_size=batch_size)
+    train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = get_imbalanced_dataloaders(
+        dataset_name=args.dataset, batch_size=batch_size
+    )
     print(f"📊 Classes: {num_classes}")
     print(f"   Train batches: {len(train_loader)}  |  Val batches: {len(val_loader)}  |  Cal batches: {len(cal_loader)}  |  Test batches: {len(test_loader)}")
 
