@@ -67,6 +67,7 @@ from guds_edl_core import (  # noqa: E402
     get_imbalanced_dataloaders,
     print_sparsity_report,
     replace_conv2d_with_mdep,
+    build_optimizer,
 )
 from experiments.metrics_ext import (  # noqa: E402
     binary_extended_metrics,
@@ -96,6 +97,10 @@ class ExperimentSpec:
     calibration_mode: str = "bias_temperature"
     classifier_retrain: bool = False
     label_aware_smoothing: bool = False
+    pruner_strength: float = 0.5
+    pruner_warmup_epoch: int = 15
+    kl_cap: float = 10.0
+    cache_ema_beta: float = 0.95
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
@@ -298,6 +303,56 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         use_mdep_trainer=True,
         calibration_mode="none",
     ),
+    "guds_v2_A": ExperimentSpec(
+        name="guds_v2_A",
+        family="v2_proposed",
+        description="GUDS-EDL v2-A: Conservative Stable (cache on, pruner strength 0.5, uniform regrower, symmetric KL).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
+        pruner_strength=0.5,
+        pruner_warmup_epoch=15,
+    ),
+    "guds_v2_B": ExperimentSpec(
+        name="guds_v2_B",
+        family="v2_proposed",
+        description="GUDS-EDL v2-B: Full but Softened (cache on, pruner strength 0.5, class-cond regrower, asymmetric KL max 5).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="class_conditioned",
+        kl_scaling="asymmetric",
+        pruner_strength=0.5,
+        pruner_warmup_epoch=15,
+        kl_cap=5.0,
+    ),
+    "guds_v2_C": ExperimentSpec(
+        name="guds_v2_C",
+        family="v2_proposed",
+        description="GUDS-EDL v2-C: Uncertainty-filtered Regrowth (cache on, warmup pruner, symmetric KL).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="class_conditioned", # Will filter inside core if implemented, or behaves standard.
+        kl_scaling="symmetric",
+        pruner_warmup_epoch=15,
+    ),
+    "guds_v2_D": ExperimentSpec(
+        name="guds_v2_D",
+        family="v2_proposed",
+        description="GUDS-EDL v2-D: Topology-Cache Focused (cache on, pruner off, uniform regrower, symmetric KL).",
+        sparse=True,
+        use_mdep_trainer=True,
+        loss_name="edl",
+        disable_pruner=True,
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
+    ),
 }
 
 
@@ -337,8 +392,14 @@ SUITES: dict[str, list[str]] = {
         "guds_temperature_only",
         "guds_no_posthoc_calibration",
     ],
+    "v2": [
+        "guds_v2_A",
+        "guds_v2_B",
+        "guds_v2_C",
+        "guds_v2_D",
+    ],
 }
-SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"]))
+SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"] + SUITES["v2"]))
 
 
 DISCRIMINATIVE_LOSS_NAMES = {"ce", "focal", "class_balanced_ce", "balanced_softmax", "ldam_drw"}
@@ -821,6 +882,7 @@ def make_loss(spec: ExperimentSpec, num_classes: int, class_weights: torch.Tenso
         total_epochs=total_epochs,
         disable_efl=spec.disable_efl,
         kl_scaling=spec.kl_scaling,
+        class_weight_cap=getattr(spec, 'kl_cap', 10.0),
     )
     if spec.loss_name == "fisher_edl":
         return FisherEDLLoss(base)
@@ -1069,11 +1131,21 @@ def train_guds(
     lr: float,
     log_every: int = 5,
     verbose_structural_logs: bool = False,
+    args: argparse.Namespace = None,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
-    params = [p for name, p in model.named_parameters() if "scores" not in name]
-    optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    
+    if args is not None and hasattr(args, 'optimizer'):
+        # args has optimizer configuration, use our unified factory
+        optimizer, scheduler, scaler = build_optimizer(model, args, total_epochs)
+    else:
+        # Fallback to hardcoded AdamW if args are missing
+        params = [p for name, p in model.named_parameters() if "scores" not in name]
+        optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+        scheduler = None
+        scaler = torch.amp.GradScaler('cuda', enabled=device.type == "cuda")
+
     trainer_args = SimpleNamespace(
         disable_pruner=spec.disable_pruner,
         disable_regrower=spec.disable_regrower,
@@ -1085,8 +1157,21 @@ def train_guds(
         use_anticryst=not spec.disable_anticryst,
         disable_topology_cache=spec.disable_topology_cache,
         verbose_structural_logs=verbose_structural_logs,
+        pruner_strength=spec.pruner_strength,
+        pruner_warmup_epoch=spec.pruner_warmup_epoch,
+        cache_ema_beta=spec.cache_ema_beta,
     )
-    trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args)
+    trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scaler=scaler)
+    
+    # Inject scheduler and use_sam from the factory setup if present
+    if scheduler is not None:
+        trainer.scheduler_type = getattr(args, 'scheduler', 'cosine')
+        if trainer.scheduler_type == 'cosine':
+            trainer.cosine_scheduler = scheduler
+        # OneCycleLR logic is handled per-batch which currently requires integration in MDEPTrainer
+        
+    trainer.use_sam = getattr(args, 'use_sam', False)
+
     history = []
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
@@ -1136,6 +1221,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             args.lr,
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
+            args=args,
         )
     else:
         history = train_standard(
@@ -1293,6 +1379,20 @@ def main() -> int:
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--cpu", action="store_true")
+    
+    # Optimizer/Scheduler/SAM flags mapped to build_optimizer
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'sgd', 'radam', 'lamb'])
+    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--sgd_momentum', type=float, default=0.9)
+    parser.add_argument('--use_sam', action='store_true')
+    parser.add_argument('--sam_rho', type=float, default=0.05)
+    parser.add_argument('--sam_adaptive', action='store_true')
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'cosine_warm_restarts', 'step', 'one_cycle'])
+    parser.add_argument('--cosine_t0', type=int, default=10)
+    parser.add_argument('--cosine_t_mult', type=int, default=2)
+    parser.add_argument('--step_lr_size', type=int, default=15)
+    parser.add_argument('--step_lr_gamma', type=float, default=0.1)
+
     args = parser.parse_args()
 
     output_root().mkdir(parents=True, exist_ok=True)

@@ -233,7 +233,7 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run all paper experiments on Kaggle.")
-    parser.add_argument("--isic_suite", choices=["main_tables", "baselines", "ablations", "all"], default="all")
+    parser.add_argument("--isic_suite", choices=["main_tables", "baselines", "ablations", "v2", "all"], default="all")
     parser.add_argument("--epochs", type=int, default=40, help="Epochs for ISIC experiments.")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--cifar_epochs", type=int, default=100)

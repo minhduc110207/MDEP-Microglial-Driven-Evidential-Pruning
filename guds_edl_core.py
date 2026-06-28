@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, StepLR, OneCycleLR
 import torchvision.models as models
 import torchvision.transforms as transforms
 import os
@@ -259,8 +260,8 @@ class EvidentialFocalLoss(nn.Module):
         
         # Bounded Asymmetric Scaling (Phase 4 & 5 Math update)
         if self.kl_scaling == 'asymmetric' and self.class_weights is not None:
-            # Lambda_asym = min(omega_y, 10.0)
-            Lambda_asym = torch.clamp(true_class_weight, max=10.0)
+            # Lambda_asym = min(omega_y, class_weight_cap)
+            Lambda_asym = torch.clamp(true_class_weight, max=self.class_weight_cap)
         else:
             Lambda_asym = torch.ones_like(loss_ce)
 
@@ -465,6 +466,9 @@ def update_scores_agents(
     regrower_type='class_conditioned',
     use_anticryst=True,
     verbose=False,
+    pruner_strength=0.5,
+    pruner_warmup_epoch=15,
+    cache_ema_beta=0.95,
 ):
     """
     Updates latent scores S_ij using Microglia (pruning) and Astrocyte (growing) signals.
@@ -513,6 +517,14 @@ def update_scores_agents(
                     C_ij = (c1_flat.argsort().argsort().float() / (c1_flat.numel() - 1)).view_as(c1)
                 else:
                     C_ij = torch.zeros_like(c1)
+
+                # Apply Pruner Warmup & Strength (Phase 3)
+                current_pruner_strength = pruner_strength
+                if epoch is not None and pruner_warmup_epoch > 0:
+                    warmup_factor = min(1.0, max(0.0, (epoch - pruner_warmup_epoch / 2) / (pruner_warmup_epoch / 2 + 1e-8)))
+                    current_pruner_strength *= warmup_factor
+                
+                C_ij = C_ij * current_pruner_strength
 
             # --- Astrocyte agent: growing score (§5.3) ---
             if disable_regrower:
@@ -580,8 +592,8 @@ def update_scores_agents(
             if epoch is not None:
                 delta_s_dict[name] = delta_S.detach().cpu().numpy()
             
-            # Step 1: Update Velocity (Momentum EMA)
-            beta_m = 0.95
+            # Step 1: Update Velocity (Momentum EMA Topology Cache)
+            beta_m = cache_ema_beta
             module.scores_momentum.data.mul_(beta_m).add_(delta_S, alpha=1.0 - beta_m)
             
             # Step 2: Update Latent Scores S
@@ -675,7 +687,209 @@ def update_scores_agents(
 
 
 # ============================================================================
-#  SECTION 4 — Trainer (warm-up, cosine schedules, amortized gradients)
+#  SECTION 4a — Advanced Optimizers (LAMB, SAM)
+# ============================================================================
+
+class LAMB(optim.Optimizer):
+    """
+    LAMB optimizer (Layer-wise Adaptive Moments for Batch training).
+    Combines Adam-style adaptive learning rates with LARS-style layer-wise
+    trust ratios, enabling stable training with very large batch sizes.
+    Reference: You et al., "Large Batch Optimization for Deep Learning:
+    Training BERT in 76 minutes", ICLR 2020.
+    """
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-6,
+                 weight_decay=0.01, max_grad_norm=1.0):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay, max_grad_norm=max_grad_norm)
+        super(LAMB, self).__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError('LAMB does not support sparse gradients.')
+
+                state = self.state[p]
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+                state['step'] += 1
+
+                # Adam update
+                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+
+                # Bias correction
+                bias_correction1 = 1.0 - beta1 ** state['step']
+                bias_correction2 = 1.0 - beta2 ** state['step']
+                step_size = group['lr'] / bias_correction1
+
+                adam_update = exp_avg / (exp_avg_sq.sqrt() / math.sqrt(bias_correction2) + group['eps'])
+
+                # Weight decay (decoupled)
+                if group['weight_decay'] != 0:
+                    adam_update.add_(p.data, alpha=group['weight_decay'])
+
+                # Layer-wise trust ratio
+                weight_norm = p.data.norm(2).clamp_min(1e-8)
+                update_norm = adam_update.norm(2).clamp_min(1e-8)
+                trust_ratio = weight_norm / update_norm
+                # Clamp trust ratio for stability
+                trust_ratio = min(trust_ratio.item(), 10.0)
+
+                p.data.add_(adam_update, alpha=-step_size * trust_ratio)
+
+        return loss
+
+
+class SAM(optim.Optimizer):
+    """
+    Sharpness-Aware Minimization (SAM) wrapper optimizer.
+    Seeks parameters that lie in flat minima for better generalization.
+    Reference: Foret et al., "Sharpness-Aware Minimization for Efficiently
+    Improving Generalization", ICLR 2021.
+    
+    Usage:
+        # In training loop, replace standard optimizer.step() with:
+        # loss.backward()              → computes ∂L/∂w
+        # optimizer.first_step()       → perturb weights to w + ε
+        # loss_sam.backward()          → computes ∂L(w+ε)/∂w
+        # optimizer.second_step()      → update using SAM gradient
+    """
+    def __init__(self, base_optimizer, rho=0.05, adaptive=False):
+        assert isinstance(base_optimizer, optim.Optimizer)
+        self.base_optimizer = base_optimizer
+        self.rho = rho
+        self.adaptive = adaptive
+        self.param_groups = base_optimizer.param_groups
+        self.state = base_optimizer.state
+        self.defaults = base_optimizer.defaults
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        """Perturb weights in the direction of sharpest ascent."""
+        grad_norm = self._grad_norm()
+        for group in self.param_groups:
+            scale = self.rho / (grad_norm + 1e-12)
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                # Save current params
+                self.state[p]['old_p'] = p.data.clone()
+                # Compute perturbation
+                if self.adaptive:
+                    e_w = (torch.pow(p, 2) * p.grad) * scale
+                else:
+                    e_w = p.grad * scale
+                p.add_(e_w)  # w + ε(w)
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        """Restore original weights and apply the SAM gradient update."""
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                p.data = self.state[p]['old_p']  # Restore original weights
+        self.base_optimizer.step()
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Fallback: standard step (no SAM perturbation). Use first_step/second_step for SAM."""
+        return self.base_optimizer.step(closure)
+
+    def zero_grad(self, set_to_none=False):
+        self.base_optimizer.zero_grad(set_to_none=set_to_none)
+
+    def _grad_norm(self):
+        shared_device = self.param_groups[0]['params'][0].device
+        norm = torch.norm(
+            torch.stack([
+                ((torch.abs(p) if self.adaptive else 1.0) * p.grad)
+                .norm(p=2).to(shared_device)
+                for group in self.param_groups
+                for p in group['params']
+                if p.grad is not None
+            ]),
+            p=2,
+        )
+        return norm
+
+    def load_state_dict(self, state_dict):
+        self.base_optimizer.load_state_dict(state_dict)
+
+    def state_dict(self):
+        return self.base_optimizer.state_dict()
+
+
+def build_optimizer(params, args):
+    """
+    Factory function to build an optimizer from CLI args.
+    
+    Supported optimizers:
+        - adam:   Standard Adam (default)
+        - adamw:  AdamW with decoupled weight decay
+        - sgd:    SGD with momentum and Nesterov acceleration
+        - radam:  Rectified Adam (variance-adaptive warmup)
+        - lamb:   LAMB (layer-wise adaptive, great for large batches)
+    
+    If --use_sam is set, wraps the chosen optimizer in SAM.
+    """
+    opt_name = getattr(args, 'optimizer', 'adam').lower()
+    lr = getattr(args, 'lr', 4e-5)
+    wd = getattr(args, 'weight_decay', 0.0)
+
+    if opt_name == 'adam':
+        base = optim.Adam(params, lr=lr, weight_decay=wd)
+    elif opt_name == 'adamw':
+        base = optim.AdamW(params, lr=lr, weight_decay=wd if wd > 0 else 0.01)
+    elif opt_name == 'sgd':
+        momentum = getattr(args, 'sgd_momentum', 0.9)
+        base = optim.SGD(params, lr=lr, momentum=momentum, nesterov=True, weight_decay=wd)
+    elif opt_name == 'radam':
+        base = optim.RAdam(params, lr=lr, weight_decay=wd)
+    elif opt_name == 'lamb':
+        base = LAMB(params, lr=lr, weight_decay=wd if wd > 0 else 0.01)
+    else:
+        raise ValueError(
+            f"Unknown optimizer '{opt_name}'. "
+            f"Choose from: adam, adamw, sgd, radam, lamb"
+        )
+
+    # Optionally wrap in SAM
+    use_sam = getattr(args, 'use_sam', False)
+    if use_sam:
+        sam_rho = getattr(args, 'sam_rho', 0.05)
+        sam_adaptive = getattr(args, 'sam_adaptive', False)
+        optimizer = SAM(base, rho=sam_rho, adaptive=sam_adaptive)
+        print(f"🔧 SAM wrapper enabled (ρ={sam_rho}, adaptive={sam_adaptive})")
+    else:
+        optimizer = base
+
+    print(f"🔧 Optimizer: {opt_name.upper()} | LR: {lr} | Weight Decay: {wd}")
+    return optimizer
+
+
+# ============================================================================
+#  SECTION 4b — Trainer (warm-up, cosine schedules, amortized gradients)
 # ============================================================================
 
 class MDEPTrainer:
@@ -685,6 +899,7 @@ class MDEPTrainer:
         self.criterion = criterion
         self.total_epochs = total_epochs
         self.args = args
+        self.use_sam = isinstance(optimizer, SAM)
         if warmup_epochs is None:
             self.warmup_epochs = max(1, int(0.20 * total_epochs))
         else:
@@ -696,6 +911,52 @@ class MDEPTrainer:
         
         # AMP Scaler for Mixed Precision
         self.scaler = torch.cuda.amp.GradScaler()
+
+        # LR Scheduler Configuration
+        self.lr_warmup_epochs = 1  # Number of epochs for linear LR warmup
+        self.base_lr = optimizer.param_groups[0]['lr']
+        self.eta_min = 1e-7
+        
+        scheduler_type = getattr(args, 'scheduler', 'cosine') if args else 'cosine'
+        cosine_epochs = max(1, total_epochs - self.lr_warmup_epochs)
+        
+        # Get the underlying optimizer for SAM-wrapped optimizers
+        sched_optimizer = optimizer.base_optimizer if self.use_sam else optimizer
+        
+        if scheduler_type == 'cosine':
+            # Standard Cosine Annealing: smooth decay from base_lr → eta_min
+            self.cosine_scheduler = CosineAnnealingLR(
+                sched_optimizer, T_max=cosine_epochs, eta_min=self.eta_min
+            )
+        elif scheduler_type == 'cosine_warm_restarts':
+            # Cosine Annealing with Warm Restarts (SGDR): periodic LR resets
+            # T_0 controls the first restart cycle length, T_mult doubles it each time
+            t0 = getattr(args, 'cosine_t0', max(1, cosine_epochs // 4)) if args else max(1, cosine_epochs // 4)
+            t_mult = getattr(args, 'cosine_t_mult', 2) if args else 2
+            self.cosine_scheduler = CosineAnnealingWarmRestarts(
+                sched_optimizer, T_0=t0, T_mult=t_mult, eta_min=self.eta_min
+            )
+        elif scheduler_type == 'step':
+            # StepLR: decay LR by factor gamma every step_size epochs
+            step_size = getattr(args, 'step_lr_size', max(1, cosine_epochs // 3)) if args else max(1, cosine_epochs // 3)
+            step_gamma = getattr(args, 'step_lr_gamma', 0.1) if args else 0.1
+            self.cosine_scheduler = StepLR(
+                sched_optimizer, step_size=step_size, gamma=step_gamma
+            )
+        elif scheduler_type == 'one_cycle':
+            # OneCycleLR: super-convergence schedule (Smith & Topin, 2019)
+            # Note: OneCycleLR steps per batch, not per epoch
+            # We'll create it lazily in train_epoch when we know total steps
+            self.cosine_scheduler = None
+            self._one_cycle_created = False
+        else:
+            raise ValueError(
+                f"Unknown scheduler '{scheduler_type}'. "
+                f"Choose from: cosine, cosine_warm_restarts, step, one_cycle"
+            )
+        
+        self.scheduler_type = scheduler_type
+        print(f"📅 LR Scheduler: {scheduler_type.upper()} | Base LR: {self.base_lr} | η_min: {self.eta_min}")
 
     def step_gamma(self, epoch):
         """Cosine-annealed temperature for the Smoothed STE."""
@@ -917,10 +1178,7 @@ class MDEPTrainer:
         gamma = self.step_gamma(epoch)
         self.set_warmup_state(is_warmup, gamma)
 
-        # Manual LR Warmup parameters
-        warmup_period = 1
-        base_lr = 4.0e-05
-
+        # LR Scheduling: linear warmup -> cosine annealing
         ema_loss = None
         ema_grad = None
         num_batches = len(dataloader)
@@ -929,11 +1187,11 @@ class MDEPTrainer:
         disable_topology_cache = getattr(self.args, 'disable_topology_cache', False) if self.args else False
 
         for batch_idx, (inputs, targets) in enumerate(dataloader):
-            # Smooth per-batch LR Warmup
-            if epoch < warmup_period:
+            # Phase 1: Smooth per-batch linear LR warmup (first lr_warmup_epochs)
+            if epoch < self.lr_warmup_epochs:
                 current_step = epoch * num_batches + batch_idx
-                total_warmup_steps = warmup_period * num_batches
-                current_lr = 1e-6 + (base_lr - 1e-6) * (current_step / total_warmup_steps)
+                total_warmup_steps = self.lr_warmup_epochs * num_batches
+                current_lr = 1e-6 + (self.base_lr - 1e-6) * (current_step / total_warmup_steps)
                 
                 # Linear decay for Loss Scaling from 4.0 to 1.0 to prevent overshooting
                 current_loss_scale = 4.0 - 3.0 * (current_step / total_warmup_steps)
@@ -941,10 +1199,9 @@ class MDEPTrainer:
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = current_lr
             else:
-                current_lr = base_lr
+                # Phase 2: Cosine annealing (scheduler steps at end of epoch)
+                current_lr = self.optimizer.param_groups[0]['lr']
                 current_loss_scale = 1.0
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = current_lr
 
             inputs, targets = inputs.to(device), targets.to(device)
 
@@ -971,12 +1228,41 @@ class MDEPTrainer:
             # Loss scaling to counteract Focal Loss shrinkage (decayed)
             scaled_loss = loss * current_loss_scale
             
-            self.scaler.scale(scaled_loss).backward()
+            if self.use_sam:
+                # SAM two-step optimization:
+                # Step 1: Compute gradient at current weights
+                self.scaler.scale(scaled_loss).backward()
+                self.scaler.unscale_(self.optimizer.base_optimizer)
+                params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
+                grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
+                
+                # SAM first step: perturb weights to w + ε
+                self.optimizer.first_step(zero_grad=True)
+                
+                # Step 2: Compute loss at perturbed weights
+                with torch.amp.autocast('cuda'):
+                    evidence_sam = self.model(inputs)
+                with torch.amp.autocast('cuda', enabled=False):
+                    loss_sam = self.criterion(evidence_sam.float(), targets, epoch)
+                scaled_loss_sam = loss_sam * current_loss_scale
+                self.scaler.scale(scaled_loss_sam).backward()
+                self.scaler.unscale_(self.optimizer.base_optimizer)
+                torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
+                
+                # SAM second step: restore original weights and apply SAM gradient
+                self.optimizer.second_step(zero_grad=False)
+                self.scaler.update()
+            else:
+                # Standard optimization
+                self.scaler.scale(scaled_loss).backward()
 
-            # Gradient clipping and norm tracking (only for optimized parameters)
-            self.scaler.unscale_(self.optimizer)
-            params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
-            grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
+                # Gradient clipping and norm tracking (only for optimized parameters)
+                self.scaler.unscale_(self.optimizer)
+                params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
+                grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
+                
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
             
             if not torch.isnan(grad_norm).item() and not torch.isinf(grad_norm).item():
                 if ema_grad is None:
@@ -999,9 +1285,6 @@ class MDEPTrainer:
             if not is_warmup and batch_idx == 0 and verbose_structural_logs:
                 self.check_gradient_flow(epoch)
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
             # Multi-agent structure optimization (once per epoch)
             if not is_warmup and structural_probe_batch:
                 disable_pruner = getattr(self.args, 'disable_pruner', False) if self.args else False
@@ -1017,6 +1300,9 @@ class MDEPTrainer:
                     regrower_type=getattr(self.args, 'regrower_type', 'class_conditioned') if self.args else 'class_conditioned',
                     use_anticryst=use_anticryst,
                     verbose=verbose_structural_logs,
+                    pruner_strength=getattr(self.args, 'pruner_strength', 0.5) if self.args else 0.5,
+                    pruner_warmup_epoch=getattr(self.args, 'pruner_warmup_epoch', 15) if self.args else 15,
+                    cache_ema_beta=getattr(self.args, 'cache_ema_beta', 0.95) if self.args else 0.95,
                 )
                 self.last_flop_rate = mask_flop_rate
 
@@ -1048,6 +1334,13 @@ class MDEPTrainer:
                     f"| ETA: {eta/60:.1f}m",
                     flush=True,
                 )
+
+        # Step the LR scheduler (only after warmup period)
+        if epoch >= self.lr_warmup_epochs:
+            if self.scheduler_type == 'one_cycle':
+                pass  # OneCycleLR steps per-batch inside the loop above
+            elif self.cosine_scheduler is not None:
+                self.cosine_scheduler.step()
 
         return ema_loss if ema_loss is not None else 0.0
 
@@ -1115,13 +1408,63 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42, allow_dummy_data=False):
+def get_imbalanced_dataloaders(dataset_name='isic2024', batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42, allow_dummy_data=False):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
-    Uses stratified splitting to create train, val, cal, and test sets.
-    Requires a real ISIC dataset by default. Dummy data is available only for
-    explicit dry-runs with allow_dummy_data=True.
+    Supports 'isic2024' (default imbalanced) and 'cifar10' (balanced benchmarking).
     """
+    if dataset_name.lower() == 'cifar10':
+        print("📥 Loading CIFAR-10 dataset...")
+        import torchvision.datasets as datasets
+        from torch.utils.data import random_split
+        import platform
+
+        train_tf = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        test_tf = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+        # CIFAR10 training set
+        train_full = datasets.CIFAR10(root='./data', train=True, download=True, transform=train_tf)
+        
+        # We need validation and calibration sets without data augmentation, so we load again
+        val_cal_full = datasets.CIFAR10(root='./data', train=True, download=True, transform=test_tf)
+        test_ds = datasets.CIFAR10(root='./data', train=False, download=True, transform=test_tf)
+
+        total_train = len(train_full)
+        val_size = int(0.1 * total_train)
+        cal_size = int(0.1 * total_train)
+        train_size = total_train - val_size - cal_size
+
+        # Generate indices for split
+        indices = torch.randperm(total_train, generator=torch.Generator().manual_seed(seed)).tolist()
+        
+        train_ds = Subset(train_full, indices[:train_size])
+        val_ds = Subset(val_cal_full, indices[train_size:train_size+val_size])
+        cal_ds = Subset(val_cal_full, indices[train_size+val_size:])
+
+        workers = 0 if platform.system() == 'Windows' else 4
+        
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True)
+        val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+        cal_loader   = DataLoader(cal_ds,   batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+        test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+
+        num_classes = 10
+        cw = torch.ones(num_classes, dtype=torch.float32)
+        p_true = [0.1] * 10
+        p_train = [0.1] * 10
+        
+        return train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train
+
     num_classes = 2
 
     csv_path = None
@@ -1133,6 +1476,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         search_dirs.append(os.environ['ISIC_ROOT'])
     search_dirs.extend([
         r'E:\Testing\mdep\isic-2024-challenge',  # User local path
+        './isic-2024-challenge',                 # Added path
         './data/isic-2024-challenge',
         './data/isic2024',
         '/kaggle/input',                         # Kaggle root
@@ -2272,6 +2616,12 @@ def evaluate_adaptive_modes(decision_support, test_loader, device):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="GUDS-EDL Core Training")
+    
+    # ── Dataset flags ──────────────────────────────────────────────
+    parser.add_argument('--dataset', type=str, default='isic2024', choices=['isic2024', 'cifar10'],
+                        help="Dataset to train on (default: isic2024)")
+    
+    # ── Ablation flags ─────────────────────────────────────────────
     parser.add_argument('--disable_pruner', action='store_true', help="Disable Microglia pruning")
     parser.add_argument('--disable_regrower', action='store_true', help="Disable Astrocyte regrowing")
     parser.add_argument('--pruner_type', type=str, default='signed_first_order', choices=['signed_first_order', 'absolute_grad', 'magnitude', 'random'])
@@ -2279,6 +2629,39 @@ def main():
     parser.add_argument('--kl_scaling', type=str, default='asymmetric', choices=['asymmetric', 'symmetric'])
     parser.add_argument('--disable_efl', action='store_true', help="Disable Evidential Focal Loss weighting")
     parser.add_argument('--disable_anticryst', action='store_true', help="Disable Astrocyte anti-crystallization")
+    
+    # ── Optimizer flags ────────────────────────────────────────────
+    parser.add_argument('--optimizer', type=str, default='adam',
+                        choices=['adam', 'adamw', 'sgd', 'radam', 'lamb'],
+                        help="Optimizer to use (default: adam)")
+    parser.add_argument('--lr', type=float, default=4e-5,
+                        help="Learning rate (default: 4e-5)")
+    parser.add_argument('--weight_decay', type=float, default=0.0,
+                        help="Weight decay (default: 0.0, AdamW/LAMB auto-set to 0.01 if 0)")
+    parser.add_argument('--sgd_momentum', type=float, default=0.9,
+                        help="SGD momentum (default: 0.9, only used with --optimizer sgd)")
+    
+    # ── SAM flags ──────────────────────────────────────────────────
+    parser.add_argument('--use_sam', action='store_true',
+                        help="Enable Sharpness-Aware Minimization (SAM) wrapper")
+    parser.add_argument('--sam_rho', type=float, default=0.05,
+                        help="SAM perturbation radius ρ (default: 0.05)")
+    parser.add_argument('--sam_adaptive', action='store_true',
+                        help="Use adaptive SAM (element-wise scaling by |w|²)")
+    
+    # ── LR Scheduler flags ────────────────────────────────────────
+    parser.add_argument('--scheduler', type=str, default='cosine',
+                        choices=['cosine', 'cosine_warm_restarts', 'step', 'one_cycle'],
+                        help="LR scheduler type (default: cosine)")
+    parser.add_argument('--cosine_t0', type=int, default=None,
+                        help="T_0 for CosineAnnealingWarmRestarts (default: epochs//4)")
+    parser.add_argument('--cosine_t_mult', type=int, default=2,
+                        help="T_mult for CosineAnnealingWarmRestarts (default: 2)")
+    parser.add_argument('--step_lr_size', type=int, default=None,
+                        help="Step size for StepLR (default: epochs//3)")
+    parser.add_argument('--step_lr_gamma', type=float, default=0.1,
+                        help="Gamma for StepLR decay (default: 0.1)")
+    
     args = parser.parse_args()
     args.use_anticryst = not args.disable_anticryst
     
@@ -2287,7 +2670,10 @@ def main():
     print(f"⚙️  Ablation Configs: {vars(args)}")
 
     # ── Data (stratified train / test split) ────────────────────────
-    train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = get_imbalanced_dataloaders(batch_size=32)
+    batch_size = 32
+    train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = get_imbalanced_dataloaders(
+        dataset_name=args.dataset, batch_size=batch_size
+    )
     print(f"📊 Classes: {num_classes}")
     print(f"   Train batches: {len(train_loader)}  |  Val batches: {len(val_loader)}  |  Cal batches: {len(cal_loader)}  |  Test batches: {len(test_loader)}")
 
@@ -2314,9 +2700,9 @@ def main():
         warmup_epochs=warmup_epochs, total_epochs=total_epochs,
         disable_efl=args.disable_efl, kl_scaling=args.kl_scaling
     )
-    # Khắc phục lỗi Optimizer Hijacking: chặn 'scores' khỏi AdamW
+    # Khắc phục lỗi Optimizer Hijacking: chặn 'scores' khỏi optimizer
     trainable_params = [p for name, p in model.named_parameters() if 'scores' not in name]
-    optimizer = optim.Adam(trainable_params, lr=4.0e-05)
+    optimizer = build_optimizer(trainable_params, args)
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=args)
 
     # Ensure output directory exists (Kaggle writable path)
