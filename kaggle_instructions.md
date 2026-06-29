@@ -153,20 +153,36 @@ Muốn chạy trên category khác:
 ## 📊 Bước 3: Đọc Kết quả
 
 ### 3.1 Bảng kết quả trực tiếp trên Console
-Mỗi model sau khi train xong sẽ tự động in bảng ASCII:
+Mỗi model sau khi train xong sẽ tự động in bảng ASCII được thiết kế riêng cho từng loại dataset:
+
+**Ví dụ (ISIC):**
+```text
+======================================================================
+🏥 CLINICAL EVALUATION (ISIC) | full_guds
+======================================================================
+Metric                                   |      Value
+-----------------------------------------+-----------
+ RANKING & DETECTION
+  Macro Auroc                            |     0.9234
+  Pr Auc                                 |     0.4521
+  pAUC (TPR > 0.8) 🌟                    |     0.1876
+-----------------------------------------+-----------
+ CLINICAL BALANCE
+  Balanced Accuracy Default              |     0.8745
+...
 ```
-============================================================
-RESULTS FOR: full_guds
-============================================================
-Metric                              |      Value
------------------------------------+-----------
-macro_auroc                         |     0.9234
-pauc                                |     0.1876
-pr_auc                              |     0.4521
-balanced_accuracy_default           |     0.8745
-aurc                                |     0.0312
-ece_adaptive                        |     0.0234
-============================================================
+
+**Ví dụ (MVTec AD):**
+```text
+======================================================================
+🏭 MVTec AD (Anomaly Detection) | full_guds
+======================================================================
+Metric                                   |      Value
+-----------------------------------------+-----------
+ ANOMALY DETECTION
+  Image Auroc                            |     0.9850
+  Image Ap                               |     0.9620
+...
 ```
 
 ### 3.2 File output

@@ -361,16 +361,56 @@ def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
 
 
 def print_metrics_table(spec_name: str, metrics: dict[str, float]):
-    print(f"\n{'='*60}")
-    print(f"RESULTS FOR: {spec_name}")
-    print(f"{'='*60}")
-    print(f"{'Metric':<35} | {'Value':>10}")
-    print(f"{'-'*35}-+-{'-'*10}")
-    for k in sorted(metrics.keys()):
-        val = metrics[k]
-        if isinstance(val, (int, float)):
-            print(f"{k:<35} | {val:>10.4f}")
-    print(f"{'='*60}\n")
+    is_mvtec = "image_auroc" in metrics
+    benchmark_name = "MVTec AD (Anomaly Detection)" if is_mvtec else "CIFAR-100-LT (General Long-Tail)"
+    icon = "🏭" if is_mvtec else "📦"
+    
+    print(f"\n{'='*70}")
+    print(f"{icon} {benchmark_name} | {spec_name}")
+    print(f"{'='*70}")
+    print(f"{'Metric':<40} | {'Value':>10}")
+    print(f"{'-'*40}-+-{'-'*10}")
+    
+    if is_mvtec:
+        groups = {
+            "Anomaly Detection": ["image_auroc", "image_ap", "f1_max"],
+            "Classification": ["balanced_accuracy"],
+            "Uncertainty & Reliability": ["ece_adaptive", "aurc", "nll", "brier"],
+            "Sparsity": ["active_density", "valid_24_fraction", "masked_throughput_relative"]
+        }
+    else:
+        groups = {
+            "Top Accuracy": ["acc_top1", "acc_top5", "balanced_accuracy", "f1_macro"],
+            "Stratified Accuracy": ["acc_many", "acc_medium", "acc_few"],
+            "Ranking": ["macro_auroc", "macro_pr_auc"],
+            "Uncertainty & Reliability": ["ece_adaptive", "aurc", "nll", "brier"],
+            "Sparsity": ["active_density", "valid_24_fraction", "masked_throughput_relative"]
+        }
+        
+    printed_keys = set()
+    for group_name, keys in groups.items():
+        printed_any = False
+        for k in keys:
+            if k in metrics:
+                if not printed_any:
+                    print(f" {group_name.upper()}")
+                    printed_any = True
+                display_name = "  " + k.replace("_", " ").title()
+                print(f"{display_name:<40} | {metrics[k]:>10.4f}")
+                printed_keys.add(k)
+        if printed_any:
+            print(f"{'-'*40}-+-{'-'*10}")
+            
+    # Print any remaining metrics
+    remaining = [k for k in sorted(metrics.keys()) if k not in printed_keys and isinstance(metrics[k], (int, float))]
+    if remaining:
+        print(" OTHER METRICS")
+        for k in remaining:
+            display_name = "  " + k.replace("_", " ").title()
+            print(f"{display_name:<40} | {metrics[k]:>10.4f}")
+        print(f"{'-'*40}-+-{'-'*10}")
+            
+    print(f"{'='*70}\n")
 
 
 def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed: int) -> dict:

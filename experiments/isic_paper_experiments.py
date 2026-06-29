@@ -1144,21 +1144,45 @@ def train_guds(
 
 
 def print_metrics_table(spec_name: str, metrics: dict[str, float]):
-    print(f"\n{'='*60}")
-    print(f"RESULTS FOR: {spec_name}")
-    print(f"{'='*60}")
-    print(f"{'Metric':<35} | {'Value':>10}")
-    print(f"{'-'*35}-+-{'-'*10}")
-    keys_to_print = [
-        "macro_auroc", "pauc", "pr_auc", 
-        "balanced_accuracy_default", "aurc", "ece_adaptive",
-        "sensitivity_at_balanced", "specificity_at_balanced",
-        "sensitivity_at_high_recall", "specificity_at_high_recall"
-    ]
-    for k in keys_to_print:
-        if k in metrics:
-            print(f"{k:<35} | {metrics[k]:>10.4f}")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*70}")
+    print(f"🏥 CLINICAL EVALUATION (ISIC) | {spec_name}")
+    print(f"{'='*70}")
+    print(f"{'Metric':<40} | {'Value':>10}")
+    print(f"{'-'*40}-+-{'-'*10}")
+    
+    groups = {
+        "Ranking & Detection": ["macro_auroc", "pr_auc", "pauc"],
+        "Clinical Balance": ["balanced_accuracy_default", "sensitivity_at_balanced", "specificity_at_balanced"],
+        "High Recall Operating Point": ["sensitivity_at_high_recall", "specificity_at_high_recall"],
+        "Uncertainty & Calibration": ["ece_adaptive", "aurc", "nll", "brier"],
+        "Sparsity": ["active_density", "valid_24_fraction", "masked_throughput_relative"]
+    }
+    
+    printed_keys = set()
+    for group_name, keys in groups.items():
+        printed_any = False
+        for k in keys:
+            if k in metrics:
+                if not printed_any:
+                    print(f" {group_name.upper()}")
+                    printed_any = True
+                display_name = "  " + k.replace("_", " ").title()
+                if k == "pauc":
+                    display_name = "  pAUC (TPR > 0.8) 🌟"
+                print(f"{display_name:<40} | {metrics[k]:>10.4f}")
+                printed_keys.add(k)
+        if printed_any:
+            print(f"{'-'*40}-+-{'-'*10}")
+            
+    remaining = [k for k in sorted(metrics.keys()) if k not in printed_keys and isinstance(metrics[k], (int, float))]
+    if remaining:
+        print(" OTHER METRICS")
+        for k in remaining:
+            display_name = "  " + k.replace("_", " ").title()
+            print(f"{display_name:<40} | {metrics[k]:>10.4f}")
+        print(f"{'-'*40}-+-{'-'*10}")
+            
+    print(f"{'='*70}\n")
 
 
 def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
