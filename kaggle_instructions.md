@@ -111,7 +111,7 @@ Chạy mô hình chính và 10 ablation studies:
 ```
 
 > **Lưu ý quan trọng:** `full_guds` sử dụng cấu hình chính thức theo bài báo:
-> Symmetric KL + KL-Uniform Regrower + Signed First-Order Pruner + EFL.
+> Symmetric KL + KL-Uniform Regrower + Signed First-Order Pruner (Strength=0.5) + EFL (Gamma=5.0).
 > Mỗi ablation chỉ thay đổi **đúng 1 biến** so với `full_guds`.
 
 ---
