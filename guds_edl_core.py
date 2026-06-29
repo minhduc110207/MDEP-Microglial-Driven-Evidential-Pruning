@@ -190,7 +190,7 @@ class EvidentialFocalLoss(nn.Module):
     The focal weight modulates the CE term — not the evidence space directly —
     so the Dirichlet structure stays valid even on highly imbalanced data.
     """
-    def __init__(self, gamma=1.2, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100, disable_efl=False, kl_scaling='asymmetric', class_weight_cap=10.0):
+    def __init__(self, gamma=5.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100, disable_efl=False, kl_scaling='symmetric', class_weight_cap=10.0):
         super(EvidentialFocalLoss, self).__init__()
         self.base_gamma = gamma
         self.gamma = gamma
@@ -224,14 +224,14 @@ class EvidentialFocalLoss(nn.Module):
             dim=1, keepdim=True,
         )
 
-        # Dynamic gamma scheduling (Cosine Ramp Schedule as per Phase 4)
+        # Focal schedule: off during dense warmup, then cosine-decay from gamma_max.
         if epoch is not None and not self.disable_efl:
             if epoch < self.warmup_epochs:
                 gamma_val = 0.0
             else:
                 import math
                 progress = (epoch - self.warmup_epochs) / max(self.total_epochs - self.warmup_epochs, 1)
-                gamma_val = self.base_gamma * 0.5 * (1.0 - math.cos(math.pi * progress))
+                gamma_val = self.base_gamma * 0.5 * (1.0 + math.cos(math.pi * progress))
         else:
             gamma_val = self.gamma if not self.disable_efl else 0.0
 
@@ -462,7 +462,8 @@ def update_scores_agents(
     disable_pruner=False,
     disable_regrower=False,
     pruner_type='signed_first_order',
-    regrower_type='class_conditioned',
+    regrower_type='kl_uniform',
+    pruning_strength=0.5,
     use_anticryst=True,
     verbose=False,
 ):
@@ -573,7 +574,7 @@ def update_scores_agents(
             dormant_mask = 1.0 - active_mask
             dormant_growth_scale = 0.25
             delta_S = (
-                active_mask * (G_ij - C_ij)
+                active_mask * (G_ij - pruning_strength * C_ij)
                 + dormant_mask * (dormant_growth_scale * G_ij + exploration_noise)
             )
             
@@ -790,6 +791,14 @@ class MDEPTrainer:
                 module.warmup = is_warmup
                 module.gamma = gamma
 
+    @torch.no_grad()
+    def sync_scores_to_current_weights(self):
+        """Refresh latent morphology scores from the dense-warmup weights."""
+        for module in self.model.modules():
+            if isinstance(module, (MDEPLinear, MDEPConv2d)):
+                module.scores.data.copy_(torch.abs(module.weight.data))
+                module.scores_momentum.zero_()
+
     def reset_effective_weight_grads(self):
         for m in self.model.modules():
             if isinstance(m, (MDEPLinear, MDEPConv2d)):
@@ -837,7 +846,7 @@ class MDEPTrainer:
         num_classes = outputs.shape[1]
         
         # Phase 5: Support class_conditioned vs uniform KL for Astrocyte
-        regrower_type = getattr(self.args, 'regrower_type', 'class_conditioned') if self.args else 'class_conditioned'
+        regrower_type = getattr(self.args, 'regrower_type', 'kl_uniform') if self.args else 'kl_uniform'
         alpha_base = uncertainties['alpha']
         
         if (
@@ -908,6 +917,8 @@ class MDEPTrainer:
             for module in self.model.modules():
                 if hasattr(module, 'freeze_permutation'):
                     module.freeze_permutation()
+            print("Syncing MDEP scores to dense-warmup weights...")
+            self.sync_scores_to_current_weights()
 
         is_warmup = epoch < self.warmup_epochs
         gamma = self.step_gamma(epoch)
@@ -1018,7 +1029,8 @@ class MDEPTrainer:
                     disable_pruner=disable_pruner,
                     disable_regrower=disable_regrower,
                     pruner_type=pruner_type,
-                    regrower_type=getattr(self.args, 'regrower_type', 'class_conditioned') if self.args else 'class_conditioned',
+                    regrower_type=getattr(self.args, 'regrower_type', 'kl_uniform') if self.args else 'kl_uniform',
+                    pruning_strength=getattr(self.args, 'pruning_strength', 0.5) if self.args else 0.5,
                     use_anticryst=use_anticryst,
                     verbose=verbose_structural_logs,
                 )
@@ -2248,8 +2260,9 @@ def main():
     parser.add_argument('--disable_pruner', action='store_true', help="Disable Microglia pruning")
     parser.add_argument('--disable_regrower', action='store_true', help="Disable Astrocyte regrowing")
     parser.add_argument('--pruner_type', type=str, default='signed_first_order', choices=['signed_first_order', 'absolute_grad', 'magnitude', 'random'])
-    parser.add_argument('--regrower_type', type=str, default='class_conditioned', choices=['kl_uniform', 'class_conditioned', 'gradient', 'random'])
-    parser.add_argument('--kl_scaling', type=str, default='asymmetric', choices=['asymmetric', 'symmetric'])
+    parser.add_argument('--regrower_type', type=str, default='kl_uniform', choices=['kl_uniform', 'class_conditioned', 'gradient', 'random'])
+    parser.add_argument('--pruning_strength', type=float, default=0.5)
+    parser.add_argument('--kl_scaling', type=str, default='symmetric', choices=['asymmetric', 'symmetric'])
     parser.add_argument('--disable_efl', action='store_true', help="Disable Evidential Focal Loss weighting")
     parser.add_argument('--disable_anticryst', action='store_true', help="Disable Astrocyte anti-crystallization")
     args = parser.parse_args()
@@ -2267,6 +2280,7 @@ def main():
     # ── Model: ResNet-18 with EDL head ──────────────────────────────
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     in_features = model.fc.in_features
+    replace_conv2d_with_mdep(model)
     model.fc = nn.Sequential(
         nn.Linear(in_features, num_classes),
         EvidenceLayer(activation='softplus')
@@ -2274,7 +2288,6 @@ def main():
     # Initialize evidence output to be small to prevent KL explosion
     nn.init.normal_(model.fc[0].weight, mean=0, std=0.001)
     nn.init.constant_(model.fc[0].bias, 0)
-    replace_conv2d_with_mdep(model)
     model = model.to(device)
     has_isic = os.path.exists('/kaggle/input') or os.path.exists(r'E:\Testing\mdep\isic-2024-challenge')
     total_epochs  = 40 if has_isic else 3
@@ -2282,7 +2295,7 @@ def main():
 
     # ── Optimizer & Loss ───────────────────────────────────────────
     criterion = EvidentialFocalLoss(
-        gamma=1.2, num_classes=num_classes, kl_lambda=0.1,
+        gamma=5.0, num_classes=num_classes, kl_lambda=0.1,
         class_weights=class_weights.to(device),
         warmup_epochs=warmup_epochs, total_epochs=total_epochs,
         disable_efl=args.disable_efl, kl_scaling=args.kl_scaling

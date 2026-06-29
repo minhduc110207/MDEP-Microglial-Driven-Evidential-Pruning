@@ -103,10 +103,11 @@ class ExperimentSpec:
     use_mdep_trainer: bool = False
     loss_name: str = "edl"
     pruner_type: str = "signed_first_order"
-    regrower_type: str = "class_conditioned"
+    regrower_type: str = "kl_uniform"
+    pruning_strength: float = 0.5
     disable_pruner: bool = False
     disable_regrower: bool = False
-    kl_scaling: str = "asymmetric"
+    kl_scaling: str = "symmetric"
     disable_efl: bool = False
     disable_anticryst: bool = False
     logit_adjustment_train: bool = False
@@ -351,10 +352,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
 
 SUITES: dict[str, list[str]] = {
     "main_tables": [
+        "full_guds",
         "fisher_edl",
         "flexible_edl",
         "r_edl",
-        "full_guds",
     ],
     "baselines": [
         "standard_ce",
@@ -375,17 +376,17 @@ SUITES: dict[str, list[str]] = {
         "full_guds",
         "guds_without_pruner",
         "guds_without_regrower",
-        "guds_symmetric_kl",
+        "guds_asymmetric_kl",
         "guds_without_efl",
         "guds_without_anticryst",
         "guds_absolute_pruner",
-        "guds_kl_uniform_regrower",
+        "guds_class_conditioned_regrower",
         "guds_without_topology_cache",
         "guds_temperature_only",
         "guds_no_posthoc_calibration",
     ],
 }
-SUITES["all"] = list(dict.fromkeys(SUITES["baselines"] + SUITES["ablations"]))
+SUITES["all"] = list(dict.fromkeys(["full_guds"] + SUITES["baselines"] + SUITES["ablations"]))
 
 
 DISCRIMINATIVE_LOSS_NAMES = {"ce", "focal", "class_balanced_ce", "balanced_softmax", "ldam_drw"}
@@ -860,7 +861,7 @@ def make_loss(spec: ExperimentSpec, num_classes: int, class_weights: torch.Tenso
         return RelaxedEDLLoss(num_classes, class_weights.to(device), total_epochs)
 
     base = EvidentialFocalLoss(
-        gamma=1.2,
+        gamma=5.0,
         num_classes=num_classes,
         kl_lambda=0.1,
         class_weights=class_weights.to(device),
@@ -1141,6 +1142,7 @@ def train_guds(
         disable_anticryst=spec.disable_anticryst,
         use_anticryst=not spec.disable_anticryst,
         disable_topology_cache=spec.disable_topology_cache,
+        pruning_strength=spec.pruning_strength,
         verbose_structural_logs=verbose_structural_logs,
     )
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scheduler=scheduler)
@@ -1221,7 +1223,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         pretrained=not args.no_pretrained,
     )
     if spec.sparse:
-        replace_conv2d_with_mdep(model)
+        replace_conv2d_with_mdep(model.backbone)
     model = model.to(device)
     if torch.cuda.device_count() > 1 and not args.cpu:
         print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
