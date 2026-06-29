@@ -988,6 +988,12 @@ class MDEPTrainer:
                     ema_grad = grad_norm.item()
                 else:
                     ema_grad = 0.95 * ema_grad + 0.05 * grad_norm.item()
+                    
+            current_loss = loss.detach().item()
+            if ema_loss is None:
+                ema_loss = current_loss
+            else:
+                ema_loss = 0.95 * ema_loss + 0.05 * current_loss
 
             # Cache primary weight gradient for structural updates
             if not is_warmup or epoch < 2:
@@ -1023,6 +1029,11 @@ class MDEPTrainer:
                     use_anticryst=use_anticryst,
                     verbose=verbose_structural_logs,
                 )
+
+        if self.scheduler is not None:
+            self.scheduler.step()
+            
+        return ema_loss if ema_loss is not None else 0.0
 # ============================================================================
 
 class LongTailedDataset(Dataset):
