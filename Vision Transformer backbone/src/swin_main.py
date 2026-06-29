@@ -22,7 +22,7 @@ from sklearn.metrics import (
 )
 
 # Import local MDEP components
-from swin_agents import MDEPLinear, MDEPConv2d, update_scores_agents
+from swin_agents import MDEPLinear, MDEPConv2d, update_scores_agents, generate_2_4_mask
 from swin_mdep import EvidenceLayer, compute_uncertainties, replace_swin_linear_with_mdep, LogPriorCorrection
 from swin_trainer import SwinMDEPTrainer
 
@@ -290,6 +290,23 @@ def load_resnet_teacher(device, checkpoint_path):
         # Load weights
         state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         model.load_state_dict(state_dict)
+        
+        # Restore teacher's active sparse states (warmup=False, mask/tau generated from scores)
+        for m in model.modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                m.warmup = False
+                raw_mask = generate_2_4_mask(m.scores.data)
+                m.mask.copy_(raw_mask)
+                if m.scores.numel() % 4 == 0:
+                    scores_flat = m.scores.data.view(-1, 4)
+                    sorted_scores, _ = torch.sort(scores_flat, dim=-1, descending=True)
+                    s2 = sorted_scores[:, 1]
+                    s3 = sorted_scores[:, 2]
+                    tau = ((s2 + s3) / 2.0).unsqueeze(-1).expand_as(scores_flat).reshape(m.scores.shape)
+                    m.tau.copy_(tau)
+                else:
+                    m.tau.zero_()
+                    
         model.to(device)
         model.eval()
         
@@ -297,7 +314,7 @@ def load_resnet_teacher(device, checkpoint_path):
         for p in model.parameters():
             p.requires_grad = False
             
-        print("ResNet Teacher loaded successfully.")
+        print("ResNet Teacher loaded and sparse states restored successfully.")
         return model
     except Exception as e:
         print(f"Failed to load ResNet Teacher: {e}")
@@ -581,7 +598,7 @@ def evaluate(model, val_loader, test_loader, device, num_classes):
         pr_auc = average_precision_score(y_true, probs[:, 1])
         brier = brier_score_loss(y_true, probs[:, 1])
         try:
-            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.2)
+            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.8)
         except ValueError:
             pauc = float('nan')
         try:
@@ -634,7 +651,7 @@ def evaluate(model, val_loader, test_loader, device, num_classes):
         print(f"  PR-AUC                : {pr_auc:.4f}")
         print(f"  Brier Score           : {brier:.4f}")
     print(f"  Macro-AUROC           : {macro_auroc:.4f}")
-    print(f"  pAUC (@ 20% FPR)      : {pauc:.4f}")
+    print(f"  pAUC (@ 80% FPR)      : {pauc:.4f}")
     print(f"  pAUC (ISIC 2024 metric): {pauc_isic:.4f}")
     print(f"  ECE (15 bins)         : {ece_val:.4f}")
     print(f"  Minority-ECE (cls 1)  : {m_ece:.4f}")

@@ -11,6 +11,12 @@
 ============================================================================
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +32,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from PIL import Image
 import io
+import torch.distributions as dist
 try:
     import h5py
     HAS_H5PY = True
@@ -1239,7 +1246,7 @@ def evaluate(model, test_loader, device, num_classes):
         pr_auc = average_precision_score(y_true, probs[:, 1])
         brier = brier_score_loss(y_true, probs[:, 1])
         try:
-            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.2)
+            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.8)
         except ValueError:
             pauc = float('nan')
             
@@ -1297,7 +1304,7 @@ def evaluate(model, test_loader, device, num_classes):
         print(f"  PR-AUC                : {pr_auc:.4f}")
         print(f"  Brier Score           : {brier:.4f}")
     print(f"  Macro-AUROC           : {macro_auroc:.4f}")
-    print(f"  pAUC (@ 20% FPR)      : {pauc:.4f}")
+    print(f"  pAUC (@ 80% FPR)      : {pauc:.4f}")
     print(f"  ECE (15 bins)         : {ece_val:.4f}")
     print(f"  Minority-ECE (cls 1)  : {m_ece:.4f}")
     print(f"  Mean Epistemic u_e    : {u_e.mean():.4f}")
@@ -1335,6 +1342,317 @@ def evaluate(model, test_loader, device, num_classes):
         'mean_u_e': float(u_e.mean()),
         'mean_u_a': float(u_a.mean()),
     }
+
+
+# ============================================================================
+#  SECTION 6.5 — Evidential Transformation Network (ETN)
+# ============================================================================
+
+class ResNetFeatureExtractor(nn.Module):
+    """
+    Wraps a ResNet model to extract both:
+      1. Logits (input to the final EvidenceLayer, computed as fc[0](features))
+      2. Hidden features (input to the fc layer, captured via avgpool hook)
+    """
+    def __init__(self, base_model):
+        super().__init__()
+        self.base_model = base_model
+        self.features = None
+        self.hook = self.base_model.avgpool.register_forward_hook(self._hook_fn)
+
+    def _hook_fn(self, module, inp, out):
+        self.features = torch.flatten(out, 1)
+
+    def forward(self, x):
+        _ = self.base_model(x)
+        features = self.features
+        logits = self.base_model.fc[0](features)
+        return features.detach(), logits.detach()
+
+    def remove_hooks(self):
+        self.hook.remove()
+
+
+class EvidentialTransformationNetwork(nn.Module):
+    """
+    Lightweight MLP that outputs parameters (shape, rate) of a Gamma distribution
+    used to scale logits.
+    """
+    def __init__(self, in_features):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2)
+        )
+        self.b_param = nn.Parameter(torch.ones(1) * 1.0)
+
+    def forward(self, features):
+        output = self.mlp(features)
+        # Add 1.0 to alpha_G to ensure a well-defined mode > 0
+        alpha_G = torch.clamp(F.softplus(output[:, 0]) + 1.0, min=1.0 + 1e-5, max=50.0)
+        beta_G = torch.clamp(F.softplus(output[:, 1]), min=1e-5, max=50.0)
+        return alpha_G, beta_G
+
+    def get_b(self, num_classes, device):
+        b_val = F.softplus(self.b_param)
+        return b_val * torch.ones(num_classes, device=device)
+
+
+def kl_gamma_gamma(alpha_q, beta_q, alpha_p, beta_p):
+    """
+    Computes analytical KL divergence between two Gamma distributions.
+    """
+    term1 = (alpha_q - alpha_p) * torch.digamma(alpha_q)
+    term2 = - torch.lgamma(alpha_q) + torch.lgamma(alpha_p)
+    term3 = alpha_p * (torch.log(beta_q) - torch.log(beta_p))
+    term4 = alpha_q * (beta_p - beta_q) / beta_q
+    return term1 + term2 + term3 + term4
+
+
+def compute_ece_etn(probs, labels, num_bins=15):
+    """Computes ECE using PyTorch tensors directly."""
+    confidences, predictions = torch.max(probs, dim=1)
+    accuracies = predictions.eq(labels)
+    
+    ece = torch.zeros(1, device=probs.device)
+    bin_boundaries = torch.linspace(0, 1, num_bins + 1, device=probs.device)
+    
+    for i in range(num_bins):
+        bin_lower = bin_boundaries[i]
+        bin_upper = bin_boundaries[i + 1]
+        
+        in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
+        prop_in_bin = in_bin.float().mean()
+        
+        if prop_in_bin.item() > 0:
+            accuracy_in_bin = accuracies[in_bin].float().mean()
+            avg_confidence_in_bin = confidences[in_bin].mean()
+            ece += torch.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+            
+    return ece.item()
+
+
+def train_and_eval_etn(base_model, train_loader, test_loader, num_classes, device):
+    print("\n🚀 Starting ETN Post-hoc Adaptation")
+    print("=" * 60)
+    
+    base_model.eval()
+    for p in base_model.parameters():
+        p.requires_grad = False
+
+    extractor = ResNetFeatureExtractor(base_model)
+    in_features = base_model.fc[0].in_features
+
+    etn = EvidentialTransformationNetwork(in_features).to(device)
+    optimizer = optim.Adam(etn.parameters(), lr=1e-3)
+
+    prior_mode = 5.0
+    prior_var = 5.0
+    
+    beta_p_val = (prior_mode + np.sqrt(prior_mode**2 + 4 * prior_var)) / (2 * prior_var)
+    alpha_p_val = prior_var * (beta_p_val**2)
+    
+    beta_p = torch.tensor(beta_p_val, dtype=torch.float32, device=device)
+    alpha_p = torch.tensor(alpha_p_val, dtype=torch.float32, device=device)
+    
+    nu = 10000.0
+    M_mc = 20
+    lambda_kl = 0.01
+
+    print(f"  Prior parameters for A: Mode={prior_mode}, Var={prior_var} => Shape(alpha_p)={alpha_p.item():.4f}, Rate(beta_p)={beta_p.item():.4f}")
+    
+    epochs = 10
+    print("  --- Training ETN Post-hoc Adaptation ---")
+    for epoch in range(epochs):
+        etn.train()
+        total_loss = 0
+        total_recon = 0
+        total_kl = 0
+        
+        for inputs, targets in train_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            with torch.no_grad():
+                features, logits = extractor(inputs)
+            
+            alpha_G, beta_G = etn(features)
+            b = etn.get_b(num_classes, device)
+            
+            q_dist = dist.Gamma(alpha_G, beta_G)
+            A = q_dist.rsample((M_mc,))
+            
+            scaled_logits = A.unsqueeze(-1) * logits.unsqueeze(0)
+            alpha_prime = F.softplus(scaled_logits) + b
+            alpha_0_prime = torch.sum(alpha_prime, dim=-1)
+            
+            targets_one_hot = F.one_hot(targets, num_classes=num_classes).float()
+            alpha_y = 1.0 + (nu - 1.0) * targets_one_hot
+            alpha_y_0 = torch.tensor(num_classes + nu - 1.0, device=device)
+            
+            log_B = torch.lgamma(alpha_0_prime) - torch.sum(torch.lgamma(alpha_prime), dim=-1)
+            psi_diff = torch.digamma(alpha_y) - torch.digamma(alpha_y_0)
+            sum_term = torch.sum((alpha_prime - 1.0) * psi_diff.unsqueeze(0), dim=-1)
+            
+            recon_loss = - torch.mean(log_B + sum_term)
+            
+            kl_div = kl_gamma_gamma(alpha_G, beta_G, alpha_p, beta_p)
+            kl_loss = torch.mean(kl_div)
+            
+            loss = recon_loss + lambda_kl * kl_loss
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            total_recon += recon_loss.item()
+            total_kl += kl_loss.item()
+            
+        num_batches = len(train_loader)
+        print(f"    Epoch [{epoch+1:>2}/{epochs}] | Loss: {total_loss/num_batches:.4f} | Recon: {total_recon/num_batches:.4f} | KL: {total_kl/num_batches:.4f}")
+
+    print("\n  --- Evaluating Model Effectiveness ---")
+    etn.eval()
+    
+    id_base_probs = []
+    id_etn_probs = []
+    id_labels = []
+    id_base_margins = []
+    id_etn_margins = []
+    id_base_unc = []
+    id_etn_unc = []
+    
+    for inputs, targets in test_loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        
+        with torch.no_grad():
+            features, logits = extractor(inputs)
+            
+            alpha_G, beta_G = etn(features)
+            b = etn.get_b(num_classes, device)
+            
+            # --- Base Model (EDL without ETN, A = 1) ---
+            base_evidence = F.softplus(logits)
+            base_alpha = base_evidence + 1.0
+            base_S = torch.sum(base_alpha, dim=1, keepdim=True)
+            base_probs = base_alpha / base_S
+            base_margins = logits[:, 1] - logits[:, 0] if num_classes == 2 else torch.max(logits, dim=1)[0] - torch.mean(logits, dim=1)
+            base_unc = num_classes / base_S.squeeze(-1)
+            
+            # --- ETN Transformed Model (Monte-Carlo expectation) ---
+            q_dist = dist.Gamma(alpha_G, beta_G)
+            A_samples = q_dist.sample((100,))
+            
+            scaled_logits = A_samples.unsqueeze(-1) * logits.unsqueeze(0)
+            alpha_prime = F.softplus(scaled_logits) + b
+            alpha_0_prime = torch.sum(alpha_prime, dim=-1)
+            probs_samples = alpha_prime / alpha_0_prime.unsqueeze(-1)
+            etn_probs = torch.mean(probs_samples, dim=0)
+            
+            etn_logits = torch.mean(A_samples, dim=0).unsqueeze(-1) * logits
+            etn_margins = etn_logits[:, 1] - etn_logits[:, 0] if num_classes == 2 else etn_logits.max(dim=1)[0] - etn_logits.mean(dim=1)
+            etn_unc = torch.mean(num_classes / alpha_0_prime, dim=0)
+
+        id_base_probs.append(base_probs)
+        id_etn_probs.append(etn_probs)
+        id_labels.append(targets)
+        id_base_margins.append(base_margins)
+        id_etn_margins.append(etn_margins)
+        id_base_unc.append(base_unc)
+        id_etn_unc.append(etn_unc)
+
+    id_base_probs = torch.cat(id_base_probs, dim=0)
+    id_etn_probs = torch.cat(id_etn_probs, dim=0)
+    id_labels = torch.cat(id_labels, dim=0)
+    id_base_margins = torch.cat(id_base_margins, dim=0)
+    id_etn_margins = torch.cat(id_etn_margins, dim=0)
+    id_base_unc = torch.cat(id_base_unc, dim=0)
+    id_etn_unc = torch.cat(id_etn_unc, dim=0)
+
+    # --- Generate OOD data (Simulated via Gaussian Noise) ---
+    print("  Simulating Out-Of-Distribution (OOD) dataset with random noise...")
+    ood_base_unc = []
+    ood_etn_unc = []
+    
+    for _ in range(5):
+        noise_inputs = torch.randn(32, 3, 224, 224, device=device)
+        with torch.no_grad():
+            features, logits = extractor(noise_inputs)
+            alpha_G, beta_G = etn(features)
+            b = etn.get_b(num_classes, device)
+            
+            base_evidence = F.softplus(logits)
+            base_S = torch.sum(base_evidence + 1.0, dim=1, keepdim=True)
+            base_unc = num_classes / base_S.squeeze(-1)
+            
+            q_dist = dist.Gamma(alpha_G, beta_G)
+            A_samples = q_dist.sample((100,))
+            alpha_prime = F.softplus(A_samples.unsqueeze(-1) * logits.unsqueeze(0)) + b
+            alpha_0_prime = torch.sum(alpha_prime, dim=-1)
+            etn_unc = torch.mean(num_classes / alpha_0_prime, dim=0)
+            
+        ood_base_unc.append(base_unc)
+        ood_etn_unc.append(etn_unc)
+        
+    ood_base_unc = torch.cat(ood_base_unc, dim=0)
+    ood_etn_unc = torch.cat(ood_etn_unc, dim=0)
+
+    extractor.remove_hooks()
+
+    # Calculate Accuracies
+    _, base_preds = torch.max(id_base_probs, dim=1)
+    base_acc = base_preds.eq(id_labels).float().mean().item()
+    
+    _, etn_preds = torch.max(id_etn_probs, dim=1)
+    etn_acc = etn_preds.eq(id_labels).float().mean().item()
+
+    # Calculate ECEs
+    base_ece = compute_ece_etn(id_base_probs, id_labels)
+    etn_ece = compute_ece_etn(id_etn_probs, id_labels)
+
+    # Calculate Average Margins
+    base_avg_margin = torch.mean(torch.abs(id_base_margins)).item()
+    etn_avg_margin = torch.mean(torch.abs(id_etn_margins)).item()
+
+    # Calculate OOD Detection Performance
+    id_labels_binary = np.zeros(len(id_base_unc))
+    ood_labels_binary = np.ones(len(ood_base_unc))
+    y_true_binary = np.concatenate([id_labels_binary, ood_labels_binary])
+    
+    y_scores_base = np.concatenate([id_base_unc.cpu().numpy(), ood_base_unc.cpu().numpy()])
+    base_auroc = roc_auc_score(y_true_binary, y_scores_base)
+    precision_base, recall_base, _ = precision_recall_curve(y_true_binary, y_scores_base)
+    base_aupr = auc(recall_base, precision_base)
+    
+    y_scores_etn = np.concatenate([id_etn_unc.cpu().numpy(), ood_etn_unc.cpu().numpy()])
+    etn_auroc = roc_auc_score(y_true_binary, y_scores_etn)
+    precision_etn, recall_etn, _ = precision_recall_curve(y_true_binary, y_scores_etn)
+    etn_aupr = auc(recall_etn, precision_etn)
+
+    # Print Comparative Results
+    print("\n=======================================================")
+    print("           ETN VS BASELINE EDL COMPARATIVE RESULTS")
+    print("=======================================================")
+    print(f"1. Predictive Accuracy:")
+    print(f"   - Baseline EDL: {base_acc*100:.2f}%")
+    print(f"   - ETN:          {etn_acc*100:.2f}% (Preserves accuracy)")
+    print("-" * 55)
+    print(f"2. Calibration (Expected Calibration Error - ECE):")
+    print(f"   - Baseline EDL ECE: {base_ece*100:.2f}%")
+    print(f"   - ETN ECE:          {etn_ece*100:.2f}% (Lower is better)")
+    print(f"   - ECE Reduction:    {(base_ece - etn_ece)*100:.2f}%")
+    print("-" * 55)
+    print(f"3. Margin Change:")
+    print(f"   - Baseline EDL Avg Logit Margin: {base_avg_margin:.4f}")
+    print(f"   - ETN Avg Logit Margin:          {etn_avg_margin:.4f}")
+    print("-" * 55)
+    print(f"4. OOD Detection (epistemic uncertainty):")
+    print(f"   - Baseline EDL: AUROC = {base_auroc*100:.2f}%, AUPR = {base_aupr*100:.2f}%")
+    print(f"   - ETN model:    AUROC = {etn_auroc*100:.2f}%, AUPR = {etn_aupr*100:.2f}%")
+    print(f"   - AUROC Gain:   {(etn_auroc - base_auroc)*100:.2f}%")
+    print(f"   - AUPR Gain:    {(etn_aupr - base_aupr)*100:.2f}%")
+    print("=======================================================\n")
 
 
 # ============================================================================
@@ -1396,6 +1714,9 @@ def main():
     # ── Evaluation ─────────────────────────────────────────────────
     evaluate(model, test_loader, device, num_classes)
     print_sparsity_report(model)
+
+    # ── Post-hoc Uncertainty transformation (ETN) ──────────────────
+    train_and_eval_etn(model, train_loader, test_loader, num_classes, device)
 
     # ── Saving Model ───────────────────────────────────────────────
     model_save_path = 'model_checkpoint.pth'

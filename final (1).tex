@@ -1,0 +1,1289 @@
+% ============================================================================
+%   Claim-safe AAAI Draft for the GUDS-EDL Architecture (v2_A Official)
+%   Conservative Uncertainty-Guided 2:4 Sparse Evidential Learning
+%
+%   File: guds_edl_report_en.tex
+%   Version: 3.0 — v2_A Official Configuration Rewrite (06/2026)
+%   Language: English
+% ============================================================================
+
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage{aaai}  % DO NOT CHANGE THIS
+\usepackage{times}  % DO NOT CHANGE THIS
+\usepackage{helvet}  % DO NOT CHANGE THIS
+\usepackage{courier}  % DO NOT CHANGE THIS
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\frenchspacing  % DO NOT CHANGE THIS
+\setlength{\pdfpagewidth}{8.5in} % DO NOT CHANGE THIS
+\setlength{\pdfpageheight}{11in}
+\setcounter{secnumdepth}{2}
+%%%%%%%%%%
+% PDFINFO for PDFLATEX
+\pdfinfo{
+/Title (GUDS-EDL: Conservative Uncertainty-Guided 2:4 Sparse Evidential Learning for Extremely Imbalanced Classification)
+/Author (Anonymous Authors)
+}
+%%%%%%%%%%
+ % DO NOT CHANGE THIS
+
+% --- Additional Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath, amssymb, amsthm, bm}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{adjustbox}
+\usepackage{placeins}
+\usepackage{stfloats}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc}
+\usepackage[table]{xcolor}
+\usepackage{colortbl}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newcolumntype{C}{>{\centering\arraybackslash}c}
+
+% --- Custom commands ---
+\newcommand{\Dir}{\text{Dir}}
+\newcommand{\KL}{\text{KL}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Norm}{\text{Norm}}
+\newcommand{\softplus}{\text{Softplus}}
+\newcommand{\pospart}[1]{\left[#1\right]_+}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\TopTwo}{Top2}
+
+\hbadness=10000
+\vbadness=10000
+\hfuzz=10pt
+\vfuzz=4pt
+\raggedbottom
+\setlength{\textfloatsep}{10pt plus 2pt minus 3pt}
+\setlength{\dbltextfloatsep}{10pt plus 2pt minus 3pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{8pt plus 2pt minus 2pt}
+
+\newtheorem{remark}{Remark}
+
+% Compatibility patch for manual \bibitem entries with aaai.sty
+\makeatletter
+\renewenvironment{thebibliography}[1]{%
+  \section*{References\@mkboth{REFERENCES}{REFERENCES}}%
+  \list{[\arabic{enumiv}]}{%
+    \settowidth\labelwidth{[#1]}%
+    \leftmargin\labelwidth
+    \advance\leftmargin\labelsep
+    \usecounter{enumiv}%
+    \let\p@enumiv\@empty
+    \renewcommand\theenumiv{\arabic{enumiv}}%
+    \itemsep .01in
+  }%
+  \sloppy\clubpenalty4000\widowpenalty4000\sfcode`\.\@m
+}{\def\@noitemerr{\@latex@warning{Empty `thebibliography' environment}}\endlist}
+\makeatother
+
+
+% ============================================================================
+\title{GUDS-EDL: Conservative Uncertainty-Guided 2:4 Sparse Evidential Learning for Extremely Imbalanced Classification}
+\author{Anonymous Authors}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Extremely imbalanced classification---where rare positive classes
+constitute a vanishing fraction of training data---arises across
+medical screening, industrial inspection, and fraud detection, posing
+joint demands on rare-event sensitivity, predictive uncertainty
+quantification, and deployment-efficient inference. Evidential Deep
+Learning (EDL) places a Dirichlet distribution over class probabilities
+to expose vacuity and expected entropy in a single forward pass, yet
+operates on dense or fixed-topology networks. Dynamic Sparse Training
+(DST) adapts network connectivity during optimization, but relies on
+magnitude or task-gradient saliency that remains agnostic to the
+model's evidential state. We introduce GUDS-EDL, a framework that
+unifies these directions by repurposing Dirichlet-derived uncertainty
+signals as structural saliency for pruning and regrowth under exact
+NVIDIA 2:4 structured sparsity constraints. Training proceeds in a
+two-timescale regime: an inner loop optimizes active weights through
+an evidential focal loss with class-frequency-dampened weighting,
+while an amortized outer loop refreshes the sparse mask by
+(i)~ranking active connections for removal via a signed first-order
+ambiguity-over-vacuity risk ratio, (ii)~ranking dormant connections
+for reactivation via KL-to-uniform evidential influence computed
+through a virtual dense probe that preserves gradient isolation, and
+(iii)~projecting the resulting latent scores onto the valid-block 2:4
+feasible set through blockwise Top-2 selection. On the ISIC 2024 skin
+lesion benchmark (${\sim}0.15\%$ minority prevalence), GUDS-EDL
+achieves mean pAUC$_{0.80}{=}0.0868$, Macro-AUROC${=}0.8520$, and
+ECE${=}0.0539$ over three seeds while maintaining exact valid-block
+2:4 feasibility across all wrapped layers, performing competitively
+with both dense evidential baselines and dynamic sparse alternatives.
+We position GUDS-EDL as a principled uncertainty-to-topology
+adaptation mechanism for structured-sparse evidential learning rather
+than as a universally dominant classifier.
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+
+Extremely imbalanced classification arises in medical screening, industrial inspection, and fraud detection, where false negatives on rare positives can be costly. Models in these settings must balance rare-event sensitivity, uncertainty awareness, calibration-conscious decisions, and deployment-compatible inference. Structured sparsity adds an additional question: under a fixed sparse budget, which active connections should be retained for rare and uncertain regions?
+
+Long-tailed learning methods improve loss functions, logits, or classifier heads, but do not use uncertainty to adapt sparse topology. Evidential Deep Learning (EDL)~\cite{sensoy2018evidential} parameterizes a Dirichlet distribution over class probabilities and exposes vacuity and expected entropy in a single forward pass~\cite{malinin2018predictive}, but usually assumes dense or fixed-topology predictors. Dynamic Sparse Training (DST)~\cite{evci2020rigging} adapts connectivity during optimization using magnitude or task-gradient criteria, but does not exploit Dirichlet uncertainty as structural saliency. NVIDIA 2:4 structured sparsity provides deployment-compatible inference constraints, but lacks uncertainty-aware dynamic mask rules. This leaves a gap at the intersection of uncertainty-aware prediction, topology adaptation, and hardware-constrained sparsity.
+
+We introduce \textbf{GUDS-EDL}, an uncertainty-guided sparse evidential learning framework for this setting. The central idea is to treat evidential uncertainty not only as a prediction-time quantity, but also as a topology-selection signal under a fixed sparse budget. We summarize this idea through a constrained design decomposition: sparse topology is adapted by local Dirichlet-derived structural pressure under an exact valid-block 2:4 feasible set, rather than by magnitude or task gradients alone:
+\begin{equation}
+\begin{aligned}
+\mathcal{D}_{\mathrm{sig}}(W,M)
+&=
+\mathbb{E}_{(x,y)}
+\!\left[
+L_{\mathrm{EFL}}(W\odot M;x,y)
+\right] \\
+&\quad
++ \lambda_s\Phi_{\mathrm{struct}}(W,M),
+\qquad
+M\in\mathcal{C}_{2:4}.
+\end{aligned}
+\end{equation}
+We use \(\mathcal{D}_{\mathrm{sig}}\) only as a conceptual decomposition of the ordinary training loss and the structural proxy quantities; it is not used as a Lyapunov function, descent certificate, block-coordinate objective, or directly minimized end-to-end criterion. The key distinction is not EDL alone or structured sparsity alone, but the coupling between evidential uncertainty and topology evolution. We define the structural container as
+\begin{equation}
+\Phi_{\mathrm{struct}}(W,M) = \Phi_{\mathrm{prune}}(W,M) + \lambda_g \Phi_{\mathrm{grow}}(W,M),
+\end{equation}
+where the pruning and regrowth proxies are:
+\begin{equation}
+\Phi_{\mathrm{prune}} = \mathbb{E} \left[ \frac{u_a}{u_e+\epsilon} \right], \quad \Phi_{\mathrm{grow}} = \mathbb{E} [ \mathrm{KL}(\mathrm{Dir}(\alpha)\Vert \mathrm{Dir}(\mathbf{1})) ].
+\end{equation}
+The two terms are not optimized as a single penalty. Instead, GUDS-EDL uses them to construct separate local pruning and regrowth saliency scores while ordinary weights are trained by the evidential focal objective. Pruning asks which active links are locally predicted to reduce an ambiguity-over-vacuity proxy when removed, whereas regrowth asks which dormant links have the largest local ability to perturb the KL-uniform evidence state. The resulting mask scores are then projected exactly back to the valid-block 2:4 feasible set. The structural controller therefore does not perform descent on \(\mathcal{D}_{\mathrm{sig}}\); rather, \(\mathcal{D}_{\mathrm{sig}}\) separates the ordinary prediction loss from the proxy quantities used to rank local topology changes. The default configuration used throughout this paper employs topology caching, softened signed first-order pruning, KL-uniform regrowth, symmetric KL regularization, and evidential focal learning. ISIC 2024 serves as the primary rare-event case study; broader validation is discussed only when explicitly reported.
+
+\paragraph{Main Contributions.}
+\begin{itemize}
+    \item \textbf{Uncertainty-guided structured topology adaptation.} We convert Dirichlet vacuity and expected entropy into structural pressure for pruning and regrowth under exact valid-block 2:4 sparsity over eligible complete 4-blocks.
+    \item \textbf{Decoupled sparse evidential training.} We separate ordinary masked prediction updates from amortized structural refresh, enabling dormant links to receive proxy saliency without ordinary masked parameter updates.
+    \item \textbf{Conservative rare-event evaluation.} We study the method on ISIC 2024 with repeated seeds, dense and sparse baselines, ranking/calibration metrics, and structural validity diagnostics, while keeping claims aligned with the reported evidence.
+\end{itemize}
+
+\section{Related Work}\label{sec:related}
+
+\paragraph{Long-Tailed and Extreme Imbalanced Learning.} Long-tailed recognition is commonly addressed through re-sampling, re-weighting, margin adjustment, classifier decoupling, calibration-aware smoothing, and contrastive learning. Representative methods include Class-Balanced Loss~\cite{cui2019class}, LDAM-DRW~\cite{cao2019learning}, Logit Adjustment~\cite{menon2021long}, Balanced Softmax~\cite{ren2020balanced}, decoupled classifier training~\cite{kang2019decoupling}, MiSLAS~\cite{zhong2021improving}, BBN~\cite{zhou2020bbn}, and PaCo~\cite{cui2021parametric}. These methods improve loss, logits, or classifier balance but do not use uncertainty to adapt sparse topology; GUDS-EDL studies whether evidential structural signals can guide conservative topology adaptation under extreme imbalance.
+
+\paragraph{Evidential and Dirichlet-Based Uncertainty Estimation.} Evidential Deep Learning~\cite{sensoy2018evidential} replaces point-estimate softmax confidence with a Dirichlet distribution over class probabilities. Related work includes Prior Networks~\cite{malinin2018predictive}, Posterior Networks~\cite{charpentier2020posterior}, Fisher EDL~\cite{deng2023fisher}, R-EDL~\cite{chen2023redl}, Re-EDL~\cite{chen2024reedl}, Flexible EDL~\cite{yoon2025flexible}, ANEDL~\cite{yu2024anedl}, and Evidence Contraction~\cite{wu2024evidence}. Recent critiques~\cite{shen2024mirage} caution against interpreting EDL uncertainty as exact Bayesian posterior uncertainty. Accordingly, GUDS-EDL uses Dirichlet vacuity and expected entropy as structural adaptation signals, not as Bayesian uncertainty guarantees.
+
+\paragraph{Calibration, Selective Prediction, and Failure Detection.} Rare-event deployment requires calibrated confidence, operating-point awareness, and selective abstention. Temperature scaling~\cite{guo2017calibration}, selective classification~\cite{geifman2017selective,geifman2019selectivenet}, AURC~\cite{ding2020revisiting}, and recent evaluation critiques~\cite{jaeger2023call,traub2024overcoming} motivate reporting calibration together with working-point metrics. GUDS-EDL therefore reports thresholded operating points, overall ECE, ranking metrics, and risk-coverage behavior.
+
+\paragraph{Dynamic Sparse Training and Structured Sparsity.} Dynamic sparse training maintains sparse connectivity during optimization rather than compressing after training~\cite{han2016deep,frankle2019lottery}. SNIP~\cite{lee2019snip}, SET~\cite{mocanu2018scalable}, SNFS~\cite{dettmers2019sparse}, RigL~\cite{evci2020rigging}, PFFDST~\cite{li2025pffdst}, and SRigL~\cite{lasby2023srigl} motivate sensitivity, regrowth, and structured sparsity, while NVIDIA Sparse Tensor Cores motivate 2:4 deployment constraints~\cite{mishra2021accelerating}. GUDS-EDL differs by refreshing the 2:4 mask from Dirichlet-derived pruning and regrowth saliency rather than from magnitude or task gradient alone.
+
+\paragraph{Positioning of GUDS-EDL.} The closest prior lines address complementary components: EDL models Dirichlet predictive uncertainty, DST adapts sparse connectivity through magnitude or task-gradient saliency, and structured sparsity enforces hardware-compatible sparse patterns. More concretely, SNIP~\cite{lee2019snip} provides one-shot connection sensitivity, SET~\cite{mocanu2018scalable} rewires sparse connectivity, SNFS~\cite{dettmers2019sparse} and RigL~\cite{evci2020rigging} use training-gradient information for dynamic sparse regrowth, and SRigL~\cite{lasby2023srigl} moves this idea toward structured sparsity. In parallel, Fisher EDL~\cite{deng2023fisher}, R-EDL~\cite{chen2023redl}, and Flexible EDL~\cite{yoon2025flexible} refine evidential uncertainty modeling without making the Dirichlet signals a direct dynamic 2:4 topology controller. GUDS-EDL differs by using Dirichlet-derived evidential signals themselves as structural pressure for pruning and regrowth under exact valid-block 2:4 feasibility.
+
+\section{Preliminaries: Dirichlet Evidential Signals}\label{sec:math}
+
+For logits $\bm{z}\in\R^K$, GUDS-EDL maps each class logit to non-negative evidence using Softplus,
+\begin{equation}\label{eq:softplus}
+    e_c=\ln(1+\exp z_c),\qquad
+    \alpha_c=e_c+1,\qquad
+    S=\sum_{c=1}^K\alpha_c .
+\end{equation}
+Softplus is used instead of an output ReLU because ReLU can create zero-gradient regions for negative evidence logits, making evidence recovery less stable. The predictive mean is $\hat p_c=\alpha_c/S$. With uniform Subjective-Logic base rate $a_c=1/K$, this equals
+\begin{equation}\label{eq:p_hat}
+    \hat p_c=b_c+a_cu_e=\frac{e_c+1}{S},
+    \qquad b_c=\frac{e_c}{S},\qquad u_e=\frac{K}{S}.
+\end{equation}
+Since imbalance is handled through the loss rather than by changing the Dirichlet prior, the identity $\alpha_c=e_c+1$ and the lower bound $S\ge K$ are preserved.
+
+Following recent critiques of Evidential Deep Learning~\cite{shen2024mirage}, we do not interpret EDL signals as exact Bayesian posterior uncertainty. We use Dirichlet vacuity $u_e=K/S$ as a low-evidence structural proxy and expected categorical entropy
+\begin{equation}\label{eq:u_a}
+    u_a = \sum_{c=1}^K \frac{\alpha_c}{S} \left[\psi(S + 1) - \psi(\alpha_c + 1)\right]
+\end{equation}
+as an ambiguity proxy. In implementation, $u_a$ is clamped below at zero to guard against floating-point error.
+
+For finite logits, Softplus gives $S>K$; the limiting lower bound $S \to K$ is approached as evidence tends to zero. This parameterization guarantees positive Dirichlet parameters, bounded vacuity, and a well-defined predictive mean. Formal validity statements and proofs are provided in Appendix~\ref{app:proofs}.
+
+\paragraph{Theoretical Scope.}
+The quantities $u_e$ and $u_a$ are well-defined Dirichlet-derived signals: $u_e$ is bounded and $u_a$ is non-negative under the adopted parameterization. We use them to drive topology adaptation and uncertainty-aware evaluation; full proofs are provided in Appendix~\ref{app:proofs}.
+
+
+\section{GUDS-EDL Framework}\label{sec:methodology}
+
+For exposition, we refer to the pruning signal as \emph{risk-ratio signed pruning}, the regrowth signal as \emph{KL-uniform structural regrowth}, and the cached refresh schedule as a \emph{two-timescale topology cache}.
+
+GUDS-EDL separates training into two coupled loops. The cached-mask prediction loop and the amortized structural loop instantiate a two-timescale sparse learning rule: weights are updated at mini-batch frequency, whereas topology is updated at refresh frequency. This reduces topology noise without preventing dormant links from receiving proxy structural saliency. The prediction loop uses a cached 2:4 mask $\bm{M}$, performs ordinary mini-batch optimization of the active weights $\bm{W}$, and evaluates the evidential objective. The structural loop runs at refresh points on an amortized proxy batch: it computes $u_e,u_a$, forms the batch pruning risk ratio $R_{\mathcal B}$ and the regrowth objective $L_{\text{grow}}$, updates latent scores $\bm{V}$ through rank-normalized first-order saliency, and refreshes $\bm{M}$ by blockwise Top-2 projection.
+
+The default configuration employs topology caching, softened signed first-order pruning with pruning strength $0.5$, pruning warmup, KL-uniform regrowth, symmetric KL regularization, and evidential focal learning. This yields a conservative default setting rather than an aggressively tuned sensitivity maximizer.
+
+\subsection{2:4 Mask-Constrained Sparse Topology}
+GUDS-EDL wraps convolutional kernels and linear projections with binary masks. Prediction weights $\bm{W}^{(l)}$ are optimized by the ordinary training loss, while latent scores $\bm{V}^{(l)}$ determine the mask $\bm{M}^{(l)}$:
+\begin{equation}\label{eq:wrapped_weights}
+    \bm{W}_{\text{eff}}^{(l)}=\bm{W}^{(l)}\odot\bm{M}^{(l)} .
+\end{equation}
+For each eligible row and complete contiguous 4-block, exactly two entries are active:
+\begin{equation}\label{eq:c24}
+    \mathcal{C}_{2:4}
+    =
+    \left\{
+    \bm{M}\in\{0,1\}^{d_{\text{out}}\times d_{\text{in}}}:
+    \sum_{j=0}^{3} M_{i,4k+j}=2,\ \forall i,k
+    \right\}.
+\end{equation}
+Convolutional tensors are flattened row-wise before block partitioning; incomplete trailing segments are excluded from the exact 2:4 claim. Given latent scores, projection is independent within each valid block:
+\begin{equation}\label{eq:mask}
+    \begin{aligned}
+    I_{i,k}^{(l)} &= \TopTwo_{j\in\{0,1,2,3\}}
+    V_{\text{flat},i,4k+j}^{(l)},\\
+    M_{\text{flat},i,4k+j}^{(l)} &=
+    \begin{cases}
+        1 & \text{if } j\in I_{i,k}^{(l)},\\
+        0 & \text{otherwise.}
+    \end{cases}
+    \end{aligned}
+\end{equation}
+This is equivalent to $\bm{M}^{(t+1)}=\Pi_{\mathcal{C}_{2:4}}(\bm{V}^{(t)})$, where the projection maximizes $\langle \bm{M},\bm{V}\rangle$ over each complete 4-block. Thus every refreshed eligible block remains exactly 2:4 feasible by construction; details are in Appendix~\ref{app:24_feasibility}.
+
+\subsection{Uncertainty-Guided Pruning and KL-Uniform Structural Regrowth}
+At each structural refresh, GUDS-EDL evaluates a proxy batch and computes two saliency signals: a pruning signal from the ambiguity-over-vacuity ratio and a regrowth signal from KL-to-uniform evidential influence. Ordinary prediction uses $\bm{W}\odot\bm{M}$, but structural scoring uses an auxiliary dense effective-weight probe $\widetilde{\bm{W}}_{\text{eff}}$ initialized at the current masked values:
+\begin{equation}\label{eq:virtual_probe}
+\begin{aligned}
+    \widetilde{\bm{W}}_{\text{eff}}
+    &\leftarrow \bm{W}\odot\bm{M},\\
+    \nabla_{\widetilde{\bm{W}}_{\text{eff}}}(\cdot)
+    &\text{ is used only for mask scoring.}
+\end{aligned}
+\end{equation}
+This probe gives dormant coordinates structural saliency without applying ordinary parameter updates to dormant weights. The formal distinction from masked training gradients is given in Appendix~\ref{app:virtual_probe_note}.
+
+For pruning, the proxy-batch risk ratio is
+\begin{equation}\label{eq:batch_risk}
+    R_{\mathcal{B}}
+    =
+    \frac{1}{|\mathcal{B}|}
+    \sum_{n\in\mathcal{B}}
+    \frac{u_a^{(n)}}{u_e^{(n)}+\epsilon}.
+\end{equation}
+The ratio is a design proxy with three desiderata: it increases with ambiguity, attenuates pruning pressure under vacuity, and is bounded on finite proxy batches. We do not claim it is theoretically superior to entropy, margin, Fisher-style, or task-gradient signals in all regimes. For active links, signed first-order pruning uses
+\begin{equation}\label{eq:C_ij}
+    C_{ij}
+    =
+    \operatorname{Rank}_{l}\!\left(
+    \pospart{w_{\text{eff},ij}
+    \frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}}
+    \right),
+    \qquad
+    \pospart{x}=\max(x,0).
+\end{equation}
+Here $\operatorname{Rank}_{l}$ is a layer-wise percentile rank. The positive part keeps only removals locally predicted to reduce the proxy ratio; the Taylor interpretation and rank-scale invariance are in Appendix~\ref{app:signed_pruning}.
+
+For regrowth, the default configuration uses KL-uniform regrowth:
+\begin{equation}\label{eq:grow_objective}
+    L_{\text{grow}}
+    =
+    \frac{1}{|\mathcal{B}|}\sum_{n\in\mathcal{B}}
+    \KL\!\left(
+    \Dir(\bm{\alpha}^{(n)})\middle\|\Dir(\mathbf{1})
+    \right).
+\end{equation}
+Its absolute probe-gradient rank defines dormant-link influence:
+\begin{equation}\label{eq:G_ij}
+    G_{ij}
+    =
+    \operatorname{Rank}_{l}\!\left(
+    \left|
+    \frac{\partial L_{\text{grow}}}
+    {\partial w_{\text{eff},ij}}
+    \right|
+    \right).
+\end{equation}
+This is an influence score, not a descent direction or an instruction to increase confidence. It asks which dormant coordinates could most affect the evidential state relative to the uninformative Dirichlet reference if reactivated; the supervised loss, Top-2 projection, and calibration protocol determine whether the change is useful.
+
+The two rank-normalized scores are combined in the latent score update
+\begin{equation}\label{eq:score_update}
+\begin{aligned}
+    \Delta V_{ij}^{(t)}
+    &=
+    M_{ij}^{(t)}
+    \left(G_{ij}^{(t)}-\lambda_p C_{ij}^{(t)}\right)
+    +
+    \left(1-M_{ij}^{(t)}\right)
+    \left(\rho G_{ij}^{(t)}+\xi_{ij}^{(t)}\right),\\
+    \mu_{ij}^{(t)} &= \beta_m\mu_{ij}^{(t-1)}+(1-\beta_m)\Delta V_{ij}^{(t)},\\
+    X_{ij}^{(t)} &= V_{ij}^{(t-1)}+\eta_{\text{struct}}\mu_{ij}^{(t)},\\
+    V_{ij}^{(t)} &=
+    \operatorname{clamp}\!\left(
+    X_{ij}^{(t)}-\operatorname{mean}(\bm{X}^{(t)}),
+    -V_{\max},V_{\max}
+    \right).
+\end{aligned}
+\end{equation}
+The pruning term acts on active links; dormant links are moved by regrowth and a small optional exploration term used only for tie-breaking in nearly flat score fields. The final clamp bounds the latent morphology state, and Eq.~\ref{eq:mask} restores exact valid-block 2:4 feasibility after each refresh.
+
+\subsection{Gradient Isolation, Caching, and Stability Diagnostics}
+Ordinary training uses a fixed cached mask for each mini-batch, so prediction gradients and weight decay only update active links. For any differentiable mini-batch loss evaluated through $\bm{W}_{\text{eff}}=\bm{W}\odot\bm{M}$,
+\begin{equation}\label{eq:masked_gradient}
+    \nabla_{\bm{W}} L
+    =
+    \nabla_{\bm{W}_{\text{eff}}} L \odot \bm{M}.
+\end{equation}
+Thus dormant parameters receive zero ordinary task gradient under a fixed mask. GUDS-EDL separates this training path from the virtual structural probe in Eq.~\ref{eq:virtual_probe}, which supplies saliency for future regrowth but is not applied as a dormant-weight update.
+
+\paragraph{Summary of Well-Posedness and Algorithmic Validity.}
+The formal role of this section is limited to algorithmic validity: valid Dirichlet-derived signals, exact 2:4 feasibility over eligible complete blocks, local first-order pruning/regrowth interpretations, bounded latent scores, virtual-probe dormant saliency, and ordinary masked-gradient isolation. These checks make the controller well-defined and mask-feasible; they are not convergence, optimality, Bayesian, validation-improvement, or hardware-speedup guarantees. Appendix~\ref{app:proofs} and Table~\ref{tab:guarantees} state the boundary explicitly.
+
+\section{Optimization Framework}\label{sec:optimization}
+
+To address extreme class imbalance, we build on Evidential Focal Loss (EFL) from Zhou et al.~\cite{zhou2023domain}, which combines evidential Dirichlet classification with focal modulation. Our implementation uses square-root class-frequency dampening, stop-gradient focal modulation, KL annealing, and symmetric KL regularization.
+
+The default configuration adopts symmetric KL regularization, in which the KL multiplier is uniform across classes. An asymmetric KL variant with a capped class-dependent multiplier is retained only as a diagnostic alternative. The implemented training objective is
+\begin{equation}\label{eq:efl}
+\begin{aligned}
+    L_{\text{EFL}}
+    &= \frac{1}{N}\sum_{n=1}^N \mathcal{F}_n(t)
+    \Bigl[
+    \bar{\omega}_{y_n}L_{\text{CE}}^{(n)} \\
+    &\hspace{2.4em}
+    + \lambda_{\text{KL}}\mu(t)
+    L_{\text{KL}}^{(n)}
+    \Bigr].
+\end{aligned}
+\end{equation}
+The dampened class weights are normalized so that the majority class has weight one and then capped:
+\begin{equation}\label{eq:sample_weight}
+\begin{aligned}
+    \omega_c
+    &= \sqrt{\frac{N_{\text{majority}}}{N_c}},
+    &\bar{\omega}_c
+    &= \min(\omega_c,\omega_{\max}),\\
+    \omega_{\text{majority}}
+    &= 1,
+    &\omega_{\max}
+    &= 10.0 .
+\end{aligned}
+\end{equation}
+The square-root form damps inverse-frequency scaling compared with direct inverse prevalence weighting, while the cap makes the imbalance modulation bounded by design. The expected cross-entropy under the Dirichlet predictive distribution is:
+\begin{equation}\label{eq:dirichlet_ce}
+    L_{\text{CE}}^{(n)}
+    = \sum_{c=1}^K y_c^{(n)}
+    \left[\psi(S^{(n)})-\psi(\alpha_c^{(n)})\right].
+\end{equation}
+The focal term is applied with stop-gradient confidence so that focal weighting changes sample emphasis without directly distorting the Dirichlet evidence:
+\begin{equation}\label{eq:focal_schedule}
+\begin{aligned}
+    \mathcal{F}_n(t)
+    &= \left(1-\operatorname{sg}\!\left[
+    \hat{p}_{y_n}^{(n)}\right]\right)^{\gamma(t)},\\
+    \gamma(t)
+    &= \begin{cases}
+    0, & t < T_w, \\
+    \frac{\gamma_{\max}}{2}
+    \left(1+\cos\left(\pi
+    \frac{t-T_w}{T-T_w}\right)\right), & t \ge T_w,
+    \end{cases}\\
+    \gamma_{\max} &= 5.0 .
+\end{aligned}
+\end{equation}
+For KL regularization, we remove the true-class evidence from the penalty by defining
+$\tilde{\alpha}_c^{(n)}=y_c^{(n)}+(1-y_c^{(n)})\alpha_c^{(n)}$. The adjusted KL term is:
+\begin{equation}\label{eq:kl_loss_main}
+    L_{\text{KL}}^{(n)}
+    =
+    \KL\!\left(\Dir(\tilde{\bm{\alpha}}^{(n)})\parallel\Dir(\mathbf{1})\right).
+\end{equation}
+The annealing coefficient is $\mu(t)=\min(1.0,t/t_{\text{anneal}})$ with $t_{\text{anneal}}=10$. In the default symmetric configuration, the KL regularizer treats all classes uniformly. The asymmetric-KL diagnostic variant uses a capped class-dependent multiplier:
+\begin{equation}\label{eq:asym_multiplier}
+    \Lambda_{\text{asym}}^{(n)}
+    =
+    \min(\bar{\omega}_{y_n},\Lambda_{\max}),
+    \qquad \Lambda_{\max}=10.0 .
+\end{equation}
+Importantly, $\bar{\omega}_{y_n}$ weights the supervised CE term in both configurations; the symmetric KL variant avoids any additional class-dependent multiplier inside the KL penalty. The ablation study shows that symmetric KL remains competitive with the asymmetric configuration and can improve some thresholded or ranking metrics. The asymmetric KL term is therefore a bounded imbalance-control option whose role is operating-point dependent rather than uniformly superior.
+The resulting training objective is
+\begin{equation}\label{eq:total_loss}
+    L_{\text{total}}=L_{\text{EFL}}(\bm{e},\bm{y},t).
+\end{equation}
+
+\paragraph{Controlled imbalance modulation.}
+For each sample $n$, the stop-gradient focal factor $\mathcal{F}_n(t)$ makes the EFL gradient a non-negative sample reweighting of the Dirichlet CE/KL gradients with respect to the evidence parameters, rather than introducing an additional derivative path through $\hat{p}_{y_n}^{(n)}$. The supervised class weight is bounded by $\bar{\omega}_{y_n}\le\omega_{\max}$. In the default symmetric-KL configuration, the KL term has no additional class-dependent multiplier, while in the diagnostic asymmetric variant the optional multiplier is bounded by $\Lambda_{\max}$. Thus, focal modulation changes sample weights but does not introduce an additional confidence-gradient feedback loop through $\hat{p}_{y_n}$.
+
+\paragraph{Training Warmup.}
+We use a short learning-rate and loss-scale warmup for numerical stability. Its schedule is an implementation detail and is given with the full training algorithm in Appendix~B.
+
+
+\subsection{Post-hoc Calibration and Decision Thresholding}
+Post-hoc calibration is applied to logits before the Softplus evidence map. Because this changes both predictive probabilities and Dirichlet strength, we treat it as evidential post-hoc calibration rather than ordinary softmax temperature scaling. Post-hoc calibration is applied after training and does not alter the learned sparse topology. The implementation supports temperature-only and bias-temperature modes, with prior-shift correction fitted on the calibration partition; the full formula is given in Appendix~B.
+
+Operating thresholds are selected separately by sweeping validation probabilities $\hat p_c=\alpha_c/S$. Threshold selection changes the decision rule used for Sensitivity/Specificity trade-offs but does not recalibrate the underlying evidence values. The ablation results reveal a ranking--calibration trade-off: temperature-only and uncalibrated scoring can improve threshold-independent ranking metrics, but substantially worsen ECE. Conversely, bias-temperature calibration improves probability calibration and conservative specificity, but can reduce pAUC and Macro-AUROC. We therefore report calibration and ranking metrics separately and avoid treating post-hoc calibration as a uniformly beneficial step under extreme prevalence.
+
+\paragraph{Scope of Claims.}
+The validity checks above establish that the proposed structural update is well-defined, mask-feasible, and motivated by local first-order saliency under a proper Dirichlet evidence state. They do not establish convergence, optimal topology discovery, Bayesian epistemic correctness, performance superiority over other sparse-training rules, or realized sparse-kernel acceleration. Empirical claims are limited to the reported ISIC 2024 case study, and broader validation protocols are treated as supporting evidence only when explicitly reported.
+
+\section{Experimental Setup}\label{sec:experiment}
+
+\subsection{Evaluation Benchmark}
+The main empirical claims are centered on ISIC 2024. CIFAR-100-LT, additional backbones, and realized sparse-kernel profiling are treated as future validation targets unless explicitly reported. This distinction is important because the current evidence supports feasibility and stability under the reported case study, not domain-general SOTA performance.
+
+\paragraph{ISIC 2024 Case Study.} We instantiate GUDS-EDL on the ISIC 2024 Challenge dataset~\cite{isic2024} (3D-TBP images with approximately 0.15\% minority prevalence). To prevent data leakage, we use a stratified 70/5/5/20 train/validation/calibration/test split grouped by patient\_id. The validation partition is used for decision-threshold sweeps, the calibration partition for temperature and bias calibration, and the held-out test partition for final reporting. Images are resized to $224\times224$ and normalized using ImageNet-1K statistics.
+
+\paragraph{Metrics.} Because default thresholds are unreliable under extreme prevalence skew, we report validation-selected balanced operating points together with threshold-independent ranking and calibration metrics. The main comparison reports Balanced Accuracy, pAUC$_{0.80}$, Macro-AUROC, PR-AUC, AURC, ECE, and valid-block 2:4 feasibility. Sensitivity and Specificity are reported when available for operating-point diagnostics. Lower AURC and ECE indicate better risk ordering and calibration, respectively. AURC is computed from the empirical risk-coverage curve using the same unnormalized scale across methods.
+
+\subsection{Baselines and Backbones}
+\paragraph{Baselines.} The reported ISIC tables include dense evidential baselines with completed metrics (Dense EDL, Fisher EDL, Flexible EDL, R-EDL), static and dynamic sparse 2:4 baselines (Static 2:4 EDL, RigL-style 2:4), and GUDS-EDL. Softmax long-tailed baselines such as standard CE, focal loss, logit adjustment, class-balanced CE, balanced softmax, LDAM-DRW, cRT, and MiSLAS were trained in the extended suite, but are not included in the main performance tables because complete held-out metrics are not yet available. Additional CIFAR-100-LT baseline training runs were initiated but do not yet contain complete held-out test metrics; these runs are treated as planned validation rather than empirical evidence in the main paper.
+
+\paragraph{Backbone Instantiation and Wrapping.}
+The reported case study uses a ResNet-18 instantiation. Inside each residual block, the $3 \times 3$ convolutional layers are replaced with sparse convolutional wrappers that apply masks generated by latent scores; the first input convolution is kept dense. The structural proxy pass computes the risk-ratio gradient for the pruner and the KL-to-uniform gradient saliency for the regrower. Additional grouping diagnostics are documented in Appendix~B and are not separate claimed contributions.
+
+\paragraph{Implementation Details.} Models are trained using 16-bit mixed precision (AMP)~\cite{micikevicius2018mixed}, while evidential losses are evaluated in FP32. To ensure a strictly fair and consistent evaluation, all models (including standard Long-Tailed baselines that originally employed SGD) are subjected to an identical, modern optimization regime using the AdamW optimizer with Cosine Annealing learning rate scheduling over 100 epochs. This isolates the fundamental algorithmic advantages from discrepancies in hyperparameter tuning. We apply square-root balanced sampling on majority classes, subsampled at approximately 1:20 in training for ISIC, and use validation-based threshold sweeps to select operating points. ECE is computed with 15 equal-width bins unless otherwise stated.
+
+\section{Results on the ISIC 2024 Case Study}\label{sec:results}
+
+\subsection{Repeated-Seed Evidential Comparison}
+Table~\ref{tab:main_evidential_comparison} compares GUDS-EDL with dense evidential baselines using repeated seeds and the same calibration/threshold-selection protocol when available. The central claim is conservative: GUDS-EDL demonstrates that Dirichlet-derived uncertainty can guide stable valid-block 2:4 sparse topology under extreme class imbalance, achieving competitive ranking-calibration behavior while preserving exact structured sparsity.
+
+
+
+Compared with dense evidential baselines, GUDS-EDL should not be interpreted as a uniformly better classifier. Its main advantage is that it obtains competitive threshold-independent ranking and calibration while enforcing exact valid-block 2:4 sparsity. Dense baselines remain important upper-reference models because they do not impose the same structured sparsity constraint. GUDS-EDL achieves the best mean Macro-AUROC, competitive pAUC$_{0.80}$, and strong AURC among the compared methods.
+
+\begin{table*}[t]
+\centering
+\caption{ISIC 2024 repeated-seed comparison under validation-selected balanced operating points. Values are mean $\pm$ standard deviation over completed seeds. Lower AURC and ECE are better. GUDS-EDL is evaluated under exact valid-block 2:4 sparsity; dense evidential baselines use the same split, calibration protocol, and threshold selection.}
+\label{tab:main_evidential_comparison}
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{3.2pt}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l c C C C C C C}
+\toprule
+\textbf{Model} & \textbf{Type} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
+\midrule
+Dense EDL & Dense evid. & $\mathbf{0.8020\pm0.0396}$ & $0.0600\pm0.0306$ & $0.8210\pm0.0577$ & $0.0279\pm0.0024$ & $0.0004\pm0.0002$ & $0.0519\pm0.0021$ \\
+Fisher EDL & Dense evid. & $0.7359\pm0.0272$ & $0.0428\pm0.0263$ & $0.7684\pm0.0624$ & $\mathbf{0.0313\pm0.0035}$ & $0.0006\pm0.0002$ & $\mathbf{0.0501\pm0.0013}$ \\
+Flexible EDL & Dense evid. & $0.7897\pm0.0660$ & $0.0650\pm0.0247$ & $0.8308\pm0.0428$ & $0.0243\pm0.0043$ & $0.0005\pm0.0002$ & $0.0508\pm0.0021$ \\
+R-EDL & Dense evid. & $0.7605\pm0.0381$ & $0.0396\pm0.0140$ & $0.7702\pm0.0378$ & $0.0291\pm0.0044$ & $0.0006\pm0.0002$ & $0.0510\pm0.0021$ \\
+\midrule
+\textbf{GUDS-EDL} & Sparse 2:4 & $0.7790\pm0.0418$ & $\mathbf{0.0868\pm0.0293}$ & $\mathbf{0.8520\pm0.0382}$ & $0.0230\pm0.0074$ & $\mathbf{0.00035\pm0.0002}$ & $0.0539\pm0.0018$ \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table*}
+
+\subsection{Sparse 2:4 Baseline Comparison}
+Table~\ref{tab:sparse_comparison} compares GUDS-EDL against sparse 2:4 baselines with completed metrics. Models with fewer completed seeds are explicitly marked.
+
+\begin{table*}[t]
+\centering
+\caption{Comparison with sparse 2:4 baselines. Values are mean $\pm$ standard deviation over completed seeds. Static 2:4 EDL and RigL-style 2:4 are reported over two completed seeds; GUDS-EDL is reported over three seeds. All sparse models maintain 50\% active density in wrapped layers. Lower AURC and ECE are better.}
+\label{tab:sparse_comparison}
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{3.0pt}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l C C C C C C C}
+\toprule
+\textbf{Model} & \textbf{Seeds} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
+\midrule
+Static 2:4 EDL & 2 & $0.7520\pm0.0166$ & $0.0421\pm0.0186$ & $0.7789\pm0.0415$ & $0.0217\pm0.0023$ & $0.0005\pm0.0001$ & $0.0571\pm0.0060$ \\
+RigL-style 2:4 & 2 & $0.7727\pm0.1037$ & $\mathbf{0.0863\pm0.0638}$ & $0.8299\pm0.1150$ & $0.0234\pm0.0121$ & $\mathbf{0.0003\pm0.0004}$ & $\mathbf{0.0545\pm0.0001}$ \\
+\textbf{GUDS-EDL} & 3 & $\mathbf{0.7790\pm0.0418}$ & $0.0868\pm0.0293$ & $\mathbf{0.8520\pm0.0382}$ & $\mathbf{0.0230\pm0.0074}$ & $0.00035\pm0.0002$ & $0.0539\pm0.0018$ \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table*}
+
+Compared with Static 2:4 EDL, GUDS-EDL improves ranking metrics such as pAUC$_{0.80}$ and Macro-AUROC, suggesting that uncertainty-guided topology adaptation is more informative than a fixed valid-block sparse mask. Compared with RigL-style 2:4, GUDS-EDL is numerically comparable on pAUC$_{0.80}$ and higher on Macro-AUROC, while RigL remains a strong sparse ranking baseline. Therefore, the sparse comparison supports competitive uncertainty-guided topology rather than a claim of uniform superiority over dynamic sparse training.
+
+\subsection{Seed-Level GUDS-EDL Behavior}
+Seed-level results are reported in Appendix~\ref{app:seed_level}; across three seeds, GUDS-EDL obtains mean pAUC$_{0.80}=0.0868$, Macro-AUROC $=0.8520$, and ECE $=0.0539$.
+
+\subsection{Historical Design-Selection Diagnostics}
+\label{subsec:ablation}
+Historical design-selection diagnostics suggested that topology caching was
+the most damaging removal, signed pruning favored sensitivity/ranking over
+absolute-gradient pruning, and symmetric KL/KL-uniform variants were
+competitive. These findings motivated the official conservative GUDS-EDL
+configuration. Because these diagnostics were conducted on a prior
+configuration, we use them only for design attribution rather than as proof
+that the official configuration dominates all variants. Full tables are provided in Appendix~\ref{app:ablation}.
+
+\paragraph{Sparse morphology diagnostics.}
+All sparse models preserved 50.0\% active density, satisfied 21/21 valid 2:4 wrapped layers, and showed no detected structural collapse (see Appendix~\ref{app:seed_level}). This diagnostic rules out a trivial explanation in which performance differences arise from invalid masks or collapsed sparse layers.
+
+\section{Limitations and Broader Impact}\label{sec:limitations}
+GUDS-EDL should not be interpreted as a universally dominant sparse classifier. RigL-style 2:4 remains a strong sparse ranking baseline, and dense evidential models remain important reference models when structured sparsity is not required. The current evidence is centered on ISIC 2024; CIFAR-100-LT logs do not yet contain complete held-out metrics and are therefore not used to support domain-general claims.
+
+The ablations further narrow the claim. Historical diagnostics suggest that signed pruning preserves sensitivity and ranking better than absolute-gradient pruning in the prior configuration, but this should not be read as a repeated-seed ablation of the default v2\_A model. Asymmetric KL is not uniformly superior to symmetric KL, and calibration remains difficult under extreme prevalence. Exact valid-block 2:4 feasibility does not imply realized acceleration without sparse Tensor Core-compatible kernels and compatible layouts. In high-stakes use, such models should support human decision making rather than act as autonomous diagnostic systems, and dataset bias across skin types remains a concern.
+
+\section{Conclusion}\label{sec:conclusion}
+We introduced GUDS-EDL, a conservative uncertainty-to-topology sparse evidential framework for extremely imbalanced classification. The default configuration combines topology caching, softened signed first-order pruning, KL-uniform regrowth, symmetric KL regularization, and evidential focal learning under exact valid-block 2:4 sparsity. Its structural controller is supported by well-posedness checks for Dirichlet signals, proxy-batch risk-ratio concentration, local first-order saliency, gradient isolation, bounded latent scores, and exact valid-block projection. On ISIC 2024, GUDS-EDL achieves competitive ranking and calibration behavior---mean pAUC$_{0.80}=0.0868$, Macro-AUROC$=0.8520$, and ECE$=0.0539$---while preserving exact structured sparsity and showing no detected representational collapse. Historical design diagnostics identify topology caching and signed pruning as useful design choices, while RigL-style 2:4 remains a strong sparse ranking baseline. Overall, GUDS-EDL is best viewed as a well-defined, cache-stabilized uncertainty-guided sparse adaptation mechanism whose broader validity should be tested on additional datasets, backbones, ablations, and hardware-aware sparse kernels.
+
+
+\begin{thebibliography}{10}
+
+\bibitem{guo2017calibration}
+C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q. Weinberger.
+\newblock On calibration of modern neural networks.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2017.
+
+\bibitem{sensoy2018evidential}
+M.~Sensoy, L.~Kaplan, and M.~Kandemir.
+\newblock Evidential deep learning to quantify classification uncertainty.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
+
+\bibitem{malinin2018predictive}
+A.~Malinin and M.~Gales.
+\newblock Predictive uncertainty estimation via prior networks.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
+
+\bibitem{evci2020rigging}
+U.~Evci, T.~Gale, J.~Menick, P.~S. Castro, and E.~Elsen.
+\newblock Rigging the lottery: Making all tickets winners.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2020.
+
+\bibitem{cui2019class}
+Y.~Cui, M.~Jia, T.-Y. Lin, Y.~Song, and S.~Belongie.
+\newblock Class-balanced loss based on effective number of samples.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
+
+\bibitem{cao2019learning}
+K.~Cao, C.~Wei, A.~Gaidon, N.~Arechiga, and T.~Ma.
+\newblock Learning imbalanced datasets with label-distribution-aware margin loss.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2019.
+
+\bibitem{menon2021long}
+A.~K. Menon, S.~Jayasumana, A.~S. Rawat, H.~Jain, A.~Veit, and S.~Kumar.
+\newblock Long-tail learning via logit adjustment.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem{ren2020balanced}
+J.~Ren, C.~Yu, S.~Sheng, X.~Ma, H.~Zhao, S.~Yi, and H.~Li.
+\newblock Balanced meta-softmax for long-tailed visual recognition.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem{kang2019decoupling}
+B.~Kang, S.~Xie, M.~Rohrbach, Z.~Yan, A.~Gordo, J.~Feng, and Y.~Kalantidis.
+\newblock Decoupling representation and classifier for long-tailed recognition.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2020.
+
+\bibitem{zhong2021improving}
+Z.~Zhong, J.~Cui, S.~Liu, and J.~Jia.
+\newblock Improving calibration for long-tailed recognition.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2021.
+
+\bibitem{zhou2020bbn}
+B.~Zhou, Q.~Cui, X.-S. Wei, and Z.-M. Chen.
+\newblock BBN: Bilateral-branch network with cumulative learning for long-tailed visual recognition.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2020.
+
+\bibitem{cui2021parametric}
+J.~Cui, Z.~Zhong, S.~Liu, B.~Yu, and J.~Jia.
+\newblock Parametric contrastive learning.
+\newblock In {\em IEEE/CVF International Conference on Computer Vision (ICCV)}, 2021.
+
+\bibitem{deng2023fisher}
+D.~Deng, G.~Chen, Y.~Yu, F.~Liu, and P.-A. Heng.
+\newblock Uncertainty estimation by Fisher information-based evidential deep learning.
+\newblock In {\em International Conference on Machine Learning (ICML)}, PMLR, 2023.
+
+\bibitem{chen2023redl}
+M.~Chen, J.~Gao, and C.~Xu.
+\newblock R-EDL: Relaxing nonessential settings of evidential deep learning.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem{chen2024reedl}
+M.~Chen, J.~Gao, and C.~Xu.
+\newblock Revisiting essential and nonessential settings of evidential deep learning.
+\newblock {\em arXiv preprint arXiv:2410.00393}, 2024.
+
+\bibitem{yoon2025flexible}
+T.~Yoon and H.~Kim.
+\newblock Uncertainty estimation by flexible evidential deep learning.
+\newblock {\em arXiv preprint arXiv:2510.18322}, 2025.
+
+\bibitem{yu2024anedl}
+Y.~Yu, D.~Deng, F.~Liu, Y.~Jin, Q.~Dou, G.~Chen, and P.-A. Heng.
+\newblock ANEDL: Adaptive negative evidential deep learning for open-set semi-supervised learning.
+\newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
+
+\bibitem{wu2024evidence}
+Y.~Wu, B.~Shi, B.~Dong, Q.~Zheng, and H.~Wei.
+\newblock The evidence contraction issue in deep evidential regression: Discussion and solution.
+\newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
+
+\bibitem{shen2024mirage}
+M.~Shen, J.~J. Ryu, S.~Ghosh, Y.~Bu, P.~Sattigeri, S.~Das, and G.~W. Wornell.
+\newblock Are uncertainty quantification capabilities of evidential deep learning a mirage?
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem{geifman2017selective}
+Y.~Geifman and R.~El-Yaniv.
+\newblock Selective classification for deep neural networks.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem{geifman2019selectivenet}
+Y.~Geifman and R.~El-Yaniv.
+\newblock SelectiveNet: A deep neural network with an integrated reject option.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2019.
+
+\bibitem{ding2020revisiting}
+Y.~Ding, J.~Liu, J.~Xiong, and Y.~Shi.
+\newblock Revisiting the evaluation of uncertainty estimation and its application to explore model complexity-uncertainty trade-off.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW)}, 2020.
+
+\bibitem{traub2024overcoming}
+J.~Traub, T.~J. Bungert, C.~T. L{\"u}th, M.~Baumgartner, K.~H. Maier-Hein, L.~Maier-Hein, and P.~F. Jaeger.
+\newblock Overcoming common flaws in the evaluation of selective classification systems.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem{dettmers2019sparse}
+T.~Dettmers and L.~Zettlemoyer.
+\newblock Sparse networks from scratch: Faster training without losing performance.
+\newblock In {\em ICLR Workshop}, 2019.
+
+\bibitem{lee2019snip}
+N.~Lee, T.~Ajanthan, and P.~H.~S. Torr.
+\newblock SNIP: Single-shot network pruning based on connection sensitivity.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem{li2025pffdst}
+L.~Li, H.~Yang, J.~Guo, H.~Yu, M.~Qin, and T.~Zhang.
+\newblock An efficient and accurate dynamic sparse training framework based on parameter-freezing.
+\newblock In {\em AAAI Conference on Artificial Intelligence}, 2025.
+
+\bibitem{lasby2023srigl}
+M.~Lasby, A.~Golubeva, U.~Evci, M.~Nica, and Y.~Ioannou.
+\newblock Dynamic sparse training with structured sparsity.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem{mishra2021accelerating}
+Asit Mishra, Jorge Albericio Latorre, Jeff Pool, Darko Stosic, Dusan Stosic, Ganesh Venkatesh, Chong Yu, and Paulius Micikevicius.
+\newblock Accelerating sparse deep neural networks.
+\newblock {\em arXiv preprint arXiv:2104.08378}, 2021.
+
+\bibitem{mocanu2018scalable}
+D.~C. Mocanu, E.~Mocanu, P.~Stone, P.~H. Nguyen, M.~Gibescu, and A.~Liotta.
+\newblock Scalable training of artificial neural networks with adaptive sparse connectivity inspired by network science.
+\newblock {\em Nature Communications}, 9(1):2383, 2018.
+
+\bibitem{han2016deep}
+S.~Han, H.~Mao, and W.~J. Dally.
+\newblock Deep compression: Compressing deep neural networks with pruning, trained quantization and Huffman coding.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2016.
+
+\bibitem{frankle2019lottery}
+J.~Frankle and M.~Carbin.
+\newblock The lottery ticket hypothesis: Finding sparse, trainable neural networks.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem{liu2019large}
+Z.~Liu, Z.~Miao, X.~Zhan, J.~Wang, B.~Gong, and S.~X. Yu.
+\newblock Large-scale long-tailed recognition in an open world.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
+
+
+\bibitem{isic2024}
+International Skin Imaging Collaboration (ISIC).
+\newblock ISIC 2024 -- Skin Cancer Detection with 3D-TBP.
+\newblock {\em Kaggle Competition}, 2024.
+
+\bibitem{jaeger2023call}
+P.~F. Jaeger, C.~T. L{\"u}th, L.~Klein, and T.~J. Bungert.
+\newblock A call to reflect on evaluation practices for failure detection in image classification.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem{zhou2023domain}
+M.~Zhou, A.~Jamzad, J.~Izard, A.~Menard, R.~Siemens, and P.~Mousavi.
+\newblock Domain transfer through image-to-image translation for uncertainty-aware prostate cancer classification.
+\newblock {\em arXiv preprint arXiv:2307.00479}, 2023.
+
+\bibitem{micikevicius2018mixed}
+P.~Micikevicius, S.~Narang, J.~Alben, G.~Diamos, E.~Elsen, D.~Garcia, B.~Ginsburg, M.~Houston, O.~Kuchaiev, G.~Venkatesh, and H.~Wu.
+\newblock Mixed precision training.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2018.
+
+\bibitem{loshchilov2019decoupled}
+I.~Loshchilov and F.~Hutter.
+\newblock Decoupled weight decay regularization.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem{kingma2015adam}
+D.~P. Kingma and J.~Ba.
+\newblock Adam: A method for stochastic optimization.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2015.
+
+\bibitem{charpentier2020posterior}
+B.~Charpentier, D.~Z{\"u}gner, and S.~G{\"u}nnemann.
+\newblock Posterior Network: Uncertainty estimation without OOD samples via density-based pseudo-counts.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\end{thebibliography}
+
+\appendix
+
+\section*{Appendix Roadmap}
+The appendix is organized to separate mathematical checks, implementation
+details, and diagnostic evidence. Appendix~A gives the well-posedness and
+algorithmic validity checks used by the main text. Appendix~B specifies the
+training loop, calibration details, and hyperparameters. Appendix~C reports
+seed-level GUDS-EDL behavior and sparse morphology diagnostics. Appendix~D
+contains component ablations. Appendix~E clarifies the novelty boundary, while
+Appendices~F--G list future validation protocols and reproducibility details.
+
+\section{Well-Posedness and Algorithmic Validity Checks}
+\label{app:proofs}
+
+\begin{table}[!t]
+\centering
+\caption{Scope of formal claims made for GUDS-EDL.}
+\label{tab:guarantees}
+\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabular}{@{}p{0.47\columnwidth}p{0.43\columnwidth}@{}}
+\toprule
+\textbf{Established by design or proof} & \textbf{Not claimed} \\
+\midrule
+Positive Dirichlet parameters, bounded vacuity, and non-negative ambiguity proxy &
+Exact Bayesian epistemic correctness \\
+Exact valid-block 2:4 feasibility over eligible complete 4-blocks &
+Global convergence or topology optimality \\
+Bounded latent topology scores and deterministic Top-2 projection &
+Uniform superiority over dense or dynamic sparse baselines \\
+Ordinary masked-gradient isolation plus virtual-probe structural saliency &
+Validation improvement without empirical evidence \\
+Local first-order pruning/regrowth interpretations and proxy-batch concentration &
+Realized hardware speedup without compatible sparse kernels \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Compact Dirichlet Identities}
+For completeness, the Dirichlet density for $\bm{p}$ on the probability simplex is
+\begin{equation}\label{eq:dirichlet_pdf_app}
+    \Dir(\bm{p}\mid\bm{\alpha})
+    =
+    \frac{1}{B(\bm{\alpha})}\prod_{c=1}^{K}p_c^{\alpha_c-1}
+    =
+    \frac{\Gamma(S)}{\prod_{c=1}^{K}\Gamma(\alpha_c)}
+    \prod_{c=1}^{K}p_c^{\alpha_c-1}.
+\end{equation}
+The implementation uses the following identities from the main text:
+\begin{equation}
+    \hat{p}_c=\frac{\alpha_c}{S},\qquad
+    u_e=\frac{K}{S},\qquad
+    u_a=\sum_{c=1}^{K}\frac{\alpha_c}{S}
+    \left[\psi(S+1)-\psi(\alpha_c+1)\right].
+\end{equation}
+Under the Softplus evidence parameterization, $\alpha_c>1$ and therefore $S>K$ for finite logits. Hence $u_e\in(0,1)$, with supremum $1$ approached as all evidence tends to zero. Since $S\ge \alpha_c$ and $\psi(\cdot)$ is monotone on positive inputs, each entropy summand is non-negative, so $u_a\ge0$.
+
+\subsection{Structural Risk-Ratio Chain Rule}
+\label{app:r_chain}
+The batch structural risk ratio $R_{\mathcal B}$ in Eq.~\ref{eq:batch_risk} is differentiable for $\epsilon>0$ under the Softplus evidence map when the current mask is held fixed during the proxy structural pass. Its weight derivative is the batch average of the per-sample ratio derivatives:
+\begin{equation}
+    \frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}
+    =
+    \frac{1}{|\mathcal B|}\sum_{n\in\mathcal B}
+    \left[
+    \frac{1}{u_e+\epsilon}\frac{\partial u_a}{\partial w_{\text{eff},ij}}
+    -
+    \frac{u_a}{(u_e+\epsilon)^2}
+    \frac{\partial u_e}{\partial w_{\text{eff},ij}}
+    \right]^{(n)} .
+\end{equation}
+At the scalar level, $r(u_a,u_e)=u_a/(u_e+\epsilon)$ satisfies
+\[
+    \frac{\partial r}{\partial u_a}
+    =
+    \frac{1}{u_e+\epsilon}>0,
+    \qquad
+    \frac{\partial r}{\partial u_e}
+    =
+    -\frac{u_a}{(u_e+\epsilon)^2}\le 0,
+\]
+so the proxy is monotone increasing in ambiguity and monotone decreasing in vacuity whenever $u_a\ge0$.
+The vacuity derivative expands through the Dirichlet parameters as
+\begin{equation}
+    \frac{\partial u_e}{\partial w_{\text{eff},ij}}
+    =
+    \sum_{m=1}^{K}
+    \frac{\partial u_e}{\partial \alpha_m}
+    \frac{\partial \alpha_m}{\partial z_m}
+    \frac{\partial z_m}{\partial w_{\text{eff},ij}},
+    \qquad
+    \frac{\partial u_e}{\partial \alpha_m}
+    =
+    -\frac{K}{S^2},
+\end{equation}
+where $\frac{\partial \alpha_m}{\partial z_m}=1/(1+\exp(-z_m))$ for $\alpha_m=\ln(1+\exp(z_m))+1$. For the entropy proxy, let $\psi_1(\cdot)$ denote the trigamma function and $\delta_{cm}$ the Kronecker delta. Then
+\begin{equation}
+\begin{aligned}
+    \frac{\partial u_a}{\partial \alpha_m}
+    ={}&
+    \sum_{c=1}^{K}
+    \frac{\delta_{cm}S-\alpha_c}{S^2}
+    \left[\psi(S+1)-\psi(\alpha_c+1)\right]\\
+    &+
+    \sum_{c=1}^{K}
+    \frac{\alpha_c}{S}
+    \left[
+    \psi_1(S+1)-\delta_{cm}\psi_1(\alpha_c+1)
+    \right],
+\end{aligned}
+\end{equation}
+and therefore
+\begin{equation}
+    \frac{\partial u_a}{\partial w_{\text{eff},ij}}
+    =
+    \sum_{m=1}^{K}
+    \frac{\partial u_a}{\partial \alpha_m}
+    \frac{\partial \alpha_m}{\partial z_m}
+    \frac{\partial z_m}{\partial w_{\text{eff},ij}} .
+\end{equation}
+This expansion provides the batch risk-ratio derivative used by the signed pruning score in Eq.~\ref{eq:C_ij}. Throughout the structural proxy derivations, derivatives are taken with respect to the effective coordinate $w_{\text{eff},ij}$. When the mask is fixed and the coordinate is active, this corresponds to the ordinary weight derivative up to the fixed mask multiplier. It combines local vacuity and expected-entropy derivatives through the ordinary network Jacobian $\partial z_m/\partial w_{\text{eff},ij}$, rather than relying on an unspecified pruning signal.
+
+\subsection{Proxy-Batch Concentration of the Risk-Ratio Signal}
+\label{app:proxy_concentration}
+Fix the current weights and mask during a structural refresh, and let
+$r(x)=u_a(x)/(u_e(x)+\epsilon)$ under the proxy sampling distribution.
+For a $K$-class categorical variable, entropy is bounded above by
+$\log K$, hence the Dirichlet expected categorical entropy satisfies
+$0\le u_a(x)\le\log K$. Since $u_e(x)+\epsilon\ge\epsilon$, we have
+\[
+    0\le r(x)\le \frac{\log K}{\epsilon}.
+\]
+Let $\bar R=\mathbb{E}[r(x)]$ and
+$R_{\mathcal B}=|\mathcal B|^{-1}\sum_{x\in\mathcal B}r(x)$ for an
+i.i.d. proxy batch from this sampling distribution. Hoeffding's
+inequality gives, for any $\delta\in(0,1)$, with probability at least
+$1-\delta$,
+\[
+    |R_{\mathcal B}-\bar R|
+    \le
+    \frac{\log K}{\epsilon}
+    \sqrt{\frac{\log(2/\delta)}{2|\mathcal B|}}.
+\]
+This result only controls the estimation noise of the scalar proxy under
+the chosen proxy sampling distribution. It does not imply that the
+resulting structural update improves validation risk, converges, or
+dominates magnitude- or task-gradient-based sparse training.
+
+\subsection{Asymmetric KL Note}
+The adjusted false-evidence parameter $\tilde{\alpha}_c^{(n)}=y_c^{(n)}+(1-y_c^{(n)})\alpha_c^{(n)}$ defines the compact KL term in Eq.~\ref{eq:kl_loss_main}. Its expanded form is the standard Dirichlet-to-Dirichlet KL with the true-class concentration removed from the shrinkage penalty:
+\begin{equation}\label{eq:kl_loss_expanded}
+\begin{aligned}
+    L_{\text{KL}}^{(n)}
+    ={}& \ln \left(
+    \frac{\Gamma\left(\sum_{c=1}^K\tilde{\alpha}_c^{(n)}\right)}
+    {\Gamma(K)\prod_{c=1}^K\Gamma(\tilde{\alpha}_c^{(n)})}
+    \right)\\
+    &+\sum_{c=1}^K(\tilde{\alpha}_c^{(n)}-1)
+    \left[
+    \psi(\tilde{\alpha}_c^{(n)})
+    -\psi\!\left(\sum_{c=1}^K\tilde{\alpha}_c^{(n)}\right)
+    \right].
+\end{aligned}
+\end{equation}
+
+\subsection{Validity of Evidential State}
+Softplus is strictly positive for finite real-valued logits, hence $\alpha_c=e_c+1>1$ and $S=\sum_c\alpha_c>K$. The expected probabilities obey $\hat{p}_c=\alpha_c/S>0$ and $\sum_c\hat{p}_c=1$, so $\hat{\bm{p}}\in\Delta^K$. Since $S>K$, $u_e=K/S\in(0,1)$ for finite logits, with limiting value $1$ approached when all evidence values $e_c$ tend to zero. Finally, $S\ge\alpha_c$ for every class and $\psi(\cdot)$ is monotone on positive inputs. Therefore $\psi(S+1)-\psi(\alpha_c+1)\ge0$, and each summand in Eq.~\ref{eq:u_a} is non-negative. Hence $u_a\ge0$.
+
+\subsection{2:4 Feasibility Preservation}
+\label{app:24_feasibility}
+For each eligible row $i$ and complete valid block $k$, Eq.~\ref{eq:mask} selects the two local indices in $I_{i,k}^{(l)}$ and assigns mask value $1$ only to those entries. The remaining two entries receive mask value $0$. Auxiliary padding entries, if used for bookkeeping, have score $-\infty$ and are not trainable; they cannot be selected and cannot consume active slots. Hence every complete valid 4-block contains exactly two active trainable entries. Coordinates outside complete valid blocks are excluded from the exact 2:4 claim and are reported through the valid-block fraction rather than folded into the numerator or denominator of the structured-sparsity guarantee. Because the score-projection objective decomposes over independent 4-blocks, selecting the two largest scores in each block solves the projection exactly.
+
+\subsection{Masked-Gradient Isolation}
+For each entry, $W_{\text{eff},ij}=W_{ij}M_{ij}$ while the mask is fixed during the mini-batch. By the chain rule,
+\begin{equation}
+    \frac{\partial L}{\partial W_{ij}}
+    =
+    \frac{\partial L}{\partial W_{\text{eff},ij}}
+    \frac{\partial W_{\text{eff},ij}}{\partial W_{ij}}
+    =
+    \frac{\partial L}{\partial W_{\text{eff},ij}}M_{ij}.
+\end{equation}
+Stacking this entry-wise identity over the tensor gives Eq.~\ref{eq:masked_gradient}. If $M_{ij}=0$, the instantaneous task gradient with respect to $W_{ij}$ is zero, which motivates the separate structural proxy pass used by the pruning/regrowth update.
+
+\subsection{Virtual Effective-Weight Probe for Dormant Saliency}
+\label{app:virtual_probe_note}
+The dormant-link saliency used by regrowth is not the ordinary parameter gradient $\partial L/\partial W_{ij}$ under a fixed mask. Instead, the structural refresh introduces an auxiliary dense effective tensor $\widetilde{\bm{W}}_{\text{eff}}$ initialized at $\bm{W}\odot\bm{M}$ and computes proxy gradients with respect to that tensor. For a dormant coordinate, $\widetilde{W}_{\text{eff},ij}=0$, but $\partial L_{\text{grow}}/\partial \widetilde{W}_{\text{eff},ij}$ can be nonzero because the coordinate is treated as a virtual effective input to the proxy computation. These gradients are discarded after ranking and are never applied as ordinary updates to dormant parameters. Thus, masked-gradient isolation for training and virtual-probe saliency for topology scoring are compatible rather than contradictory.
+
+\subsection{Signed First-Order Pruning Criterion}
+\label{app:signed_pruning}
+Let the mask be fixed during the structural proxy pass and consider an active effective coordinate $w_{\text{eff},ij}$. Define the removal perturbation $\delta_{ij}=-w_{\text{eff},ij}$. Taylor's theorem gives
+\begin{equation}
+    R_{\mathcal B}(w_{\text{eff},ij}+\delta_{ij})-R_{\mathcal B}(w_{\text{eff},ij})
+    =
+    \delta_{ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}
+    +
+    \mathcal{R}_{ij}.
+\end{equation}
+If the one-dimensional second derivative along this coordinate is bounded by $L_{ij}$ on the segment between $w_{\text{eff},ij}$ and $0$, then
+\[
+    |\mathcal{R}_{ij}|
+    \le
+    \frac{L_{ij}}{2}|w_{\text{eff},ij}|^2.
+\]
+Therefore,
+\[
+    R_{\mathcal B}(w_{\text{eff},ij}=0)-R_{\mathcal B}(w_{\text{eff},ij})
+    =
+    -w_{\text{eff},ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}
+    +
+    \mathcal{R}_{ij}.
+\]
+For active links, $w_{\text{eff},ij}=w_{ij}$. The leading term is negative when
+\begin{equation}\label{eq:proof_signed_positive}
+    w_{\text{eff},ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}>0.
+\end{equation}
+If the leading term dominates the curvature remainder, removal decreases the proxy risk-ratio. Conversely, when
+\begin{equation}\label{eq:proof_signed_negative}
+    w_{\text{eff},ij}\frac{\partial R_{\mathcal B}}{\partial w_{\text{eff},ij}}<0,
+\end{equation}
+the leading term is positive and removal increases the risk ratio to first order. Otherwise, the sign remains a local saliency ranking rather than a deterministic descent certificate. The positive-part operator in Eq.~\ref{eq:C_ij} keeps only the first case as a pruning candidate.
+
+\subsection{Local Regrowth Saliency}
+\label{app:regrowth_saliency}
+Let $Q(\widetilde{\bm{W}}_{\text{eff}})=L_{\text{grow}}(\widetilde{\bm{W}}_{\text{eff}})$ denote the structural probe objective evaluated at the current masked effective tensor. For a scalar virtual perturbation $\delta_{ij}$ at connection $(i,j)$,
+\begin{equation}
+    Q(\widetilde{w}_{\text{eff},ij}+\delta_{ij})-Q(\widetilde{w}_{\text{eff},ij})
+    =
+    \delta_{ij}\frac{\partial Q}{\partial \widetilde{w}_{\text{eff},ij}}
+    +
+    \mathcal{R}^{Q}_{ij}.
+\end{equation}
+If the coordinate-wise curvature is bounded by $H_{ij}$ for $|\delta_{ij}|\le\eta$, then
+\[
+    |\mathcal{R}^{Q}_{ij}|
+    \le
+    \frac{H_{ij}}{2}\eta^2.
+\]
+Thus, to leading order, the largest achievable absolute perturbation under $|\delta_{ij}|\le\eta$ is
+\[
+    \eta\left|
+    \frac{\partial Q}{\partial \widetilde{w}_{\text{eff},ij}}
+    \right|.
+\]
+Ranking dormant candidates by Eq.~\ref{eq:G_ij} therefore selects links with high local leading-order influence on the KL-uniform structural saliency objective. Because the sign is discarded, the score is not a descent direction and is used only for candidate topology exploration before the valid-block 2:4 projection.
+
+\subsection{Bounded Morphological State}
+The final operation in Eq.~\ref{eq:score_update} applies an element-wise clamp to the interval $[-V_{\max},V_{\max}]$. Hence every updated score lies in that interval regardless of the magnitude of the unclamped momentum step. The mask is then recomputed from the bounded score tensor using Eq.~\ref{eq:mask}, so Appendix~\ref{app:24_feasibility} applies at the next refresh.
+
+\subsection{Controlled Imbalance Modulation}
+Because $\operatorname{sg}[\hat{p}_{y_n}^{(n)}]$ is treated as constant during backpropagation, $\nabla_{\bm{e}}\mathcal{F}_n(t)=0$. Thus the sample-level gradient is proportional to
+\begin{equation}
+    \mathcal{F}_n(t)
+    \nabla_{\bm{e}}\!\left(
+    \bar{\omega}_{y_n}L_{\text{CE}}^{(n)}
+    +\lambda_{\text{KL}}\mu(t)
+    L_{\text{KL}}^{(n)}
+    \right).
+\end{equation}
+Moreover, $\mathcal{F}_n(t)\ge0$, $\mu(t)\in[0,1]$, and $\bar{\omega}_{y_n}\le\omega_{\max}$ by Eq.~\ref{eq:sample_weight}. In the default symmetric KL configuration, the KL term has no additional class-dependent multiplier; in the asymmetric diagnostic variant, the multiplier is capped at $\Lambda_{\max}$ by Eq.~\ref{eq:asym_multiplier}. Hence focal modulation changes sample emphasis without adding an uncontrolled confidence-derivative path, while the supervised class weight is explicitly capped.
+
+\FloatBarrier
+\section{Full GUDS-EDL Algorithm and Implementation Details}
+\label{app:algorithm}
+This appendix gives the procedural details that are referenced from the
+optimization section. It contains the warmup rule, the post-hoc evidential
+calibration formula, the full training loop, and the implementation
+configuration used for the reported ISIC 2024 case study.
+
+\paragraph{Learning-rate and loss-scale warmup.}
+During the first epoch, the learning rate is linearly warmed from $\eta_{\text{init}}=10^{-6}$ to $\eta_{\text{base}}=4\times10^{-5}$, while an initial loss multiplier decays from $S_{\max}=4.0$ to $1.0$:
+\begin{equation}\label{eq:warmup_main}
+    \eta_s=\eta_{\text{init}}+(\eta_{\text{base}}-\eta_{\text{init}})
+    \frac{s}{S_{\text{warmup}}},
+    \qquad
+    S_{\text{loss}}(s)=S_{\max}-(S_{\max}-1)
+    \frac{s}{S_{\text{warmup}}}.
+\end{equation}
+The scaled objective $L_{\text{scaled}}=S_{\text{loss}}(s)L_{\text{total}}$ is used during warmup and $L_{\text{total}}$ afterward.
+
+\paragraph{Bias-corrected evidential calibration.}
+After training, logits are corrected before the Softplus evidence map by
+\begin{equation}
+    z^{\mathrm{cal}}_c
+    =
+    \frac{z^{\mathrm{base}}_c+\Delta^\pi_c}{T_{\mathrm{cal}}}
+    + b_{\mathrm{res},c},
+    \qquad
+    \Delta^\pi_c=\log(\pi_{\mathrm{true},c}+\epsilon)-\log(\pi_{\mathrm{train},c}+\epsilon).
+\end{equation}
+Temperature-only calibration sets $\bm{b}_{\mathrm{res}}=\bm{0}$; bias-temperature calibration learns both $T_{\mathrm{cal}}$ and $\bm{b}_{\mathrm{res}}$ on the calibration partition.
+
+\begin{algorithm}[H]
+\caption{GUDS-EDL Training and Optimization Loop}
+\label{alg:guds_edl}
+\begin{algorithmic}[1]
+\REQUIRE Dataset $\mathcal{D}$, weights $\bm{W}^{(0)}$, latent scores $\bm{V}^{(0)}\leftarrow|\bm{W}^{(0)}|$, structural momentum $\bm{\mu}^{(0)}\leftarrow\bm{0}$, epochs $T$, warmup epochs $T_w$.
+\FOR{each epoch $t = 1 \dots T$}
+    \IF{$t == T_w$}
+        \STATE Optionally freeze learned channel permutations into static index maps for 2:4 block ordering.
+    \ENDIF
+    \IF{$t \ge T_w$}
+        \STATE Sample a proxy batch $(\bm{X}, \bm{y}) \sim \mathcal{D}$ for amortized topology computation.
+        \STATE Compute $R_{\mathcal B}$ by Eq.~\ref{eq:batch_risk} and store $\nabla_{\bm{W}_{\text{eff}}}R_{\mathcal B}$ for the pruner.
+        \STATE Compute $L_{\text{grow}}$ by Eq.~\ref{eq:grow_objective} and store $\nabla_{\bm{W}_{\text{eff}}}L_{\text{grow}}$ for the regrower.
+        \STATE Compute $C_{ij}$ by Eq.~\ref{eq:C_ij} and $G_{ij}$ by Eq.~\ref{eq:G_ij}.
+        \STATE Optionally add vacuity-scaled exploration noise when $G_{ij}$ is nearly flat.
+        \STATE Update active and dormant latent scores $\bm{V}$ by Eq.~\ref{eq:score_update}.
+        \STATE Refresh and cache $\bm{M}^{(l)}$ by 2:4 Top-2 selection in Eq.~\ref{eq:mask}.
+    \ELSE
+        \STATE Set masks $\bm{M}^{(l)}\leftarrow\mathbf{1}$ for dense warmup.
+    \ENDIF
+    \FOR{each mini-batch step $s$ in epoch $t$}
+        \STATE Sample batch $(\bm{X}, \bm{y}) \sim \mathcal{D}$.
+        \STATE Compute $\eta_s$ and $S_{\text{loss}}(s)$ by Eq.~\ref{eq:warmup_main}.
+        \STATE Forward pass: compute logits $\bm{z}$ using static masked weights $\bm{W}_{\text{eff}} = \bm{W} \odot \bm{M}$.
+        \STATE Compute Dirichlet parameters: $\alpha_c \leftarrow \ln(1 + e^{z_c}) + 1.0$.
+        \STATE Compute expected probabilities $\hat{p}_c = \alpha_c/S$ and uncertainties $u_e, u_a$.
+        \STATE Compute $L_{\text{scaled}}=S_{\text{loss}}(s)L_{\text{EFL}}$ using Eq.~\ref{eq:efl}.
+        \STATE Backward pass and update active weights with AdamW under the fixed cached mask.
+    \ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\begin{table}[!t]
+\centering
+\caption{Hyperparameter and implementation configuration for the ISIC 2024 case study. $T$ denotes total training epochs, while $T_{\text{cal}}$ denotes the post-hoc calibration temperature.}
+\label{tab:config}
+\footnotesize
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{@{}p{0.32\columnwidth} p{0.25\columnwidth} p{0.35\columnwidth}@{}}
+\toprule
+\textbf{Phase / Component} & \textbf{Parameter} & \textbf{Role Description} \\
+\midrule
+\multicolumn{3}{l}{\emph{Architecture}} \\
+Backbone & ResNet-18 (11.7M params) & ImageNet-1K pretrained \\
+Number of Classes ($K$) & 2 & Benign / Malignant \\
+\midrule
+\multicolumn{3}{l}{\emph{Phase 1: Dense Warmup ($t < T_w$)}} \\
+Mask & Locked entirely at $\bm{1}$ & Dense network, no pruning \\
+Focal exponent $\gamma(t)$ & $0.0$ & Disabled for baseline convergence stability \\
+\midrule
+\multicolumn{3}{l}{\emph{Phase 2: Dynamic Sparsity ($t \ge T_w$)}} \\
+Mask & NVIDIA 2:4 & Top-2-of-4 from latent scores $\bm{V}$ \\
+Topology Adaptation & Activated & Update $\bm{V}$ and $\bm{M}$ once per epoch using a proxy batch \\
+$\gamma_{\text{focal}}$ & Cosine decay from $5.0$ & Focus on hard samples early, then reduce focal pressure \\
+\midrule
+\multicolumn{3}{l}{\emph{Phase 3: Post-hoc Calibration (Temperature Scaling)}} \\
+Classifier head & Frozen backbone & Calibrate temperature parameter on validation features \\
+Temperature $T_{\text{cal}}$ & Scalar parameter & Scaling of logits before evidence layer \\
+Optimization & Cross-entropy minimization & Optimized using L-BFGS \\
+\midrule
+\multicolumn{3}{l}{\emph{Optimization}} \\
+Optimizer & AdamW / Adam & $\beta_1=0.9$, $\beta_2=0.999$ \\
+Learning rate & $4 \times 10^{-5}$ & Linear warmup from $10^{-6}$ \\
+Weight decay & $0.01$ & Applied to active weights \\
+Gradient clipping & $1.0$ & Global $L_2$ norm \\
+Batch size & 32 & --- \\
+Total epochs ($T$) & 40 & --- \\
+Dense topology warmup ($T_w$) & 12 & 30\% of budget \\
+LR/loss warmup steps ($S_{\text{warmup}}$) & First epoch & Linear LR ramp and loss-scale decay \\
+\midrule
+\multicolumn{3}{l}{\emph{EFL}} \\
+$\gamma_{\text{base}}$ (Focal) & $5.0$ & Initial focal exponent used in the ablation log \\
+$\lambda_{\text{KL}}$ & $0.1$ & KL regularization factor \\
+$t_{\text{anneal}}$ (KL) & 10 & KL annealing epochs \\
+$\omega_{\max}$ & $10.0$ & Cap for dampened class weights in Eq.~\ref{eq:sample_weight} \\
+\midrule
+\multicolumn{3}{l}{\emph{GUDS-EDL}} \\
+$\beta_m$ & $0.95$ & Structural momentum coefficient in Eq.~\ref{eq:score_update} \\
+$\eta_{\text{struct}}$ & $0.02$ & Latent score step size \\
+$\rho$ & $0.25$ & Dormant-link regrowth attenuation in Eq.~\ref{eq:score_update} \\
+$V_{\max}$ & $5.0$ & Latent score clamp boundary \\
+Pruner type & softened signed first-order & Eq.~\ref{eq:C_ij}; pruning strength $0.5$, activated after warmup \\
+Regrower type & KL-uniform & Eq.~\ref{eq:grow_objective}; class-conditioned variant used as a diagnostic \\
+Exploration noise scale & $0.0316$ & Optional anti-crystallization when regrowth scores are near-flat \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\FloatBarrier
+
+\section{Seed-Level Results and Sparse Morphology Diagnostics}
+\label{app:seed_level}
+This appendix provides the per-seed evidence behind the aggregated ISIC 2024
+numbers in the main paper, followed by the sparse morphology checks used to
+verify exact valid-block 2:4 feasibility. The paragraph is intentionally placed
+before the wide seed-level table so Appendix~C has visible body text even when
+LaTeX moves the double-column table to the next page.
+
+\begin{table*}[!t]
+\centering
+\caption{Seed-level GUDS-EDL results on ISIC 2024. Lower AURC and ECE are better. Mean Epi. and Mean Alea. denote the average epistemic and aleatoric uncertainty over the test set. SE@15 denotes sensitivity at a fixed 15\% review budget.}
+\label{tab:seed_level}
+\small
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c c c c c c c c@{}}
+\toprule
+\textbf{Seed} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{SE@15} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ & \textbf{Mean Epi.} & \textbf{Mean Alea.} \\
+\midrule
+42 & $0.7590$ & $0.0621$ & $0.8100$ & $0.4286$ & $0.0143$ & $0.00059$ & $0.0556$ & $0.1135$ & $0.1817$ \\
+43 & $0.7503$ & $0.1204$ & $0.8861$ & $0.5281$ & $0.0267$ & $0.00022$ & $0.0539$ & $0.1100$ & $0.1812$ \\
+44 & $0.8278$ & $0.0780$ & $0.8598$ & $0.5256$ & $0.0281$ & $0.00023$ & $0.0521$ & $0.1059$ & $0.1786$ \\
+\midrule
+Mean & $0.7790$ & $0.0868$ & $0.8520$ & $0.4941$ & $0.0230$ & $0.00035$ & $0.0539$ & $0.1098$ & $0.1805$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Table~\ref{tab:structural_diagnostics} reports the corresponding structural
+validity diagnostics for the sparse models.
+
+\begin{table}[!t]
+\centering
+\caption{Structural diagnostics on ISIC 2024. All models maintained exact valid-block 2:4 sparsity across all 21 wrapped convolutional layers with no detected structural collapse.}
+\label{tab:structural_diagnostics}
+\small
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c c@{}}
+\toprule
+\textbf{Model} & \textbf{Active Density} & \textbf{Valid 2:4 Layers} & \textbf{Collapse Detected} \\
+\midrule
+Static 2:4 EDL & 50.0\% & 21/21 & No \\
+RigL-style 2:4 & 50.0\% & 21/21 & No \\
+\textbf{GUDS-EDL (official)} & 50.0\% & 21/21 & No \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\FloatBarrier
+
+\section{Full Ablation Results}
+\label{app:ablation}
+This appendix collects the diagnostic ablations used for component attribution.
+The single-seed table is retained to show the complete ablation suite, while the
+two-seed subset is reported separately where repeated runs are available.
+
+\begin{table*}[!t]
+\centering
+\caption{Full component ablation on ISIC 2024, seed 42, conducted on the prior asymmetric-KL / class-conditioned configuration. This single-seed table is intended for diagnostic component attribution; findings from this ablation motivated the official GUDS-EDL design (symmetric KL, KL-uniform regrowth, softened pruning). Higher is better for Balanced Accuracy, Sensitivity, Specificity, F2, pAUC$_{0.80}$, PR-AUC, and Macro-AUROC; lower is better for AURC and ECE.}
+\label{tab:ablation_components_full}
+\footnotesize
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l c c c c c c c c c@{}}
+\toprule
+\textbf{Variant} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{F2} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
+\midrule
+Prior diag.\ config. & 0.7917 & 0.6364 & 0.9471 & 0.0638 & 0.0675 & \textbf{0.0290} & 0.8382 & 0.0004 & 0.0574 \\
+w/o pruner & 0.8212 & 0.7662 & 0.8762 & 0.0346 & 0.0872 & 0.0230 & 0.8605 & 0.0004 & 0.0577 \\
+w/o regrower & 0.8123 & 0.6883 & 0.9363 & 0.0582 & 0.0597 & 0.0244 & 0.8213 & 0.0005 & 0.0523 \\
+symmetric KL & \textbf{0.8370} & 0.7403 & 0.9338 & 0.0604 & 0.0738 & 0.0254 & 0.8492 & 0.0004 & 0.0590 \\
+w/o EFL & 0.8177 & 0.8182 & 0.8171 & 0.0254 & 0.1240 & 0.0268 & 0.8914 & 0.0002 & 0.0588 \\
+w/o anti-crystallization & 0.7842 & 0.6234 & 0.9449 & 0.0603 & 0.0501 & 0.0249 & 0.7914 & 0.0005 & 0.0600 \\
+absolute pruner & 0.7401 & 0.5065 & \textbf{0.9738} & \textbf{0.0941} & 0.0488 & 0.0246 & 0.7869 & 0.0006 & 0.0511 \\
+KL-uniform regrower & 0.7924 & 0.6494 & 0.9354 & 0.0542 & 0.0665 & 0.0279 & 0.8338 & 0.0004 & 0.0599 \\
+w/o topology cache & 0.6052 & 0.2208 & 0.9896 & 0.0840 & 0.0319 & 0.0107 & 0.6832 & 0.0009 & \textbf{0.0457} \\
+temperature-only calibration & 0.8368 & 0.7922 & 0.8814 & 0.0373 & 0.1403 & 0.0233 & 0.9153 & \textbf{0.0001} & 0.1447 \\
+no post-hoc calibration & 0.8243 & \textbf{0.9221} & 0.7266 & 0.0193 & \textbf{0.1445} & 0.0262 & \textbf{0.9232} & \textbf{0.0001} & 0.1083 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The completed ablation suite evaluates the implemented components: signed first-order pruner, KL-uniform structural regrower, class-conditioned (diagnostic) versus KL-uniform regrowth (official), absolute-gradient versus signed pruning, topology cache, exploration noise, asymmetric KL regularization (diagnostic), EFL modulation, and post-hoc calibration.
+Performance is measured using Balanced Accuracy, Sensitivity, Specificity, F2-score, pAUC$_{0.80}$, PR-AUC, Macro-AUROC, ECE, and AURC. Structural diagnostics include valid 2:4 block fraction, theoretical active-density reduction, and representational-collapse checks.
+
+The ablation results should be interpreted as component attribution from a prior diagnostic configuration rather than as evidence that the official GUDS-EDL configuration dominates all variants. Removing topology caching causes the largest degradation, while replacing signed pruning with absolute-gradient pruning also reduces rare-event sensitivity and ranking quality. Crucially, symmetric KL and KL-uniform regrowth variants remain competitive in ranking metrics, which motivated their adoption in the official GUDS-EDL configuration.
+
+\begin{table*}[!t]
+\centering
+\caption{Two-seed summary for ablation variants with completed seed-42 and seed-43 runs. Values are mean $\pm$ sample standard deviation.}
+\label{tab:ablation_twoseed}
+\small
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c c c c c c@{}}
+\toprule
+\textbf{Variant} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{ECE} $\downarrow$ \\
+\midrule
+Prior diag.\ config. & $0.7846\pm0.0101$ & $0.6272\pm0.0130$ & $0.9420\pm0.0073$ & $0.0626\pm0.0070$ & $0.0265\pm0.0035$ & $0.8257\pm0.0177$ & $0.0570\pm0.0006$ \\
+w/o pruner & $0.7952\pm0.0368$ & $0.7090\pm0.0810$ & $0.8815\pm0.0074$ & $0.0788\pm0.0120$ & $0.0251\pm0.0030$ & $0.8424\pm0.0256$ & $0.0546\pm0.0045$ \\
+w/o regrower & $0.8060\pm0.0090$ & $0.6925\pm0.0059$ & $0.9195\pm0.0238$ & $0.0615\pm0.0025$ & $0.0295\pm0.0072$ & $0.8217\pm0.0006$ & $0.0555\pm0.0045$ \\
+symmetric KL & $0.8155\pm0.0305$ & $0.7072\pm0.0467$ & $0.9237\pm0.0143$ & $0.0648\pm0.0127$ & $0.0230\pm0.0035$ & $0.8281\pm0.0299$ & $0.0584\pm0.0008$ \\
+w/o EFL & $0.7392\pm0.1110$ & $0.5777\pm0.3402$ & $0.9007\pm0.1182$ & $0.0773\pm0.0661$ & $0.0243\pm0.0035$ & $0.7811\pm0.1561$ & $0.0533\pm0.0078$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The two-seed subset reinforces the single-seed interpretation. The prior full model is stable but does not maximize every metric. The no-EFL configuration shows strong seed sensitivity, which supports using EFL primarily as a stabilizer. The symmetric-KL and no-pruner variants remain competitive, which motivated the official GUDS-EDL design: symmetric KL regularization, KL-uniform regrowth, and softened pruning were adopted because they provide stable conservative-mode performance.
+
+\FloatBarrier
+
+\section{Novelty Boundary Against Closest Prior Art}
+\label{app:novelty}
+This appendix positions GUDS-EDL against adjacent method families. The purpose
+is to make the novelty boundary explicit rather than to assert general
+superiority over alternatives.
+
+\begin{table*}[!t]
+\centering
+\caption{Paper-level novelty boundary against closest related methods. The distinction is not EDL or sparsity alone, but Dirichlet-derived proxy saliency used directly for dynamic valid-block 2:4 topology adaptation with dormant-link structural scoring.}
+\label{tab:novelty}
+\scriptsize
+\renewcommand{\arraystretch}{1.16}
+\begin{adjustbox}{width=\textwidth}
+\begin{tabular}{@{}p{2.25cm}p{2.0cm}p{0.7cm}p{0.8cm}p{0.85cm}p{1.25cm}p{1.55cm}p{1.7cm}p{2.9cm}@{}}
+\toprule
+\textbf{Work} & \textbf{Primary structural or uncertainty signal} & \textbf{Prune} & \textbf{Regrow} & \textbf{Dynamic} & \textbf{Exact 2:4} & \textbf{Dormant saliency} & \textbf{Calibration / imbalance role} & \textbf{Boundary vs. GUDS-EDL} \\
+\midrule
+SNIP~\cite{lee2019snip} & Connection sensitivity at initialization & Yes & No & No & No & No & Not calibration-centered & One-shot pruning, not uncertainty-guided dynamic topology \\
+SET~\cite{mocanu2018scalable} & Sparse connectivity with random regrowth & Yes & Yes & Yes & No & Random / non-proxy & Not calibration-centered & Dynamic sparse training without Dirichlet structural saliency \\
+SNFS~\cite{dettmers2019sparse} & Momentum / task-gradient information & Yes & Yes & Yes & No & Task-gradient based & Not calibration-centered & Dynamic regrowth is gradient-driven, not evidential uncertainty-driven \\
+RigL~\cite{evci2020rigging} & Magnitude pruning and dense task-gradient regrowth & Yes & Yes & Yes & No & Task-gradient based & Not calibration-centered & Strong DST baseline; no Dirichlet ambiguity/vacuity controller \\
+SRigL~\cite{lasby2023srigl} & Structured task-gradient sparse training & Yes & Yes & Yes & Structured, not this valid-block claim & Task-gradient based & Not calibration-centered & Structured DST, but not Dirichlet-guided valid-block 2:4 adaptation \\
+Fisher EDL~\cite{deng2023fisher} & Fisher information for evidential uncertainty & No & No & No & No & No & Uncertainty estimation & Improves EDL uncertainty, but does not adapt sparse topology \\
+R-EDL / Re-EDL~\cite{chen2023redl,chen2024reedl} & Relaxed evidential learning assumptions & No & No & No & No & No & EDL soundness / calibration & Refines evidential modeling rather than topology control \\
+Flexible EDL~\cite{yoon2025flexible} & Flexible evidential uncertainty formulation & No & No & No & No & No & Uncertainty estimation & No pruning, regrowth, or structured sparse feasibility mechanism \\
+NVIDIA 2:4 sparsity~\cite{mishra2021accelerating} & Hardware-compatible sparse pattern & No & No & No & Yes & No & Efficiency-oriented & Provides deployment constraint, not uncertainty-aware topology learning \\
+\textbf{GUDS-EDL (Ours)} & \textbf{Dirichlet ambiguity/vacuity and KL-uniform proxy gradients} & \textbf{Yes} & \textbf{Yes} & \textbf{Yes} & \textbf{Yes} & \textbf{Virtual structural probe} & \textbf{Extreme imbalance and calibration-aware evaluation} & \textbf{Uncertainty-to-topology adaptation under exact valid-block 2:4 feasibility} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table*}
+
+\FloatBarrier
+
+\section{Future Validation Protocols}
+\label{app:external}
+Broader validation on CIFAR-100-LT, additional backbones, sparse Tensor Core-compatible kernels, and quality-gated failure detection remains outside the scope of the central ISIC claim. These protocols are listed to clarify future evaluation directions and to separate completed evidence from domain-general speculation.
+
+\subsection{CIFAR-100-LT Protocol}
+To evaluate general long-tailed learning, we plan to use CIFAR-100-LT with varying imbalance profiles (1:10, 1:50, 1:100). The protocol will evaluate top-1/top-5 accuracy, balanced accuracy, macro-F1, many/medium/few-shot accuracy, macro-AUROC, macro-PR-AUC, NLL, Brier score, ECE, AURC, and failure-detection metrics against standard long-tailed methods (CE, Focal Loss, Logit Adjustment, Class-Balanced Loss, Balanced Softmax, LDAM-DRW, cRT, and MiSLAS-style LAS+cRT), evidential baselines (Dense EDL, Fisher EDL, Flexible EDL, and R-EDL), and sparse baselines (Static 2:4 EDL and RigL-style dynamic sparsity).
+
+\subsection{Hardware Profiling Protocol}
+Efficiency will be profiled across different hardware configurations to measure active parameters, valid 2:4 block fraction, theoretical active-density reduction, peak VRAM during structural updates, and forward-pass throughput. Standard masked PyTorch execution is treated as an implementation diagnostic. Actual acceleration claims require sparse Tensor Core-compatible kernels and layouts, such as cuSPARSELt or TensorRT sparse execution, and should be reported separately from structural feasibility.
+
+\subsection{Quality-Gated Failure Detection Protocol}
+A quality-control filter based on the entropy-based ambiguity proxy $u_a$ is planned for future evaluation. High $u_a$ scores will be tested for correlation with input artifacts such as camera glare, motion blur, and obscurations. Evaluating accepted vs. deferred subsets based on this uncertainty threshold will demonstrate selective prediction utility.
+
+For controlled long-tailed recognition, CIFAR-100-LT should be used to separate general imbalance behavior from the ISIC screening setting. Hardware profiling should distinguish structural 2:4 feasibility from realized acceleration because actual speedup requires sparse Tensor Core-compatible kernels and layouts such as cuSPARSELt or TensorRT sparse execution. Quality-gated failure detection based on $u_a$ or related ambiguity scores is left as future work and should be evaluated as selective prediction rather than as a clinical deployment claim.
+
+\section{Reproducibility Details}
+\label{app:reproducibility}
+
+\subsection*{1. Experimental Setting and Hyperparameters}
+\begin{itemize}
+    \item \textbf{Random Seeds:} Main evidential baseline comparisons are evaluated over three independent random seeds when available. Component ablations are reported over the completed seeds available for each variant; single-seed ablations are explicitly marked as diagnostic.
+    \item \textbf{Preprocessing \& Dimensions:} Images are resized to $224 \times 224$ and normalized using ImageNet channel-wise statistics: $\mu = [0.485, 0.456, 0.406]$ and $\sigma = [0.229, 0.224, 0.225]$. Data augmentation includes horizontal and vertical flips.
+    \item \textbf{Optimizer and Learning Rate Schedule:} We employ the AdamW optimizer ($\beta_1=0.9$, $\beta_2=0.999$, weight decay $0.01$ on active weights). The learning rate is initialized at $1e-6$ and linearly warmed up to $4e-5$ over the first epoch, followed by a cosine annealing schedule over 40 epochs.
+\end{itemize}
+
+\subsection*{2. Evaluation Protocols}
+\begin{itemize}
+    \item \textbf{Validation/Test Split Rules:} The ISIC 2024 dataset is partitioned into 70\% training, 5\% validation, 5\% calibration, and 20\% test sets. To guarantee zero patient-level data leakage, splits are strictly grouped by patient ID using a stratified grouping split protocol. The test set is strictly touched once for final reporting.
+    \item \textbf{Threshold Selection Protocol:} For ISIC, operating points are selected by performing threshold sweeps on the isolated validation partition to hit target clinical sensitivities ($\ge 80\%$), while temperature and bias parameters are fitted on the separate calibration partition. Validation-derived thresholds are frozen before final test evaluation.
+    \item \textbf{ECE Binning and pAUC:} ECE is computed using 15 equally spaced confidence bins, and partial AUROC is computed strictly within the True Positive Rate interval $[0.80, 1.0]$.
+\end{itemize}
+
+\subsection*{3. Source Code and Data Releases}
+\begin{itemize}
+    \item \textbf{Code Availability:} Full PyTorch code containing wrapper layers, evidential loss definitions, and evaluation scripts is packaged in a supplementary repository and will be fully open-sourced on GitHub upon publication.
+\end{itemize}
+
+\end{document}

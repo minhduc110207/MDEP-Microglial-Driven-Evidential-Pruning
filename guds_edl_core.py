@@ -679,12 +679,14 @@ def update_scores_agents(
 # ============================================================================
 
 class MDEPTrainer:
-    def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=None, args=None):
+    def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=None, args=None, scheduler=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.total_epochs = total_epochs
         self.args = args
+        self.scheduler = scheduler
+        self.base_lr = optimizer.param_groups[0]['lr'] if len(optimizer.param_groups) > 0 else 4.0e-05
         if warmup_epochs is None:
             self.warmup_epochs = max(1, int(0.20 * total_epochs))
         else:
@@ -919,7 +921,7 @@ class MDEPTrainer:
 
         # Manual LR Warmup parameters
         warmup_period = 1
-        base_lr = 4.0e-05
+        base_lr = self.base_lr
 
         ema_loss = None
         ema_grad = None
@@ -941,10 +943,13 @@ class MDEPTrainer:
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = current_lr
             else:
-                current_lr = base_lr
+                if self.scheduler is None:
+                    current_lr = base_lr
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = current_lr
+                else:
+                    current_lr = self.optimizer.param_groups[0]['lr']
                 current_loss_scale = 1.0
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = current_lr
 
             inputs, targets = inputs.to(device), targets.to(device)
 
@@ -1018,42 +1023,6 @@ class MDEPTrainer:
                     use_anticryst=use_anticryst,
                     verbose=verbose_structural_logs,
                 )
-                self.last_flop_rate = mask_flop_rate
-
-            self.model.zero_grad()
-            self.reset_effective_weight_grads()
-
-            if ema_loss is None:
-                ema_loss = loss.item()
-            else:
-                ema_loss = 0.95 * ema_loss + 0.05 * loss.item()
-
-            # Progress printing
-            if (batch_idx + 1) % print_interval == 0 or (batch_idx + 1) == num_batches:
-                elapsed = time.time() - epoch_start
-                avg_time = elapsed / (batch_idx + 1)
-                eta = avg_time * (num_batches - batch_idx - 1)
-                avg_loss = ema_loss if ema_loss is not None else 0.0
-                avg_grad = ema_grad if ema_grad is not None else 0.0
-                
-                flop_str = f"| Flop: {self.last_flop_rate*100:.4f}%  " if hasattr(self, 'last_flop_rate') else ""
-                
-                print(
-                    f"    Batch [{batch_idx+1:>5}/{num_batches}]  "
-                    f"| Loss: {avg_loss:.4f}  "
-                    f"| LR: {current_lr:.2e}  "
-                    f"| GradNorm: {avg_grad:.4f}  "
-                    f"{flop_str}"
-                    f"| Elapsed: {elapsed/60:.1f}m  "
-                    f"| ETA: {eta/60:.1f}m",
-                    flush=True,
-                )
-
-        return ema_loss if ema_loss is not None else 0.0
-
-
-# ============================================================================
-#  SECTION 5 — ISIC 2024 Dataset + ResNet backbone + main()
 # ============================================================================
 
 class LongTailedDataset(Dataset):

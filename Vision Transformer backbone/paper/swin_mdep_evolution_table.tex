@@ -1,0 +1,66 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Required Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[vietnamese, english]{babel}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{geometry}
+\geometry{margin=2.0cm}
+
+\begin{document}
+\selectlanguage{vietnamese}
+
+\begin{table*}[t]
+\centering
+\caption{Bảng so sánh định lượng liên phiên bản (Test Set) của mô hình Swin-MDEP qua các giai đoạn tiến hóa. Giai đoạn V6 đại diện cho cấu hình đề xuất cuối cùng kết hợp mạng hiệu chuẩn hậu kỳ ETN.}
+\label{tab:swin_mdep_evolution_results}
+\vspace{0.2cm}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Chỉ số kiểm định (Test Set)} & \textbf{V1 (Baseline)} & \textbf{V2 (SSP+STE)} & \textbf{V3 (High KL)} & \textbf{V4 (Full scale)} & \textbf{V5 (Warm-up 12)} & \textbf{V6 (MDEP + ETN)} \\
+\midrule
+\multicolumn{7}{l}{\emph{Cấu hình \& Thiết lập hệ thống}} \\
+- Quy mô tập huấn luyện & Subsample (1:20) & Subsample (1:20) & Subsample (1:20) & Full (1:1000) & Subsample (1:20) & \textbf{Subsample (1:20)} \\
+- Warm-up Epochs (Dense) & 5 & 5 & 5 & 5 & 12 & \textbf{12} \\
+- Tổng số Epoch & 20 & 20 & 30 & 30 (Dừng ở Ep 8) & 40 & \textbf{40} \\
+- Lịch phạt $\lambda_{KL}$ & 0.5 (Muộn) & 0.5 (Muộn) & 1.2 (Sớm) & 1.2 (Sớm) & 0.5 (Muộn) & \textbf{0.5 (Muộn) + ETN} \\
+- Trạng thái thưa hóa & 50\% thưa cứng & 50\% thưa mềm & 50\% thưa cứng & 50\% thưa cứng & 50\% thưa cứng & \textbf{50\% thưa cứng} \\
+\midrule
+\multicolumn{7}{l}{\emph{Xếp hạng \& Phân biệt đối xử}} \\
+- \textbf{pAUC$_{0.80}$ (ISIC 2024)} & 0.1170\textsuperscript{*} & 0.0956\textsuperscript{*} & 0.0650 & 0.0528 (Val) & 0.0795 & \textbf{0.1144} \\
+- Macro-AUROC & 0.8911 & 0.8586 & 0.7943 & 0.7424 & 0.8401 & \textbf{0.8744} \\
+- PR-AUC & 0.0586 & 0.0360 & 0.0326 & 0.0537 & 0.0387 & \textbf{0.0264} \\
+\midrule
+\multicolumn{7}{l}{\emph{Độ bất định chứng cứ Dirichlet}} \\
+- Mean Epistemic ($u_e$) & 0.2056 & 0.1893 & 0.2816 & 0.0977 & 0.3368 & \textbf{0.5699} \\
+- Mean Aleatoric ($u_a$) & 0.3196 & 0.2973 & 0.3565 & 0.3059 & 0.4161 & \textbf{0.5332} \\
+\midrule
+\multicolumn{7}{l}{\emph{Độ đo hiệu chuẩn xác suất}} \\
+- ECE (Adaptive, 15 bins) & 0.1194 & 0.1065 & 0.1450 & 0.1369 & 0.1728 & \textbf{0.1484} \\
+- ECE (Equal-Width, 15 bins) & 0.1194 & 0.1065 & 0.1450 & 0.1369 & 0.1779 & \textbf{0.1484} \\
+- AURC (Risk-Coverage) & 0.0002 & 0.0003 & 0.0004 & 0.0004 & 0.0010 & \textbf{0.5627} \\
+\midrule
+\multicolumn{7}{l}{\emph{Mức Tối ưu Lâm sàng (Sensitivity $\ge$ 80\%)}} \\
+- Ngưỡng quyết định (Threshold) & 0.1090 & 0.0991 & 0.1387 & 0.0100 & 0.1882 & \textbf{0.6831} \\
+- Sensitivity (Recall) & 1.0000 & 0.9221 & 0.9610 & 1.0000 & 0.8312 & \textbf{0.7532} \\
+- \textbf{Specificity (Độ đặc hiệu)} & 0.0558 & 0.5305 & 0.2174 & 0.0000 & 0.6384 & \textbf{0.8736} \\
+- Balanced Accuracy & 0.5279 & 0.7263 & 0.5892 & 0.5000 & 0.7348 & \textbf{0.8134} \\
+- Macro F1-Score & 0.0541 & 0.3489 & 0.1800 & 0.0009 & 0.3923 & \textbf{0.4730} \\
+\midrule
+\multicolumn{7}{l}{\emph{Ngưỡng Tối ưu Balanced Accuracy (B.Acc. Opt)}} \\
+- Ngưỡng quyết định (Threshold) & 0.1288 & 0.1139 & 0.1535 & 0.2674 & 0.2129 & \textbf{0.6930} \\
+- Sensitivity (Recall) & 0.6883 & 0.7013 & 0.5195 & 0.5854 & 0.7403 & \textbf{0.6753} \\
+- Specificity & 0.9041 & 0.8798 & 0.9540 & 0.8209 & 0.8729 & \textbf{0.8988} \\
+- Balanced Accuracy & 0.7962 & 0.7906 & 0.7367 & 0.7031 & 0.8066 & \textbf{0.7871} \\
+\bottomrule
+\end{tabular}
+}
+\begin{flushleft}
+\small
+\textit{Ghi chú:} Các giá trị có dấu (*) tại chỉ số pAUC của V1 và V2 là các điểm thu thập được trước khi thưa hóa cứng hoàn toàn.
+\end{flushleft}
+\end{table*}
+
+\end{document}

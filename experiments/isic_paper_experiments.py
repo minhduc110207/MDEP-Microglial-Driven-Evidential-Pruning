@@ -209,13 +209,13 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
     "full_guds": ExperimentSpec(
         name="full_guds",
         family="proposed",
-        description="Full GUDS-EDL with signed pruner, class-conditioned regrower, EFL, and asymmetric KL.",
+        description="Full GUDS-EDL with signed pruner, KL-uniform regrower, EFL, and symmetric KL.",
         sparse=True,
         use_mdep_trainer=True,
         loss_name="edl",
         pruner_type="signed_first_order",
-        regrower_type="class_conditioned",
-        kl_scaling="asymmetric",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
     ),
     # Appendix C ablations.
     "guds_without_pruner": ExperimentSpec(
@@ -234,13 +234,16 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         use_mdep_trainer=True,
         disable_regrower=True,
     ),
-    "guds_symmetric_kl": ExperimentSpec(
-        name="guds_symmetric_kl",
+    "guds_asymmetric_kl": ExperimentSpec(
+        name="guds_asymmetric_kl",
         family="ablation",
-        description="GUDS-EDL with symmetric KL instead of asymmetric KL.",
+        description="GUDS-EDL with asymmetric KL (diagnostic) instead of symmetric KL.",
         sparse=True,
         use_mdep_trainer=True,
-        kl_scaling="symmetric",
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="asymmetric",
     ),
     "guds_without_efl": ExperimentSpec(
         name="guds_without_efl",
@@ -266,13 +269,16 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         use_mdep_trainer=True,
         pruner_type="absolute_grad",
     ),
-    "guds_kl_uniform_regrower": ExperimentSpec(
-        name="guds_kl_uniform_regrower",
+    "guds_class_conditioned_regrower": ExperimentSpec(
+        name="guds_class_conditioned_regrower",
         family="ablation",
-        description="GUDS-EDL with KL-to-uniform regrowth instead of class-conditioned regrowth.",
+        description="GUDS-EDL with class-conditioned regrowth (diagnostic) instead of KL-uniform regrowth.",
         sparse=True,
         use_mdep_trainer=True,
-        regrower_type="kl_uniform",
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="class_conditioned",
+        kl_scaling="symmetric",
     ),
     "guds_without_topology_cache": ExperimentSpec(
         name="guds_without_topology_cache",
@@ -973,6 +979,7 @@ def retrain_classifier_crt(
 
     epochs = max(1, int(0.10 * total_epochs))
     optimizer = optim.AdamW(model.fc[0].parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     history: list[dict[str, float]] = []
     crt_loader = make_class_balanced_loader(train_loader)
     for epoch in range(epochs):
@@ -988,11 +995,13 @@ def retrain_classifier_crt(
                 loss = label_aware_smoothing_loss(logits, targets, p_train)
             else:
                 loss = F.cross_entropy(logits, targets)
+            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.fc[0].parameters(), max_norm=1.0)
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
         avg_loss = float(np.mean(losses)) if losses else 0.0
+        scheduler.step()
         elapsed = time.time() - start
         history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed, "stage": "crt"})
         print(f"cRT [{epoch + 1:>2}/{epochs}] | loss={avg_loss:.4f} | {elapsed:.1f}s")
@@ -1016,6 +1025,7 @@ def train_standard(
 ) -> list[dict[str, float]]:
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
     history: list[dict[str, float]] = []
 
@@ -1043,12 +1053,14 @@ def train_standard(
                 else:
                     evidence = model(inputs)
                     loss = criterion(evidence, targets, epoch=epoch)
+            
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             losses.append(float(loss.detach().cpu()))
+        scheduler.step()
         avg_loss = float(np.mean(losses)) if losses else 0.0
         elapsed = time.time() - start
         history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed})
@@ -1074,6 +1086,7 @@ def train_guds(
     criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     trainer_args = SimpleNamespace(
         disable_pruner=spec.disable_pruner,
         disable_regrower=spec.disable_regrower,
@@ -1086,7 +1099,7 @@ def train_guds(
         disable_topology_cache=spec.disable_topology_cache,
         verbose_structural_logs=verbose_structural_logs,
     )
-    trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args)
+    trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scheduler=scheduler)
     history = []
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
@@ -1094,6 +1107,24 @@ def train_guds(
         if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
             print(f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} loss={loss:.4f} gamma={trainer.step_gamma(epoch):.4f}")
     return history
+
+
+def print_metrics_table(spec_name: str, metrics: dict[str, float]):
+    print(f"\n{'='*60}")
+    print(f"RESULTS FOR: {spec_name}")
+    print(f"{'='*60}")
+    print(f"{'Metric':<35} | {'Value':>10}")
+    print(f"{'-'*35}-+-{'-'*10}")
+    keys_to_print = [
+        "macro_auroc", "pauc", "pr_auc", 
+        "balanced_accuracy_default", "aurc", "ece_adaptive",
+        "sensitivity_at_balanced", "specificity_at_balanced",
+        "sensitivity_at_high_recall", "specificity_at_high_recall"
+    ]
+    for k in keys_to_print:
+        if k in metrics:
+            print(f"{k:<35} | {metrics[k]:>10.4f}")
+    print(f"{'='*60}\n")
 
 
 def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
@@ -1265,6 +1296,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     if not args.no_save_model:
         torch.save(model.state_dict(), run_dir / "model_state.pth")
     print(f"[DONE] Saved metrics and model state to {run_dir}")
+    print_metrics_table(spec.name, metrics)
     return result
 
 

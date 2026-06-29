@@ -360,6 +360,19 @@ def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
     raise ValueError(f"Unsupported benchmark: {benchmark}")
 
 
+def print_metrics_table(spec_name: str, metrics: dict[str, float]):
+    print(f"\n{'='*60}")
+    print(f"RESULTS FOR: {spec_name}")
+    print(f"{'='*60}")
+    print(f"{'Metric':<35} | {'Value':>10}")
+    print(f"{'-'*35}-+-{'-'*10}")
+    for k in sorted(metrics.keys()):
+        val = metrics[k]
+        if isinstance(val, (int, float)):
+            print(f"{k:<35} | {val:>10.4f}")
+    print(f"{'='*60}\n")
+
+
 def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed: int) -> dict:
     spec = EXPERIMENTS[experiment_name]
     seed_everything(seed)
@@ -520,6 +533,8 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
     if args.save_model:
         torch.save(model.state_dict(), run_dir / "model_state.pth")
+    print(f"[DONE] Saved metrics to {run_dir}")
+    print_metrics_table(spec.name, metrics)
     return result
 
 

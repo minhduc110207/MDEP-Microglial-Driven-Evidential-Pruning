@@ -29,7 +29,8 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset, Dataset, Subset
 from sklearn.metrics import (
     balanced_accuracy_score, roc_auc_score, average_precision_score,
-    confusion_matrix, brier_score_loss, f1_score, precision_recall_curve, auc
+    confusion_matrix, brier_score_loss, f1_score, precision_recall_curve, auc,
+    fbeta_score
 )
 from PIL import Image
 import io
@@ -38,16 +39,21 @@ import io
 #  SECTION 1 — EDL Core (Evidential Deep Learning foundations)
 # ============================================================================
 
-class LogPriorCorrection(nn.Module):
+class PostHocPriorCorrection(nn.Module):
     def __init__(self, p_true, p_train):
-        super(LogPriorCorrection, self).__init__()
+        super(PostHocPriorCorrection, self).__init__()
         p_true_tensor = torch.tensor(p_true, dtype=torch.float32)
         p_train_tensor = torch.tensor(p_train, dtype=torch.float32)
-        delta = torch.log(p_true_tensor + 1e-8) - torch.log(p_train_tensor + 1e-8)
-        self.register_buffer('delta', delta)
+        # Tỷ lệ hiệu chuẩn rho_c
+        rho = p_true_tensor / (p_train_tensor + 1e-8)
+        self.register_buffer('rho', rho)
 
-    def forward(self, logits):
-        return logits + self.delta
+    def forward(self, evidence):
+        # Hiệu chuẩn trên không gian Dirichlet:
+        # alpha_c = e_c + 1
+        # alpha'_c = (alpha_c - 1) * rho_c + 1
+        # Vị trí evidence sau hiệu chuẩn e'_c = alpha'_c - 1 = e_c * rho_c
+        return evidence * self.rho
 
 
 class EvidenceLayer(nn.Module):
@@ -511,7 +517,7 @@ class SwinMDEPTrainer:
                 if hasattr(m, 'effective_weight') and m.effective_weight is not None:
                     m.effective_weight.grad = None
 
-    def compute_amortized_gradients(self, inputs):
+    def compute_amortized_gradients(self, inputs, tabular=None):
         r"""Amortized backward to compute ∂u_a / ∂w and ∂u_e / ∂a^(l).r"""
         self.model.train()
 
@@ -523,7 +529,10 @@ class SwinMDEPTrainer:
                     activations[n] = out
                 hooks.append(m.register_forward_hook(_hook))
 
-        outputs = self.model(inputs)
+        if tabular is not None:
+            outputs = self.model(inputs, tabular)
+        else:
+            outputs = self.model(inputs)
         uncertainties = compute_uncertainties(outputs)
 
         u_a = torch.mean(uncertainties['aleatoric'])
@@ -588,34 +597,41 @@ class SwinMDEPTrainer:
         
         ema_loss = None
         
-        for batch_idx, (inputs, targets) in enumerate(dataloader):
+        for batch_idx, batch in enumerate(dataloader):
+            if len(batch) == 3:
+                inputs, tabular, targets = batch
+                inputs, tabular, targets = inputs.to(device), tabular.to(device), targets.to(device)
+            else:
+                inputs, targets = batch
+                inputs, targets = inputs.to(device), targets.to(device)
+                tabular = None
+
             if epoch < warmup_period:
                 current_step = epoch * num_batches + batch_idx
                 total_warmup_steps = warmup_period * num_batches
                 current_lr = 1e-6 + (base_lr - 1e-6) * (current_step / total_warmup_steps)
-                current_loss_scale = 4.0 - 3.0 * (current_step / total_warmup_steps)
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = current_lr
             else:
-                current_loss_scale = 1.0
                 if scheduler is None:
                     for param_group in self.optimizer.param_groups:
                         param_group['lr'] = base_lr
-
-            inputs, targets = inputs.to(device), targets.to(device)
 
             # Run morphological updates and amortized gradient computation every N_update = 10 batches (when not in warmup)
             # Or at batch_idx == 0 to initialize
             is_update_step = (batch_idx % 10 == 0)
 
             if (not is_warmup or epoch < 2) and is_update_step:
-                self.compute_amortized_gradients(inputs)
+                self.compute_amortized_gradients(inputs, tabular)
 
             self.model.zero_grad()
             self.reset_effective_weight_grads()
 
             with torch.amp.autocast('cuda'):
-                student_evidence = self.model(inputs)
+                if tabular is not None:
+                    student_evidence = self.model(inputs, tabular)
+                else:
+                    student_evidence = self.model(inputs)
                 
             distill_loss = torch.tensor(0.0, dtype=torch.float32, device=device)
             if self.teacher_model is not None:
@@ -631,27 +647,53 @@ class SwinMDEPTrainer:
                 classification_loss = self.criterion(student_evidence.float(), targets, epoch)
                 
             loss = classification_loss + alpha_d * distill_loss
-            scaled_loss = loss * current_loss_scale
             
-            self.scaler.scale(scaled_loss).backward()
+            self.scaler.scale(loss).backward()
 
             self.scaler.unscale_(self.optimizer)
             params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
             torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
 
-            if not is_warmup or epoch < 2:
+            # Removed sparse grad_L_w collection
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            if not is_warmup and is_update_step:
+                # -----------------------------------------------------
+                # Dense Gradient Approximation Pass for Astrocyte Regrowth
+                # -----------------------------------------------------
+                for m in self.model.modules():
+                    if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                        m._saved_warmup = m.warmup
+                        m.warmup = True
+                        
+                self.model.zero_grad()
+                self.reset_effective_weight_grads()
+                
+                with torch.amp.autocast('cuda'):
+                    if tabular is not None:
+                        dense_evidence = self.model(inputs, tabular)
+                    else:
+                        dense_evidence = self.model(inputs)
+                    
+                with torch.amp.autocast('cuda', enabled=False):
+                    dense_loss = self.criterion(dense_evidence.float(), targets, epoch)
+                    
+                self.scaler.scale(dense_loss).backward()
                 inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
+                
                 for m in self.model.modules():
                     if isinstance(m, (MDEPLinear, MDEPConv2d)):
                         if m.weight.grad is not None:
                             m.grad_L_w = m.weight.grad.clone().detach() * inv_scale
                         else:
                             m.grad_L_w = torch.zeros_like(m.weight)
-
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-            if not is_warmup and is_update_step:
+                        m.warmup = m._saved_warmup
+                        
+                self.model.zero_grad()
+                self.reset_effective_weight_grads()
+                
                 self.last_flop_rate = update_scores_agents(self.model)
 
             self.model.zero_grad()
@@ -668,15 +710,146 @@ class SwinMDEPTrainer:
                 eta = (elapsed / (batch_idx + 1)) * (num_batches - batch_idx - 1)
                 
                 print(
-                    f"    Batch [{batch_idx+1:>4}/{num_batches}] "
-                    f"| Loss: {ema_loss:.4f} "
-                    f"| Distill: {distill_loss.item():.4f} "
-                    f"| Flop: {self.last_flop_rate * 100:.3f}% "
-                    f"| ETA: {eta/60:.1f}m",
-                    flush=True
+                     f"    Batch [{batch_idx+1:>4}/{num_batches}] "
+                     f"| Loss: {ema_loss:.4f} "
+                     f"| Distill: {distill_loss.item():.4f} "
+                     f"| Flop: {self.last_flop_rate * 100:.3f}% "
+                     f"| ETA: {eta/60:.1f}m",
+                     flush=True
                 )
                 
         return ema_loss
+
+
+class HairSimulation:
+    r"""
+    Simulates hair artifacts on skin lesion images using PIL to force the model to ignore non-biological noise.
+    """
+    def __init__(self, n_hairs=4, hair_color=(0, 0, 0)):
+        self.n_hairs = n_hairs
+        self.hair_color = hair_color
+
+    def __call__(self, img):
+        if not isinstance(img, Image.Image):
+            return img
+        
+        img = img.copy()
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        
+        for _ in range(self.n_hairs):
+            x1, y1 = np.random.randint(0, w), np.random.randint(0, h)
+            x2, y2 = np.random.randint(0, w), np.random.randint(0, h)
+            thickness = np.random.randint(1, 3)
+            cx1, cy1 = np.random.randint(0, w), np.random.randint(0, h)
+            cx2, cy2 = np.random.randint(0, w), np.random.randint(0, h)
+            
+            points = []
+            for t in np.linspace(0, 1, 10):
+                px = int((1-t)**3 * x1 + 3*(1-t)**2*t * cx1 + 3*(1-t)*t**2 * cx2 + t**3 * x2)
+                py = int((1-t)**3 * y1 + 3*(1-t)**2*t * cy1 + 3*(1-t)*t**2 * cy2 + t**3 * y2)
+                points.append((px, py))
+                
+            for i in range(len(points) - 1):
+                draw.line([points[i], points[i+1]], fill=self.hair_color, width=thickness)
+                
+        return img
+
+
+def preprocess_metadata(df):
+    r"""Preprocesses metadata columns for tabular feature extraction."""
+    df = df.copy()
+    
+    # Numerical columns
+    num_cols = [
+        'age_approx', 'clin_size_long_id_max', 'tbp_lv_A', 'tbp_lv_Aext', 
+        'tbp_lv_B', 'tbp_lv_Bext', 'tbp_lv_C', 'tbp_lv_Cext', 'tbp_lv_H', 
+        'tbp_lv_Hext', 'tbp_lv_L', 'tbp_lv_Lext', 'tbp_lv_areaMM2', 
+        'tbp_lv_eccentricity', 'tbp_lv_minorAxisMM', 'tbp_lv_nevi_confidence', 
+        'tbp_lv_norm_color', 'tbp_lv_symm_2axis', 'tbp_lv_symm_2axis_angle'
+    ]
+    num_cols = [c for c in num_cols if c in df.columns]
+    
+    for col in num_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[col] = df[col].fillna(df[col].median() if not df[col].isna().all() else 0.0)
+        mean = df[col].mean()
+        std = df[col].std() + 1e-8
+        df[col] = (df[col] - mean) / std
+        
+    # Categorical columns
+    cat_cols = ['sex', 'anatom_site_general', 'tbp_tile_type']
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    
+    encoded_dfs = []
+    for col in cat_cols:
+        df[col] = df[col].astype(str).fillna('unknown')
+        dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
+        encoded_dfs.append(dummies)
+        
+    # Patient-level comparative size ("Ugly Duckling" feature)
+    if 'patient_id' in df.columns and 'clin_size_long_id_max' in df.columns:
+        patient_mean_size = df.groupby('patient_id')['clin_size_long_id_max'].transform('mean')
+        df['rel_size_to_patient'] = df['clin_size_long_id_max'] - patient_mean_size
+        num_cols.append('rel_size_to_patient')
+        
+    if encoded_dfs:
+        features_df = pd.concat([df[num_cols]] + encoded_dfs, axis=1)
+    else:
+        features_df = df[num_cols]
+        
+    features_df = features_df.fillna(0.0)
+    for col in features_df.columns:
+        if features_df[col].dtype == bool:
+            features_df[col] = features_df[col].astype(np.float32)
+            
+    return features_df.values.astype(np.float32)
+
+
+class MultiModalHead(nn.Module):
+    def __init__(self, image_features_dim, tabular_features_dim, num_classes, p_true, p_train):
+        super(MultiModalHead, self).__init__()
+        self.tab_mlp = nn.Sequential(
+            nn.Linear(tabular_features_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU()
+        )
+        total_dim = image_features_dim + 64
+        self.classifier = nn.Linear(total_dim, num_classes)
+        # Use flat prior for evaluation since logits are corrected by PostHocPriorCorrection(p_true, p_train)
+        self.prior_correction = PostHocPriorCorrection(p_true, p_train)
+        self.evidence_layer = EvidenceLayer(activation='softplus')
+
+    def forward(self, img_feat, tab_feat):
+        tab_emb = self.tab_mlp(tab_feat)
+        fused = torch.cat([img_feat, tab_emb], dim=1)
+        logits = self.classifier(fused)
+        corrected = self.prior_correction(logits)
+        evidence = self.evidence_layer(corrected)
+        return evidence
+
+
+class MultiModalSwinMDEP(nn.Module):
+    def __init__(self, student_backbone, tab_dim, num_classes, p_true, p_train):
+        super(MultiModalSwinMDEP, self).__init__()
+        self.backbone = student_backbone
+        if isinstance(self.backbone.head, nn.Sequential):
+            in_features = self.backbone.head[0].in_features
+        else:
+            in_features = self.backbone.head.in_features
+        self.backbone.head = nn.Identity()
+        self.head = MultiModalHead(in_features, tab_dim, num_classes, p_true, p_train)
+
+    def forward(self, img, tab=None):
+        img_feats = self.backbone(img)
+        if tab is None:
+            tab = torch.zeros(img.shape[0], self.head.tab_mlp[0].in_features, device=img.device)
+        return self.head(img_feats, tab)
 
 
 # ============================================================================
@@ -684,10 +857,11 @@ class SwinMDEPTrainer:
 # ============================================================================
 
 class ISICDataset(Dataset):
-    def __init__(self, dataframe, image_dir, transform=None):
+    def __init__(self, dataframe, image_dir, transform=None, tabular_features=None):
         self.data_frame = dataframe.reset_index(drop=True)
         self.image_dir = image_dir
         self.transform = transform
+        self.tabular_features = tabular_features
 
     def __len__(self):
         return len(self.data_frame)
@@ -709,6 +883,11 @@ class ISICDataset(Dataset):
         target = self.data_frame.iloc[idx]['target']
         if self.transform:
             image = self.transform(image)
+            
+        if self.tabular_features is not None:
+            tab = torch.tensor(self.tabular_features[idx], dtype=torch.float32)
+            return image, tab, torch.tensor(target, dtype=torch.long)
+            
         return image, torch.tensor(target, dtype=torch.long)
 
 
@@ -769,6 +948,10 @@ def get_isic_dataloaders(batch_size=32, debug=False, subsample_ratio=20):
     # Ensure patient_id exists and has no NaNs
     df = df.dropna(subset=['patient_id']).reset_index(drop=True)
     
+    # Preprocess tabular metadata BEFORE splitting so category alignment matches perfectly
+    tabular_features_all = preprocess_metadata(df)
+    df['tab_idx'] = np.arange(len(df))
+    
     # Group by patient_id and get the max target for each patient to preserve class balance
     patient_df = df.groupby('patient_id')['target'].max().reset_index()
     
@@ -807,9 +990,14 @@ def get_isic_dataloaders(batch_size=32, debug=False, subsample_ratio=20):
     total_train = len(train_df)
     p_train = [class_counts_train.get(c, 0) / total_train for c in range(num_classes)]
 
-    train_ds = ISICDataset(train_df, image_dir, transform=train_tf)
-    val_ds = ISICDataset(val_df, image_dir, transform=test_tf)
-    test_ds = ISICDataset(test_df, image_dir, transform=test_tf)
+    # Map the preprocessed tabular features back to the split subsets
+    train_tab_features = tabular_features_all[train_df['tab_idx'].values]
+    val_tab_features = tabular_features_all[val_df['tab_idx'].values]
+    test_tab_features = tabular_features_all[test_df['tab_idx'].values]
+
+    train_ds = ISICDataset(train_df, image_dir, transform=train_tf, tabular_features=train_tab_features)
+    val_ds = ISICDataset(val_df, image_dir, transform=test_tf, tabular_features=val_tab_features)
+    test_ds = ISICDataset(test_df, image_dir, transform=test_tf, tabular_features=test_tab_features)
     
     import platform
     workers = 0 if platform.system() == 'Windows' else 2
@@ -819,7 +1007,7 @@ def get_isic_dataloaders(batch_size=32, debug=False, subsample_ratio=20):
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
     
     total_samples = total_train
-    cw_raw = [total_samples / class_counts_train.get(c, 1) for c in range(num_classes)]
+    cw_raw = [math.sqrt(total_samples / class_counts_train.get(c, 1)) for c in range(num_classes)]
     cw = torch.tensor([w / cw_raw[0] for w in cw_raw], dtype=torch.float32)
     return train_loader, val_loader, test_loader, num_classes, cw, p_true, p_train
 
@@ -844,6 +1032,27 @@ def compute_ece(confidences, accuracies, n_bins=15):
         bin_confs.append(b_conf)
         bin_sizes.append(b_size)
     return ece, bin_accs, bin_confs, bin_sizes
+
+
+def compute_isic_pauc(y_true, y_pred_prob, min_tpr=0.80):
+    r"""
+    2024 ISIC Challenge metric: pAUC above a given true positive rate (TPR).
+    """
+    from sklearn.metrics import roc_curve, auc
+    v_gt = abs(np.asarray(y_true) - 1)
+    v_pred = -1.0 * np.asarray(y_pred_prob)
+    max_fpr = abs(1 - min_tpr)
+    fpr, tpr, _ = roc_curve(v_gt, v_pred, sample_weight=None)
+    if max_fpr is None or max_fpr == 1:
+        return auc(fpr, tpr)
+    if max_fpr <= 0 or max_fpr > 1:
+        raise ValueError("Expected min_tpr in (0, 1]")
+    
+    # Add a point at max_fpr by linear interpolation
+    stop = np.searchsorted(fpr, max_fpr, 'right')
+    x_new = np.concatenate([fpr[:stop], [max_fpr]])
+    y_new = np.concatenate([tpr[:stop], [min_tpr]])
+    return auc(x_new, y_new)
 
 
 def plot_reliability_diagram(bin_accs, bin_confs, bin_sizes, n_bins=15):
@@ -1005,18 +1214,79 @@ def print_sparsity_report(model):
     check_representational_collapse(model)
 
 
+def compute_aurc(y_true, y_pred, confidences):
+    r"""Risk-Coverage curve and AURC (Area Under Risk-Coverage)."""
+    sorted_indices = np.argsort(-confidences)
+    sorted_true = y_true[sorted_indices]
+    sorted_pred = y_pred[sorted_indices]
+    
+    n_samples = len(y_true)
+    if n_samples == 0:
+        return 0.0
+    errors = (sorted_true != sorted_pred).astype(float)
+    cumulative_errors = np.cumsum(errors)
+    
+    coverages = np.arange(1, n_samples + 1) / n_samples
+    risks = cumulative_errors / np.arange(1, n_samples + 1)
+    return auc(coverages, risks)
+
+
+def compute_selective_metrics(y_true, y_pred, probs, u_e, coverage_level):
+    r"""Computes diagnostic sensitivity, specificity, and ECE on the retained coverage_level portion of samples."""
+    n_samples = len(y_true)
+    n_retain = int(np.round(coverage_level * n_samples))
+    if n_retain == 0:
+        return float('nan'), float('nan'), float('nan'), float('nan'), float('nan')
+        
+    sorted_idx = np.argsort(u_e)
+    retained_idx = sorted_idx[:n_retain]
+    
+    ret_y_true = y_true[retained_idx]
+    ret_y_pred = y_pred[retained_idx]
+    ret_probs = probs[retained_idx]
+    
+    if len(np.unique(ret_y_true)) > 1:
+        ret_bal_acc = balanced_accuracy_score(ret_y_true, ret_y_pred)
+        ret_macro_f1 = f1_score(ret_y_true, ret_y_pred, average='macro')
+        ret_f2 = fbeta_score(ret_y_true, ret_y_pred, beta=2.0)
+        
+        tn, fp, fn, tp = confusion_matrix(ret_y_true, ret_y_pred).ravel()
+        ret_sens = tp / (tp + fn + 1e-8)
+        ret_spec = tn / (tn + fp + 1e-8)
+        
+        ret_correct = (ret_y_pred == ret_y_true).astype(float)
+        ret_confs = ret_probs.max(axis=1)
+        ret_ece, _, _, _ = compute_ece(ret_confs, ret_correct)
+    else:
+        ret_bal_acc = float('nan')
+        ret_macro_f1 = float('nan')
+        ret_f2 = float('nan')
+        ret_sens = float('nan')
+        ret_spec = float('nan')
+        ret_ece = float('nan')
+        
+    return ret_sens, ret_spec, ret_ece, ret_bal_acc, ret_macro_f1
+
+
 @torch.no_grad()
 def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
     r"""Full evaluation: metrics, plots, and uncertainty analysis.r"""
     model.eval()
 
     best_t = 0.5
+    best_t_clinical = 0.5
     if num_classes == 2:
         val_targets = []
         val_probs = []
-        for inputs, targets in val_loader:
-            inputs = inputs.to(device)
-            evidence = model(inputs)
+        for batch in val_loader:
+            if len(batch) == 3:
+                inputs, tabular, targets = batch
+                inputs, tabular = inputs.to(device), tabular.to(device)
+                evidence = model(inputs, tabular)
+            else:
+                inputs, targets = batch
+                inputs = inputs.to(device)
+                evidence = model(inputs)
             unc = compute_uncertainties(evidence)
             p_hat = (unc['alpha'] / unc['S']).cpu().numpy()
             val_targets.append(targets.numpy())
@@ -1033,6 +1303,28 @@ def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
                 best_bal_acc = bal_acc_t
                 best_t = t
         print(f"[Validation] Optimized decision threshold: {best_t:.4f}")
+        
+        best_specificity_val = -1.0
+        for t in np.linspace(0.01, 0.99, 199):
+            y_pred_t = (val_probs[:, 1] >= t).astype(int)
+            tn_v, fp_v, fn_v, tp_v = confusion_matrix(val_y_true, y_pred_t).ravel()
+            sens_v = tp_v / (tp_v + fn_v + 1e-8)
+            spec_v = tn_v / (tn_v + fp_v + 1e-8)
+            if sens_v >= 0.90:
+                if spec_v > best_specificity_val:
+                    best_specificity_val = spec_v
+                    best_t_clinical = t
+                    
+        if best_specificity_val == -1.0:
+            best_sens_val = -1.0
+            for t in np.linspace(0.01, 0.99, 199):
+                y_pred_t = (val_probs[:, 1] >= t).astype(int)
+                tn_v, fp_v, fn_v, tp_v = confusion_matrix(val_y_true, y_pred_t).ravel()
+                sens_v = tp_v / (tp_v + fn_v + 1e-8)
+                if sens_v > best_sens_val:
+                    best_sens_val = sens_v
+                    best_t_clinical = t
+        print(f"[Validation] Clinical safety decision threshold: {best_t_clinical:.4f}")
 
     all_targets  = []
     all_preds    = []
@@ -1041,9 +1333,16 @@ def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
     all_u_e      = []
     all_u_a      = []
 
-    for inputs, targets in test_loader:
-        inputs = inputs.to(device)
-        evidence = model(inputs)
+    for batch in test_loader:
+        if len(batch) == 3:
+            inputs, tabular, targets = batch
+            inputs, tabular = inputs.to(device), tabular.to(device)
+            evidence = model(inputs, tabular)
+        else:
+            inputs, targets = batch
+            inputs = inputs.to(device)
+            evidence = model(inputs)
+            
         unc = compute_uncertainties(evidence)
 
         alpha = unc['alpha']
@@ -1067,81 +1366,177 @@ def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
     u_a    = np.concatenate(all_u_a)
     correct = (y_pred == y_true).astype(float)
 
-    # ── Scalar Metrics ───────────────────
+    # ── Scalar Metrics at Default Threshold = 0.5 ───────────────────
     bal_acc = balanced_accuracy_score(y_true, y_pred)
     macro_f1 = f1_score(y_true, y_pred, average='macro')
+    
+    # Class-Conditional ECE
+    mask_0 = (y_true == 0)
+    mask_1 = (y_true == 1)
+    if mask_0.sum() > 0:
+        ece_class_0, _, _, _ = compute_ece(confs[mask_0], correct[mask_0])
+    else:
+        ece_class_0 = float('nan')
+    if mask_1.sum() > 0:
+        ece_class_1, _, _, _ = compute_ece(confs[mask_1], correct[mask_1])
+    else:
+        ece_class_1 = float('nan')
 
     if num_classes == 2:
         macro_auroc = roc_auc_score(y_true, probs[:, 1], average='macro')
         pr_auc = average_precision_score(y_true, probs[:, 1])
         brier = brier_score_loss(y_true, probs[:, 1])
         try:
-            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.2)
+            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.8)
         except ValueError:
             pauc = float('nan')
+        try:
+            pauc_isic = compute_isic_pauc(y_true, probs[:, 1], min_tpr=0.80)
+        except Exception:
+            pauc_isic = float('nan')
             
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-        sensitivity = tp / (tp + fn + 1e-8)
-        specificity = tn / (tn + fp + 1e-8)
+        y_pred_def = (probs[:, 1] >= 0.5).astype(int)
+        bal_acc_def = balanced_accuracy_score(y_true, y_pred_def)
+        macro_f1_def = f1_score(y_true, y_pred_def, average='macro')
+        f2_def = fbeta_score(y_true, y_pred_def, beta=2.0)
+        tn_def, fp_def, fn_def, tp_def = confusion_matrix(y_true, y_pred_def).ravel()
+        sensitivity_def = tp_def / (tp_def + fn_def + 1e-8)
+        specificity_def = tn_def / (tn_def + fp_def + 1e-8)
+        correct_def = (y_pred_def == y_true).astype(float)
+        ece_def, _, _, _ = compute_ece(confs, correct_def)
+        aurc_def = compute_aurc(y_true, y_pred_def, confs)
         
+        # Validation-Optimized threshold
         y_pred_opt = (probs[:, 1] >= best_t).astype(int)
         bal_acc_opt = balanced_accuracy_score(y_true, y_pred_opt)
         macro_f1_opt = f1_score(y_true, y_pred_opt, average='macro')
+        f2_opt = fbeta_score(y_true, y_pred_opt, beta=2.0)
         tn_opt, fp_opt, fn_opt, tp_opt = confusion_matrix(y_true, y_pred_opt).ravel()
         sensitivity_opt = tp_opt / (tp_opt + fn_opt + 1e-8)
         specificity_opt = tn_opt / (tn_opt + fp_opt + 1e-8)
+        correct_opt = (y_pred_opt == y_true).astype(float)
+        ece_opt, _, _, _ = compute_ece(confs, correct_opt)
+        aurc_opt = compute_aurc(y_true, y_pred_opt, confs)
+        
+        # Clinical Safety threshold
+        y_pred_clin = (probs[:, 1] >= best_t_clinical).astype(int)
+        bal_acc_clin = balanced_accuracy_score(y_true, y_pred_clin)
+        macro_f1_clin = f1_score(y_true, y_pred_clin, average='macro')
+        f2_clin = fbeta_score(y_true, y_pred_clin, beta=2.0)
+        tn_clin, fp_clin, fn_clin, tp_clin = confusion_matrix(y_true, y_pred_clin).ravel()
+        sensitivity_clin = tp_clin / (tp_clin + fn_clin + 1e-8)
+        specificity_clin = tn_clin / (tn_clin + fp_clin + 1e-8)
+        correct_clin = (y_pred_clin == y_true).astype(float)
+        ece_clin, _, _, _ = compute_ece(confs, correct_clin)
+        aurc_clin = compute_aurc(y_true, y_pred_clin, confs)
+        
+        # Clinical Deferral (Selective classification on clinical threshold)
+        sel_sens_90, sel_spec_90, sel_ece_90, sel_bal_acc_90, sel_f1_90 = compute_selective_metrics(
+            y_true, y_pred_clin, probs, u_e, 0.90
+        )
+        sel_sens_80, sel_spec_80, sel_ece_80, sel_bal_acc_80, sel_f1_80 = compute_selective_metrics(
+            y_true, y_pred_clin, probs, u_e, 0.80
+        )
     else:
         macro_auroc = roc_auc_score(y_true, probs, multi_class='ovr', average='macro')
         pauc = float('nan')
+        pauc_isic = float('nan')
         pr_auc = float('nan')
         brier = float('nan')
-        sensitivity = float('nan')
-        specificity = float('nan')
+        
+        bal_acc_def = bal_acc
+        macro_f1_def = macro_f1
+        f2_def = float('nan')
+        sensitivity_def = float('nan')
+        specificity_def = float('nan')
+        ece_def, _, _, _ = compute_ece(confs, correct)
+        aurc_def = compute_aurc(y_true, y_pred, confs)
+        
         best_t = 0.5
         bal_acc_opt = bal_acc
         macro_f1_opt = macro_f1
+        f2_opt = float('nan')
         sensitivity_opt = float('nan')
         specificity_opt = float('nan')
-        y_pred_opt = y_pred
-
-    ece_val, bin_accs, bin_confs, bin_sizes = compute_ece(confs, correct)
-
-    # Minority-ECE (class 1 = malignant)
-    minority_mask = (y_true == 1)
-    if minority_mask.sum() > 0:
-        m_ece, _, _, _ = compute_ece(confs[minority_mask], correct[minority_mask])
-    else:
-        m_ece = float('nan')
+        ece_opt = ece_def
+        aurc_opt = aurc_def
+        
+        best_t_clinical = 0.5
+        bal_acc_clin = bal_acc
+        macro_f1_clin = macro_f1
+        f2_clin = float('nan')
+        sensitivity_clin = float('nan')
+        specificity_clin = float('nan')
+        ece_clin = ece_def
+        aurc_clin = aurc_def
+        
+        sel_sens_90 = sel_spec_90 = sel_ece_90 = sel_bal_acc_90 = sel_f1_90 = float('nan')
+        sel_sens_80 = sel_spec_80 = sel_ece_80 = sel_bal_acc_80 = sel_f1_80 = float('nan')
 
     # ── Print Results ──────────────────────────────────────────────
-    print("\n[EVAL] Evaluation Results (Threshold = 0.5)")
-    print("=" * 50)
-    print(f"  Balanced Accuracy     : {bal_acc:.4f}")
-    print(f"  Macro F1-Score        : {macro_f1:.4f}")
+    print("\n[EVAL] Evaluation Results (Default Threshold = 0.5)")
+    print("=" * 60)
+    print(f"  Balanced Accuracy     : {bal_acc_def:.4f}")
+    print(f"  Macro F1-Score        : {macro_f1_def:.4f}")
     if num_classes == 2:
-        print(f"  Sensitivity (Recall)  : {sensitivity:.4f}")
-        print(f"  Specificity           : {specificity:.4f}")
+        print(f"  F2-Score              : {f2_def:.4f}")
+        print(f"  Sensitivity (Recall)  : {sensitivity_def:.4f}")
+        print(f"  Specificity           : {specificity_def:.4f}")
         print(f"  PR-AUC                : {pr_auc:.4f}")
         print(f"  Brier Score           : {brier:.4f}")
     print(f"  Macro-AUROC           : {macro_auroc:.4f}")
-    print(f"  pAUC (@ 20% FPR)      : {pauc:.4f}")
-    print(f"  ECE (15 bins)         : {ece_val:.4f}")
-    print(f"  Minority-ECE (cls 1)  : {m_ece:.4f}")
+    print(f"  pAUC (@ 80% FPR)      : {pauc:.4f}")
+    print(f"  pAUC (ISIC 2024 metric): {pauc_isic:.4f}")
+    print(f"  ECE (15 bins)         : {ece_def:.4f}")
+    print(f"  Class 0 ECE (Benign)  : {ece_class_0:.4f}")
+    print(f"  Class 1 ECE (Melanoma): {ece_class_1:.4f}")
+    print(f"  AURC                  : {aurc_def:.4f}")
     print(f"  Mean Epistemic u_e    : {u_e.mean():.4f}")
     print(f"  Mean Aleatoric u_a    : {u_a.mean():.4f}")
-    print("=" * 50)
+    print("=" * 60)
 
     if num_classes == 2:
         print(f"\n[EVAL] Evaluation Results (Optimized Threshold = {best_t:.4f})")
-        print("=" * 50)
+        print("=" * 60)
         print(f"  Balanced Accuracy     : {bal_acc_opt:.4f}")
         print(f"  Macro F1-Score        : {macro_f1_opt:.4f}")
+        print(f"  F2-Score              : {f2_opt:.4f}")
         print(f"  Sensitivity (Recall)  : {sensitivity_opt:.4f}")
         print(f"  Specificity           : {specificity_opt:.4f}")
-        print("=" * 50)
+        print(f"  ECE                   : {ece_opt:.4f}")
+        print(f"  AURC                  : {aurc_opt:.4f}")
+        print("=" * 60)
+
+        print(f"\n[EVAL] Evaluation Results (Clinical Safety Threshold = {best_t_clinical:.4f})")
+        print("=" * 60)
+        print(f"  Balanced Accuracy     : {bal_acc_clin:.4f}")
+        print(f"  Macro F1-Score        : {macro_f1_clin:.4f}")
+        print(f"  F2-Score              : {f2_clin:.4f}")
+        print(f"  Sensitivity (Recall)  : {sensitivity_clin:.4f}")
+        print(f"  Specificity           : {specificity_clin:.4f}")
+        print(f"  ECE                   : {ece_clin:.4f}")
+        print(f"  AURC                  : {aurc_clin:.4f}")
+        print("=" * 60)
+
+        print("\n[EVAL] Clinical Deferral Results (Selective Classification at Clinical Threshold)")
+        print("=" * 60)
+        print(f"  [90% Coverage / 10% Deferred to Dermatologist]")
+        print(f"    Selective Sensitivity  : {sel_sens_90:.4f}")
+        print(f"    Selective Specificity  : {sel_spec_90:.4f}")
+        print(f"    Selective ECE          : {sel_ece_90:.4f}")
+        print(f"    Selective Bal Acc      : {sel_bal_acc_90:.4f}")
+        print(f"    Selective F1-Score     : {sel_f1_90:.4f}")
+        print(f"  [80% Coverage / 20% Deferred to Dermatologist]")
+        print(f"    Selective Sensitivity  : {sel_sens_80:.4f}")
+        print(f"    Selective Specificity  : {sel_spec_80:.4f}")
+        print(f"    Selective ECE          : {sel_ece_80:.4f}")
+        print(f"    Selective Bal Acc      : {sel_bal_acc_80:.4f}")
+        print(f"    Selective F1-Score     : {sel_f1_80:.4f}")
+        print("=" * 60)
 
     # ── Plots ──────────────────────────────────────────────────────
     if plot:
+        _, bin_accs, bin_confs, bin_sizes = compute_ece(confs, correct)
         plot_reliability_diagram(bin_accs, bin_confs, bin_sizes)
         plot_uncertainty_histogram(
             u_e[correct.astype(bool)],
@@ -1152,21 +1547,51 @@ def evaluate(model, val_loader, test_loader, device, num_classes, plot=True):
         plot_risk_coverage_curve(y_true, y_pred_opt, confs)
 
     metrics = {
-        'balanced_accuracy': bal_acc,
-        'macro_f1': macro_f1,
-        'sensitivity': sensitivity,
-        'specificity': specificity,
+        'balanced_accuracy': bal_acc_def,
+        'macro_f1': macro_f1_def,
+        'f2_score': f2_def,
+        'sensitivity': sensitivity_def,
+        'specificity': specificity_def,
         'pr_auc': pr_auc,
         'brier_score': brier,
         'macro_auroc': macro_auroc,
         'pauc': pauc,
-        'ece': ece_val,
-        'minority_ece': m_ece,
+        'pauc_isic': pauc_isic,
+        'ece': ece_def,
+        'ece_class_0': ece_class_0,
+        'ece_class_1': ece_class_1,
+        'aurc': aurc_def,
+        
         'best_threshold': best_t,
         'bal_acc_opt': bal_acc_opt,
         'macro_f1_opt': macro_f1_opt,
+        'f2_score_opt': f2_opt,
         'sensitivity_opt': sensitivity_opt,
         'specificity_opt': specificity_opt,
+        'ece_opt': ece_opt,
+        'aurc_opt': aurc_opt,
+        
+        'clinical_threshold': best_t_clinical,
+        'bal_acc_clinical': bal_acc_clin,
+        'macro_f1_clinical': macro_f1_clin,
+        'f2_score_clinical': f2_clin,
+        'sensitivity_clinical': sensitivity_clin,
+        'specificity_clinical': specificity_clin,
+        'ece_clinical': ece_clin,
+        'aurc_clinical': aurc_clin,
+        
+        'sel_sens_90': sel_sens_90,
+        'sel_spec_90': sel_spec_90,
+        'sel_ece_90': sel_ece_90,
+        'sel_bal_acc_90': sel_bal_acc_90,
+        'sel_f1_90': sel_f1_90,
+        
+        'sel_sens_80': sel_sens_80,
+        'sel_spec_80': sel_spec_80,
+        'sel_ece_80': sel_ece_80,
+        'sel_bal_acc_80': sel_bal_acc_80,
+        'sel_f1_80': sel_f1_80,
+        
         'mean_epistemic': u_e.mean(),
         'mean_aleatoric': u_a.mean()
     }
@@ -1198,13 +1623,30 @@ def load_resnet_teacher(device, checkpoint_path):
         
         state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         load_state_dict_filtered(model, state_dict, strict=False)
+        
+        # Restore teacher's active sparse states (warmup=False, mask/tau generated from scores)
+        for m in model.modules():
+            if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                m.warmup = False
+                raw_mask = generate_2_4_mask(m.scores.data)
+                m.mask.copy_(raw_mask)
+                if m.scores.numel() % 4 == 0:
+                    scores_flat = m.scores.data.view(-1, 4)
+                    sorted_scores, _ = torch.sort(scores_flat, dim=-1, descending=True)
+                    s2 = sorted_scores[:, 1]
+                    s3 = sorted_scores[:, 2]
+                    tau = ((s2 + s3) / 2.0).unsqueeze(-1).expand_as(scores_flat).reshape(m.scores.shape)
+                    m.tau.copy_(tau)
+                else:
+                    m.tau.zero_()
+                    
         model.to(device)
         model.eval()
         
         for p in model.parameters():
             p.requires_grad = False
             
-        print("ResNet Teacher loaded successfully.")
+        print("ResNet Teacher loaded and sparse states restored successfully.")
         return model
     except Exception as e:
         print(f"Failed to load ResNet Teacher: {e}")
@@ -1295,18 +1737,34 @@ def main():
         print("[WARNING] Could not load Swin_T ImageNet weights. Initializing randomly.")
         student = models.swin_t(weights=None)
         
-    # Replace head with EDL
-    in_features = student.head.in_features
-    student.head = nn.Sequential(
-        nn.Linear(in_features, num_classes),
-        LogPriorCorrection(p_true, p_train),
-        EvidenceLayer(activation='softplus')
-    )
-    nn.init.normal_(student.head[0].weight, mean=0, std=0.001)
-    nn.init.constant_(student.head[0].bias, 0)
-    
-    # Swap inner linear layers
-    replace_swin_linear_with_mdep(student.features)
+    # Check if dataset has tabular features
+    has_tab = False
+    tab_dim = 0
+    ds = train_loader.dataset
+    if hasattr(ds, 'tabular_features') and ds.tabular_features is not None:
+        has_tab = True
+        tab_dim = ds.tabular_features.shape[1]
+
+    if has_tab:
+        print(f"[INFO] Wrapping Swin-T Student in MultiModalSwinMDEP (tab_dim={tab_dim})...")
+        student = MultiModalSwinMDEP(student, tab_dim, num_classes, p_true, p_train)
+        nn.init.normal_(student.head.classifier.weight, mean=0, std=0.001)
+        nn.init.constant_(student.head.classifier.bias, 0)
+        # Swap inner linear layers of the backbone features
+        replace_swin_linear_with_mdep(student.backbone.features)
+    else:
+        # Replace head with EDL
+        in_features = student.head.in_features
+        student.head = nn.Sequential(
+            nn.Linear(in_features, num_classes),
+            EvidenceLayer(activation='softplus'),
+            PostHocPriorCorrection(p_true, p_train)
+        )
+        nn.init.normal_(student.head[0].weight, mean=0, std=0.001)
+        nn.init.constant_(student.head[0].bias, 0)
+        # Swap inner linear layers
+        replace_swin_linear_with_mdep(student.features)
+        
     student.to(device)
 
     # Load ResNet Teacher checkpoint if it exists in the workspace

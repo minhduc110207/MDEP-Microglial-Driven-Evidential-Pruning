@@ -346,7 +346,8 @@ if __name__ == "__main__":
     
     trainable_params = [p for name, p in model.named_parameters() if 'scores' not in name]
     optimizer = optim.AdamW(trainable_params, lr=1e-4, weight_decay=1e-4)
-    trainer = MDEPTrainer(model, optimizer, criterion, args.epochs, warmup_epochs, args=args)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    trainer = MDEPTrainer(model, optimizer, criterion, args.epochs, warmup_epochs, args=args, scheduler=scheduler)
     
     # 4. Train Loop
     start_time = time.time()

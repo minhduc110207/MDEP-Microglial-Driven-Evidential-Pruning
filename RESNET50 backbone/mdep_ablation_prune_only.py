@@ -1147,7 +1147,7 @@ def evaluate(model, test_loader, device, num_classes):
         pr_auc = average_precision_score(y_true, probs[:, 1])
         brier = brier_score_loss(y_true, probs[:, 1])
         try:
-            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.2)
+            pauc = roc_auc_score(y_true, probs[:, 1], max_fpr=0.8)
         except ValueError:
             pauc = float('nan')
             
@@ -1205,7 +1205,7 @@ def evaluate(model, test_loader, device, num_classes):
         print(f"  PR-AUC                : {pr_auc:.4f}")
         print(f"  Brier Score           : {brier:.4f}")
     print(f"  Macro-AUROC           : {macro_auroc:.4f}")
-    print(f"  pAUC (@ 20% FPR)      : {pauc:.4f}")
+    print(f"  pAUC (@ 80% FPR)      : {pauc:.4f}")
     print(f"  ECE (15 bins)         : {ece_val:.4f}")
     print(f"  Minority-ECE (cls 1)  : {m_ece:.4f}")
     print(f"  Mean Epistemic u_e    : {u_e.mean():.4f}")

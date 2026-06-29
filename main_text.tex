@@ -82,6 +82,7 @@
 \author{Anonymous Authors}
 
 \begin{document}
+\maketitle
 
 \begin{abstract}
 Extreme imbalanced classification requires rare-event sensitivity, uncertainty awareness, and hardware-compatible structured sparsity. We propose \textbf{GUDS-EDL}, an uncertainty-guided sparse evidential learning framework that couples Dirichlet-derived structural signals with valid-block 2:4 sparsity. GUDS-EDL updates latent topology scores through two first-order modules: a signed evidential-risk pruner for active connections and an evidence-seeking regrower for candidate connections. Mask refresh is driven by vacuity, expected entropy, and KL-based evidence-growth saliency, while a capped imbalance-aware evidential objective supports rare-event learning without changing the Dirichlet prior. We instantiate the method on ISIC 2024 as an extreme-prevalence medical screening case study. Current claims are limited to this setting; ablations, broader long-tailed and anomaly-detection benchmarks, and hardware-kernel validation are treated as explicit protocols unless reported.
@@ -146,7 +147,7 @@ The quantities $u_e$ and $u_a$ are valid bounded/non-negative signals derived fr
 
 \section{GUDS-EDL Framework}\label{sec:methodology}
 
-\textbf{Terminology}: Earlier drafts used biological mnemonics for topology evolution. In this paper, we use the technical terms \textbf{Uncertainty-Guided Pruner} and \textbf{Evidence-Seeking Regrower}; any biological analogy is non-technical.
+\textbf{Terminology}: We use the technical terms \textbf{Uncertainty-Guided Pruner} and \textbf{Evidence-Seeking Regrower} for the two structural update modules throughout the paper.
 
 GUDS-EDL separates training into two coupled loops. The prediction loop uses a cached 2:4 mask $\bm{M}$, performs ordinary mini-batch optimization of the active weights $\bm{W}$, and evaluates the evidential objective. The structural loop runs at refresh points on an amortized proxy batch: it computes $u_e,u_a$, forms the batch pruning risk ratio $R_{\mathcal B}$ and the regrowth objective $L_{\text{grow}}$, updates latent scores $\bm{V}$ through rank-normalized first-order saliency, and refreshes $\bm{M}$ by blockwise Top-2 selection. This separation keeps the main training path simple while allowing dormant candidates to receive structural saliency estimates during refresh.
 
@@ -359,7 +360,8 @@ The two rank-normalized scores are combined in the latent score update
     \left(G_{ij}^{(t)}-C_{ij}^{(t)}\right)
     +
     \left(1-M_{ij}^{(t)}\right)
-    \left(\rho G_{ij}^{(t)}+\xi_{ij}^{(t)}\right),\\
+    \rho G_{ij}^{(t)}
+    + \zeta_{ij}^{(t)},\\
     \mu_{ij}^{(t)} &= \beta_m\mu_{ij}^{(t-1)}+(1-\beta_m)\Delta V_{ij}^{(t)},\\
     X_{ij}^{(t)} &= V_{ij}^{(t-1)}+\eta_{\text{struct}}\mu_{ij}^{(t)},\\
     V_{ij}^{(t)} &=
@@ -369,7 +371,7 @@ The two rank-normalized scores are combined in the latent score update
     \right).
 \end{aligned}
 \end{equation}
-The pruning term $C_{ij}$ therefore acts only on active links, while dormant links are moved by regrowth and controlled exploration. The coefficient $\rho\in[0,1]$ attenuates dormant-link growth in the implementation. The optional exploration term $\xi_{ij}^{(t)}$ is used only when the regrowth signal is nearly flat; in the implementation it is scaled by a node-level vacuity sensitivity $|\partial u_e/\partial a_i^{(l)}|$ and by a small Gaussian factor. After Eq.~\ref{eq:score_update}, Eq.~\ref{eq:mask} refreshes the 2:4 mask. This update is intentionally modular: the experiments include variants that disable $C_{ij}$, disable $G_{ij}$, replace signed pruning by absolute-gradient pruning, replace class-conditioned regrowth by KL-uniform regrowth, and disable topology caching.
+where $\zeta_{ij}^{(t)}=(1-M_{ij}^{(t)})\xi_{ij}^{(t)}$ is an optional implementation-level perturbation. The pruning term $C_{ij}$ therefore acts only on active links, while dormant links are moved by attenuated regrowth. The coefficient $\rho\in[0,1]$ attenuates dormant-link growth in the implementation. The exploration term $\xi_{ij}^{(t)}$ is not part of the first-order saliency criterion; it is used only as a tie-breaking/anti-crystallization heuristic when rank-normalized regrowth scores are nearly flat. The core GUDS-EDL update is determined by $G$, $C$, the active/dormant mask split, and valid-block Top-2 projection. Since $\bm{V}$ is clamped after every structural update, this perturbation cannot make the structural state unbounded. We report or ablate it separately and do not rely on it for the theoretical validity claims.
 
 \begin{proposition}[Bounded Morphological State]
 \label{prop:bounded_scores}
@@ -503,84 +505,44 @@ The reported case study uses a ResNet-18 instantiation. Inside each residual blo
 \section{Results and Real-World Benchmark Analysis}\label{sec:results}
 
 \subsection{High-Stakes Case Study: ISIC 2024}\label{subsec:isic_case_study}
-We evaluate the performance of GUDS-EDL on the ISIC 2024 Challenge dataset. The extreme class imbalance (malignant cases account for only 0.15\% of the samples) represents a challenging optimization landscape.
+We report only the latest repeated-seed ISIC results (seeds 42--44). Under this protocol, the default threshold $\tau=0.50$ yields zero minority recall for all four evidential models in every seed, so we focus on the validation-selected balanced operating point together with threshold-independent ranking and calibration metrics.
 
-\subsection{Significance of Evaluation Metrics in Long-Tailed Domains}
-Under extreme imbalance, overall accuracy is misleading. We therefore emphasize:
-\begin{itemize}
-    \item \textbf{partial AUC ($\text{pAUC}_{0.80}$):} AUROC restricted to the high-recall region $\text{TPR}\ge0.80$, matching the screening operating range.
-    \item \textbf{Expected Calibration Error (ECE):} Confidence-accuracy mismatch under standard equal-width binning, reported alongside minority-specific calibration.
-    \item \textbf{Area Under the Risk-Coverage Curve (AURC):} Selective-prediction error ranking, interpreted together with working-point metrics because aggregate AURC can be majority dominated.
-\end{itemize}
-
-\subsection{Classification Performance and Robustness}
 \begin{table*}[!t]
 \centering
-\caption{ISIC 2024 Case Study: Classification performance comparison under Adaptive Operating Modes. The extreme class imbalance (0.15\% rare-event prevalence) renders standard default thresholds ($\tau=0.50$) unviable. The Balanced Utility mode maximizes the arithmetic mean of Sensitivity and Specificity, while the High-Recall Fail-Safe mode ensures a minimum diagnostic Sensitivity of 80\% to minimize false negatives.}
-\label{tab:results_classification}
-\renewcommand{\arraystretch}{1.12}
-\setlength{\tabcolsep}{3.2pt}
-\begin{adjustbox}{max width=\textwidth}
-\begin{tabular}{l C C C C C C C C C}
-\toprule
- & \multicolumn{3}{c}{\textbf{Default Threshold ($\tau = 0.50$)}} & \multicolumn{3}{c}{\textbf{Balanced Utility}} & \multicolumn{3}{c}{\textbf{High-Recall Fail-Safe}} \\
-\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
-\textbf{Model} & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{F2} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{F2} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{F2} $\uparrow$ \\
-\midrule
-Fisher EDL   & $0.3117$ & $0.9864$ & $0.0978$ & $0.7273$ & $0.8739$ & $0.0323$ & $0.8052$ & $0.7393$ & $0.0177$ \\
-Flexible EDL & $0.3117$ & $0.9892$ & $0.1147$ & $0.8182$ & $0.8203$ & $0.0258$ & $0.8182$ & $0.8203$ & $0.0258$ \\
-R-EDL        & $0.3506$ & $0.9796$ & $0.0805$ & $0.7662$ & $0.8357$ & $0.0264$ & $0.8052$ & $0.7473$ & $0.0182$ \\
-\midrule
-\textbf{GUDS-EDL (Ours)} & $\mathbf{0.4286}$ & $0.9854$ & $\mathbf{0.1265}$ & $\mathbf{0.8312}$ & $\mathbf{0.8828}$ & $\mathbf{0.0396}$ & $0.8052$ & $\mathbf{0.9030}$ & $\mathbf{0.0459}$ \\
-\bottomrule
-\end{tabular}
-\end{adjustbox}
-\end{table*}
-\begin{table*}[!t]
-\centering
-\caption{Threshold-independent calibration, ranking, and uncertainty metrics. Lower ECE, Minority ECE, and AURC indicate better behavior for the corresponding aggregate criterion. Mean $u_e$ and mean $u_a$ are computed over the full test set.}
-\label{tab:results_uncertainty}
-\renewcommand{\arraystretch}{1.12}
+\caption{ISIC 2024 repeated-seed results. Values are mean $\pm$ standard deviation over seeds 42--44. Lower AURC and ECE are better.}
+\label{tab:isic_repeated_seed_results}
+\renewcommand{\arraystretch}{1.10}
 \setlength{\tabcolsep}{3.0pt}
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{l C C C C C C C C}
 \toprule
-\textbf{Model} & \textbf{Macro-AUROC} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{ECE} $\downarrow$ & \textbf{Minority ECE} $\downarrow$ & \textbf{AURC} $\downarrow$ & \textbf{Mean $u_e$} & \textbf{Mean $u_a$} \\
+\textbf{Model} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
 \midrule
-Fisher EDL   & $0.8660$ & $0.1048$ & $0.0266$ & $0.2139$ & $\mathbf{0.3491}$ & $0.0009$ & $0.3822$ & $0.4453$ \\
-Flexible EDL & $0.8835$ & $0.1138$ & $0.0251$ & $0.1097$ & $0.6101$ & $\mathbf{0.0003}$ & $0.2068$ & $0.2913$ \\
-R-EDL        & $0.8741$ & $0.1126$ & $0.0183$ & $\mathbf{0.0989}$ & $0.3583$ & $0.0018$ & $0.2285$ & $\mathbf{0.1298}$ \\
+Fisher EDL   & $0.7359 {\scriptstyle \pm 0.0272}$ & $0.5672 {\scriptstyle \pm 0.0403}$ & $0.9045 {\scriptstyle \pm 0.0813}$ & $0.0428 {\scriptstyle \pm 0.0263}$ & $0.7684 {\scriptstyle \pm 0.0624}$ & $\mathbf{0.0313} {\scriptstyle \pm 0.0035}$ & $0.0006 {\scriptstyle \pm 0.0002}$ & $\mathbf{0.0501} {\scriptstyle \pm 0.0013}$ \\
+Flexible EDL & $\mathbf{0.7897} {\scriptstyle \pm 0.0660}$ & $\mathbf{0.6496} {\scriptstyle \pm 0.1655}$ & $0.9299 {\scriptstyle \pm 0.0406}$ & $\mathbf{0.0650} {\scriptstyle \pm 0.0247}$ & $\mathbf{0.8308} {\scriptstyle \pm 0.0428}$ & $0.0243 {\scriptstyle \pm 0.0043}$ & $0.0005 {\scriptstyle \pm 0.0002}$ & $0.0508 {\scriptstyle \pm 0.0021}$ \\
+R-EDL        & $0.7605 {\scriptstyle \pm 0.0381}$ & $0.5703 {\scriptstyle \pm 0.0721}$ & $\mathbf{0.9508} {\scriptstyle \pm 0.0103}$ & $0.0396 {\scriptstyle \pm 0.0140}$ & $0.7702 {\scriptstyle \pm 0.0378}$ & $0.0291 {\scriptstyle \pm 0.0044}$ & $0.0006 {\scriptstyle \pm 0.0002}$ & $0.0510 {\scriptstyle \pm 0.0021}$ \\
 \midrule
-\textbf{GUDS-EDL (Ours)} & $\mathbf{0.9088}$ & $\mathbf{0.1296}$ & $\mathbf{0.0297}$ & $0.1113$ & $0.5089$ & $\mathbf{0.0003}$ & $0.2112$ & $0.2985$ \\
+\textbf{GUDS-EDL (Ours)} & $0.7879 {\scriptstyle \pm 0.0118}$ & $0.6309 {\scriptstyle \pm 0.0407}$ & $0.9449 {\scriptstyle \pm 0.0187}$ & $0.0592 {\scriptstyle \pm 0.0064}$ & $0.8188 {\scriptstyle \pm 0.0180}$ & $\mathbf{0.0313} {\scriptstyle \pm 0.0038}$ & $\mathbf{0.0004} {\scriptstyle \pm 0.0002}$ & $0.0553 {\scriptstyle \pm 0.0019}$ \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
 \end{table*}
 
-As presented in Table~\ref{tab:results_classification}, evidential models exhibit highly variable diagnostic utility depending on the decision threshold strategy. Under the default threshold ($\tau = 0.50$), standard evidential baselines show low Sensitivity (ranging from $0.3117$ to $0.3506$). In contrast, \textbf{GUDS-EDL} achieves a Sensitivity of $\mathbf{0.4286}$ and Specificity of $\mathbf{0.9854}$ (F2-Score = $\mathbf{0.1265}$). This result is consistent with the design goal of improving rare-event decision behavior under structured sparsity, although component-level attribution requires the ablation protocol in Appendix~C.
+Table~\ref{tab:isic_repeated_seed_results} shows that the strongest dense baseline is Flexible EDL, which achieves the highest mean Balanced Accuracy, pAUC$_{0.80}$, and Macro-AUROC. GUDS-EDL is slightly behind on those three ranking metrics, but remains competitive while preserving high specificity and attaining the best mean AURC. GUDS-EDL also matches the best mean PR-AUC and exhibits much smaller seed-to-seed variance than Flexible EDL on Balanced Accuracy, pAUC$_{0.80}$, and Macro-AUROC. This is the main positive result of the new evaluation: uncertainty-guided sparse topology adaptation remains competitive under severe imbalance without becoming numerically unstable.
 
-However, adjusting the decision threshold further restores utility. When optimizing for Balanced Accuracy, GUDS-EDL achieves a Sensitivity of $\mathbf{0.8312}$ and Specificity of $\mathbf{0.8828}$ (F2-score = $\mathbf{0.0396}$). In the High-Recall Fail-Safe regime (Sensitivity $\ge 80\%$), GUDS-EDL achieves a Sensitivity of $0.8052$ (corresponding to $62/77$ rare-event test cases), a Specificity of $\mathbf{0.9030}$, and an F2-score of $\mathbf{0.0459}$. This suggests that the proposed topology adaptation may improve rare-event decision behavior under valid-block 2:4 structured sparsity.
+The structural diagnostics are favorable. In all three GUDS-EDL runs, the log reports exact $50.0\%$ sparsity in the wrapped layers, full valid-block feasibility ($2789632/2789632$ valid 2:4 blocks), and no detected representational collapse. These diagnostics matter because they show that the ranking behavior in Table~\ref{tab:isic_repeated_seed_results} is not obtained by an unstable sparse morphology.
 
-We report the 95\% Wilson confidence interval for this Sensitivity, which is $[0.703, 0.878]$. This interval highlights the high statistical sensitivity of the small number of positive samples ($N_{\text{minority}} = 77$) in the test set: a shift of just 3 or 4 false negatives could significantly reduce the observed sensitivity, demonstrating the statistical instability inherent in screening under extreme class imbalance.
+The main weakness is calibration and operating-point fragility. GUDS-EDL has the worst mean ECE in Table~\ref{tab:isic_repeated_seed_results}, and its post-hoc temperature repeatedly saturates at the lower bound $T_{\mathrm{cal}}=0.10$ in all three seeds. Together with the universal failure of the default threshold, this indicates that the current evidential scale is not directly deployment ready. In addition, the quality-gated mode discards a larger fraction of cases than the dense baselines while still sacrificing minority sensitivity, so the present abstention rule should be interpreted as preliminary.
 
-At a real-world prevalence of $0.15\%$, Sensitivity $0.8052$ and Specificity $0.9030$ imply a theoretical PPV of approximately $1.23\%$. Thus, GUDS-EDL should not be viewed as an autonomous diagnostic selector; its plausible role is screening-level triage that filters highly confident benign cases while routing the remaining cases to clinicians. Decision Curve Analysis and Number Needed to Biopsy remain necessary before clinical-deployment claims.
-
-\subsection{Uncertainty Quantification and Selective Classification}
-Table~\ref{tab:results_uncertainty} highlights threshold-independent performance and uncertainty calibration. While the proposed \textbf{GUDS-EDL} model does not outperform all baselines across every single calibration metric, it achieves the highest Macro-AUROC of $\mathbf{0.9088}$, the highest partial AUC ($\text{pAUC}_{0.80}$) of $\mathbf{0.1296}$, and the highest PR-AUC of $\mathbf{0.0297}$, demonstrating superior discriminative and ranking capabilities within the clinical operating range.
-
-Regarding confidence calibration, R-EDL and Flexible EDL achieve lower global Expected Calibration Error (ECE) scores ($0.0989$ and $0.1097$, respectively) compared to GUDS-EDL ($0.1113$). However, global ECE is heavily dominated by the majority class, which constitutes 99.85\% of the cohort. Evaluating calibration specifically on the rare minority class reveals that all models exhibit higher Minority ECE. R-EDL and Fisher EDL exhibit relatively lower Minority ECE ($0.3583$ and $0.3491$) compared to GUDS-EDL ($0.5089$) and Flexible EDL ($0.6101$). This behavior should be interpreted together with their much lower positive prediction tendency; conservative models can appear better calibrated in the positive subspace while sacrificing rare-event sensitivity. GUDS-EDL's Minority ECE of $0.5089$ improves over Flexible EDL ($0.6101$) but remains a clear limitation of the current method.
-
-For selective classification, GUDS-EDL obtains an AURC of $\mathbf{0.0003}$, matching the best observed value from Flexible EDL ($0.0003$) and outperforming R-EDL ($0.0018$) under this test split. AURC is interpreted only as an error-ranking diagnostic under the evaluated confidence score; because the test distribution is extremely majority dominated, it is not a standalone deployment-safety guarantee.
-
-Taken together, the classification gains in Table~\ref{tab:results_classification} and the uncertainty behavior in Table~\ref{tab:results_uncertainty} suggest that the proposed topology adaptation may help improve classification performance under structured sparsity, though its calibration characteristics warrant further research.
+Overall, the updated evidence supports a narrower claim than the previous draft. GUDS-EDL is not the best model on every ISIC metric, but it is a competitive sparse evidential model with strong risk-coverage ordering, high specificity, stable repeated-seed behavior, and clean 2:4 structural diagnostics. Its remaining weaknesses are calibration quality and threshold sensitivity under extreme prevalence.
 
 \section{Limitations and Broader Impact}\label{sec:limitations}
-Key limitations of the current framework include: (1) empirical validation is currently centered on the ISIC 2024 case study; (2) GUDS-EDL enforces a fixed Top-2-of-4 pattern over eligible complete blocks after warmup, whereas early stages might benefit from an annealed sparsity schedule; (3) while valid-block 2:4 structured sparsity reduces active density in wrapped layers, achieving real hardware acceleration requires specialized 2:4 sparse Tensor Core kernels; and (4) minority-class probability calibration remains challenging under extreme prevalence shifts even when rare-event ranking improves.
+Key limitations of the current framework include: (1) empirical validation is currently centered on the ISIC 2024 case study; (2) GUDS-EDL enforces a fixed Top-2-of-4 pattern over eligible complete blocks after warmup, whereas early stages might benefit from an annealed sparsity schedule; (3) while valid-block 2:4 structured sparsity reduces active density in wrapped layers, achieving real hardware acceleration requires specialized 2:4 sparse Tensor Core kernels; (4) minority-class probability calibration remains challenging under extreme prevalence shifts even when rare-event ranking improves; (5) the repeated-seed diagnostic run shows that the method can become strongly threshold dependent, with post-hoc temperature calibration repeatedly saturating at its lower bound and fail-safe thresholds occasionally degenerating into an almost-always-positive classifier; (6) the current uncertainty-gated abstention mode removes only a small fraction of cases while still sacrificing substantial minority recall; and (7) the current implementation includes a small exploration perturbation for anti-crystallization under near-flat structural scores, so future versions should replace it with deterministic tie-breaking or report dedicated sensitivity analysis.
 
 Rare-event learning systems deployed in high-stakes domains carry significant societal responsibility. A primary risk is the extreme cost of false negatives; thus, such models must act as decision-support tools that integrate selective classification to route ambiguous cases to human experts. Algorithmic bias is also a concern: dermatological datasets are often heavily skewed toward lighter Fitzpatrick skin types, and performance may not generalize equally to patients with darker skin tones.
 
 \section{Conclusion}\label{sec:conclusion}
-We introduced GUDS-EDL, an uncertainty-guided dynamic sparse evidential learning framework for extreme imbalanced classification. By coupling Evidential Deep Learning with Dynamic Sparse Training under valid-block NVIDIA 2:4 structured sparsity, GUDS-EDL uses Dirichlet vacuity and expected-entropy signals to guide topological adaptation while supporting adaptive operating thresholds. In the ISIC 2024 case study, GUDS-EDL provides initial evidence that evidential topology adaptation can improve rare-event ranking and high-recall operating specificity under valid-block 2:4 sparsity, while minority calibration remains challenging. Broader validation on controlled long-tailed recognition, industrial anomaly detection, additional backbones, repeated seeds, ablations, and hardware-accelerated sparse kernels remains necessary before claiming domain-general deployment readiness.
+We introduced GUDS-EDL, an uncertainty-guided dynamic sparse evidential learning framework for extreme imbalanced classification. In the updated three-seed ISIC evaluation, GUDS-EDL is competitive with the strongest dense evidential baselines while maintaining exact valid-block 2:4 sparsity, the best mean AURC, and stable structural diagnostics without detected collapse. The same evaluation also shows that calibration quality and threshold sensitivity remain the main open problems. Broader validation on controlled long-tailed recognition, industrial anomaly detection, additional backbones, ablations, and hardware-accelerated sparse kernels remains necessary before claiming domain-general deployment readiness.
 
 \begin{thebibliography}{10}\itemsep=-1pt
 

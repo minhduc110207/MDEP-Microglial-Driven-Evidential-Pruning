@@ -70,14 +70,14 @@ Student Backbone & Swin-T (28.3M params) & ImageNet-1K pretrained \\
 Teacher Backbone & ResNet-18 Evidential & Dense, frozen, EDL head \\
 Number of Classes ($K$) & 2 & Benign / Malignant \\
 \midrule
-\multicolumn{3}{l}{\emph{Phase 1: Dense Warmup ($t < 5$ epochs)}} \\
+\multicolumn{3}{l}{\emph{Phase 1: Dense Warmup ($t < 12$ epochs)}} \\
 Mask & Locked entirely at $\bm{1}$ & Dense network, no pruning \\
 Focal exponent $\gamma(t)$ & $0.0$ & Disabled for baseline convergence stability \\
 Distillation weight $\alpha_d$ & $0.5$ (maximum) & Relying on Teacher's knowledge \\
 \midrule
-\multicolumn{3}{l}{\emph{Phase 2: Dynamic Sparsity ($t \ge 5$ epochs)}} \\
-Mask & NVIDIA 2:4 & Top-2-of-4 from $\bm{S}$ \\
-Microglia--Astrocyte & Activated & Update $\bm{S}$ every $N_{\text{update}} = 10$ steps \\
+\multicolumn{3}{l}{\emph{Phase 2: Dynamic Sparsity ($t \ge 12$ epochs)}} \\
+Mask & NVIDIA 2:4 & Top-2-of-4 from $\bm{V}$ \\
+Microglia--Astrocyte & Activated & Update $\bm{V}$ every $N_{\text{update}} = 10$ steps \\
 $\gamma_t$ (STE) & Cosine: $5.0 \to 0.15$ & Floor $0.15$ preserves boundary gradients \\
 $\alpha_d$ & Cosine: $0.5 \to 0.05$ & Gradually releases Student \\
 $\gamma_{\text{focal}}$ & Linear $\to 1.2$ & Focus on hard samples \\
@@ -85,11 +85,11 @@ $\gamma_{\text{focal}}$ & Linear $\to 1.2$ & Focus on hard samples \\
 \multicolumn{3}{l}{\emph{Optimization}} \\
 Optimizer & AdamW~\cite{loshchilov2019decoupled, kingma2015adam} & $\beta_1=0.9$, $\beta_2=0.999$ \\
 Learning rate & $2 \times 10^{-5}$ & Linear warmup from $10^{-6}$ \\
-Weight decay & $0.01$ & Applied to $\Theta_{\text{train}}$, excluding $\bm{S}$ \\
+Weight decay & $0.01$ & Applied to $\Theta_{\text{train}}$, excluding $\bm{V}$ \\
 Gradient clipping & $1.0$ & Global $L_2$ norm \\
 Batch size & 32 & --- \\
-Total epochs ($T$) & 20 & --- \\
-Warmup epochs ($t_w$) & 5 & 25\% of budget \\
+Total epochs ($T$) & 40 & --- \\
+Warmup epochs ($t_w$) & 12 & 30\% of budget \\
 \midrule
 \multicolumn{3}{l}{\emph{EFL}} \\
 $\gamma_{\text{base}}$ (Focal) & $1.2$ & Focal exponent \\
@@ -100,9 +100,9 @@ $t_{\text{anneal}}$ (KL) & 10 & KL annealing epochs \\
 $\gamma_{\text{initial}}$ (STE) & $5.0$ & Initial STE temperature \\
 $\gamma_{\text{final}}$ (STE) & $0.15$ & Final STE temperature \\
 $\beta_m$ (EMA) & $0.95$ & Momentum coefficient \\
-$\eta$ (Step $S$) & $0.02$ & Structural learning rate \\
+$\eta$ (Step $V$) & $0.02$ & Structural learning rate \\
 $\beta$ (Microglia) & $1.0$ & Weight of $u_a$ \\
-$S_{\max}$ & $5.0$ & Score boundary clamp \\
+$V_{\max}$ & $5.0$ & Score boundary clamp \\
 \midrule
 \multicolumn{3}{l}{\emph{Distillation}} \\
 $\alpha_{d,\text{init}}$ & $0.5$ & Initial distillation weight \\
@@ -124,7 +124,7 @@ Aleatoric uncertainty is defined by the digamma variance terms. For any $K > 1$,
 \subsection{Anti-Crystallization}\label{subsec:anti_crystal}
 
 If an entire layer lacks any candidate connections offering useful growth gradients ($\max_{ij} G_{ij} \le 10^{-8}$), MDEP injects an emergency response:
-\begin{equation}\label{eq:anti_crystal_eq}
+\begin{equation\label{eq:anti_crystal_eq}
     \tilde{G}_{ij} = G_{ij} + \max\!\left(0.0,\; \epsilon_{ij} \cdot \text{Norm}(u_{e,i}^{(\text{node})})\right)
 \end{equation}
 where $\epsilon_{ij} \sim \mathcal{N}(0, 0.0316^2)$. Due to the multiplicative structure, the system prioritizes "experimenting" by opening new links in regions lacking evidence.
@@ -133,17 +133,17 @@ where $\epsilon_{ij} \sim \mathcal{N}(0, 0.0316^2)$. Due to the multiplicative s
 
 Continuous score updates are calculated at the end of each training step by combining the opposing forces of growth and pruning:
 \begin{equation}\label{eq:delta_S}
-    \Delta S_{ij} = G_{ij} - C_{ij}
+    \Delta V_{ij} = G_{ij} - C_{ij}
 \end{equation}
 To smooth gradient fluctuations across mini-batches, score momentum is applied:
 \begin{align}
-    V_{ij}^{(t)} &= \beta_m V_{ij}^{(t-1)} + (1 - \beta_m) \Delta S_{ij} \\
-    S_{ij}^{(t)} &= S_{ij}^{(t-1)} + \eta V_{ij}^{(t)}
+    \Omega_{ij}^{(t)} &= \beta_m \Omega_{ij}^{(t-1)} + (1 - \beta_m) \Delta V_{ij} \\
+    V_{ij}^{(t)} &= V_{ij}^{(t-1)} + \eta \Omega_{ij}^{(t)}
 \end{align}
 where $\beta_m = 0.95$ is the EMA coefficient, and $\eta = 0.02$ is the structural update rate. To prevent score saturation (which would permanently lock connections), MDEP centers and clamps the scores:
 \begin{align}
-    S_{ij}^{(t)} &\leftarrow S_{ij}^{(t)} - \text{mean}(\bm{S}^{(t)}) \\
-    S_{ij}^{(t)} &\leftarrow \text{clamp}(S_{ij}^{(t)}, -5.0, 5.0)
+    V_{ij}^{(t)} &\leftarrow V_{ij}^{(t)} - \text{mean}(\bm{V}^{(t)}) \\
+    V_{ij}^{(t)} &\leftarrow \text{clamp}(V_{ij}^{(t)}, -5.0, 5.0)
 \end{align}
 This centering ensures that the average latent score of each layer remains 0, maintaining healthy competition among links.
 
@@ -268,7 +268,7 @@ The performance of MDEP is evaluated on the clinical \textbf{ISIC 2024 (Skin Can
 \paragraph{Data Processing and Training Set Balancing:}
 \begin{itemize}
     \item \textbf{Stratified Split:} We partition the dataset into a rigorous 70/10/20 Train/Validation/Test split using a fixed seed (\texttt{random\_state=42}). The validation set is strictly isolated to act as a proxy for threshold optimization, while the 20\% test partition is held completely unseen until the final evaluation, effectively eliminating threshold-induced data leakage.
-    \item \textbf{Under-sampling \& Calibration:} To balance the training set, we keep all malignant samples and randomly sample benign samples at a ratio of $1:20$. This under-sampling reduces the training set size, accelerating training by more than 50$\times$. To correct the severe distributional shift introduced by under-sampling, we integrate a \textbf{Prior Probability Calibration} layer directly into the Evidential Deep Learning head before the Softplus activation, effectively neutralizing the under-sampling bias. Given the true class prior probabilities $\mathbf{p}_{\text{true}}$ and the under-sampled training prior probabilities $\mathbf{p}_{\text{train}}$, the raw logits $\mathbf{z}$ are adjusted prior to the evidence activation via:
+    \item \textbf{Under-sampling \& Calibration:} To balance the training set, we keep all malignant samples and randomly sample benign samples at a ratio of $1:20$. This under-sampling reduces the training set size, accelerating training by more than 50$\times$. To correct the severe distributional shift introduced by under-sampling, we integrate a \textbf{Post-Hoc Prior Correction} mechanism. The adjustment is applied as a shift in the logit space prior to the evidence activation to preserve Dirichlet boundary properties and avoid numerical underflow. Given the true class prior probabilities $\mathbf{p}_{\text{true}}$ and the under-sampled training prior probabilities $\mathbf{p}_{\text{train}}$, the raw logits $\mathbf{z}$ are adjusted prior to the evidence activation via:
     \begin{equation}
         \tilde{z}_c = z_c + \ln(p_{\text{true}, c}) - \ln(p_{\text{train}, c})
     \end{equation}

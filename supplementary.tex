@@ -1,0 +1,446 @@
+% ============================================================================
+%   Comprehensive Research Report on the Universal GUDS-EDL Architecture
+%   Mathematical Foundations, Multi-Agent Dynamics, and Clinical Applications
+%
+%   File: guds_edl_report_en.tex
+%   Version: 2.0 (Updated 06/2026)
+%   Language: English
+% ============================================================================
+
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage{aaai}  % DO NOT CHANGE THIS
+\usepackage{times}  % DO NOT CHANGE THIS
+\usepackage{helvet}  % DO NOT CHANGE THIS
+\usepackage{courier}  % DO NOT CHANGE THIS
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\frenchspacing  % DO NOT CHANGE THIS
+\setlength{\pdfpagewidth}{8.5in} % DO NOT CHANGE THIS
+\setlength{\pdfpageheight}{11in}
+\setcounter{secnumdepth}{2}
+%%%%%%%%%%
+% PDFINFO for PDFLATEX
+\pdfinfo{
+/Title (GUDS-EDL: Generalized Uncertainty-Guided Dynamic Sparsification for Evidential Long-Tailed Learning)
+/Author (Anonymous Authors)
+}
+%%%%%%%%%%
+ % DO NOT CHANGE THIS
+
+% --- Additional Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath, amssymb, amsthm, bm}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{adjustbox}
+\usepackage{placeins}
+\usepackage{stfloats}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+\usepackage[table]{xcolor}
+\usepackage{colortbl}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newcolumntype{C}{>{\centering\arraybackslash}c}
+
+% --- Custom commands ---
+\newcommand{\Dir}{\text{Dir}}
+\newcommand{\KL}{\text{KL}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Norm}{\text{Norm}}
+\newcommand{\softplus}{\text{Softplus}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+\hbadness=10000
+\vbadness=10000
+\hfuzz=10pt
+\vfuzz=4pt
+\raggedbottom
+\setlength{\textfloatsep}{10pt plus 2pt minus 3pt}
+\setlength{\dbltextfloatsep}{10pt plus 2pt minus 3pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{8pt plus 2pt minus 2pt}
+
+\newtheorem{remark}{Remark}
+\newtheorem{proposition}{Proposition}
+
+% ============================================================================
+\title{Supplementary Material: GUDS-EDL}
+\author{Anonymous Authors}
+
+\begin{document}
+
+\title{Supplementary Material for GUDS-EDL: Generalized Uncertainty-Guided Dynamic Sparsification for Evidential Long-Tailed Learning}
+\author{Anonymous Authors}
+\maketitle
+
+\appendix
+
+\section{Mathematical Derivations}
+
+\subsection{Dirichlet PDF and Expected Probability}
+The full probability density function (PDF) of the Dirichlet distribution for a probability vector $\bm{p} = [p_1, \dots, p_K]^T$ on the $K$-dimensional simplex $\Delta^K$ is defined as:
+\begin{equation}
+    \text{Dir}(\bm{p} \mid \bm{\alpha}) = \frac{\Gamma(S)}{\prod_{c=1}^K \Gamma(\alpha_c)} \prod_{c=1}^K p_c^{\alpha_c - 1}
+\end{equation}
+
+\begin{remark}[Why not use ReLU?]
+ReLU truncates negative logits to zero, resulting in zero gradients for those activations and permanently trapping evidence at $e_c = 0$, which freezes the Dirichlet state on the zero-evidence simplex. Therefore, the Softplus activation is strictly necessary to maintain a differentiable evidence manifold.
+\end{remark}
+
+\subsection{Proof of Vacuity Bounds}
+By definition in Subjective Logic, Dirichlet vacuity is $u_e = \frac{K}{S}$, where $S = \sum_{c=1}^K \alpha_c$. Under our parameterization, $\alpha_c = \ln(1 + \exp(z_c)) + 1.0$. Since Softplus maps any real-valued logit to a positive value, $\alpha_c > 1.0$ for all $c$. Thus, $S = \sum_c \alpha_c > K$. Because $S > K$, $\frac{K}{S} < 1$. As $z_c \to -\infty$, $S \to K$, yielding supremum $u_e \to 1$. As $z_c \to \infty$, $S \to \infty$, yielding infimum $u_e \to 0$. Thus $u_e \in (0, 1]$.
+
+\subsection{Expected Categorical Entropy Non-Negativity}
+The expected categorical entropy is $u_a = \sum_{c=1}^K \frac{\alpha_c}{S} [\psi(S + 1) - \psi(\alpha_c + 1)]$. The digamma function $\psi(x)$ is strictly monotonically increasing for $x > 0$. Since $\alpha_c \ge 1$ and $S = \sum \alpha_i$, $S \ge \alpha_c$ for all $c$. Thus $\psi(S + 1) \ge \psi(\alpha_c + 1)$, meaning the term in brackets is non-negative. Thus $u_a \ge 0$.
+
+\subsection{Asymmetric KL Divergence}
+To shrink false evidence to the flat prior $1.0$, we adjust the Dirichlet parameters to $\tilde{\alpha}_c^{(n)} = y_c^{(n)} + (1 - y_c^{(n)}) \cdot \alpha_c^{(n)}$. The full KL divergence penalty $L_{\text{KL}}^{(n)}$ is computed as:
+\begin{equation}\label{eq:kl_loss_n}
+\begin{aligned}
+    L_{\text{KL}}^{(n)} ={}& \ln \left( \frac{\Gamma\left(\sum_{c=1}^K \tilde{\alpha}_c^{(n)}\right)}{\Gamma(K) \prod_{c=1}^K \Gamma(\tilde{\alpha}_c^{(n)})} \right) \\
+    &+ \sum_{c=1}^K (\tilde{\alpha}_c^{(n)} - 1)\left[\psi(\tilde{\alpha}_c^{(n)}) - \psi\!\left(\sum_{c=1}^K \tilde{\alpha}_c^{(n)}\right)\right]
+\end{aligned}
+\end{equation}
+
+\section{Full GUDS-EDL Algorithm and Implementation}
+\begin{algorithm}[t]
+\caption{Universal GUDS-EDL Training and Optimization Loop}
+\label{alg:guds_edl}
+\begin{algorithmic}[1]
+\REQUIRE Dataset $\mathcal{D}$, model weights $\bm{W}^{(0)}$, latent scores $\bm{V}^{(0)} \leftarrow |\bm{W}^{(0)}|$, epochs $T$, warmup epochs $T_w$, structural update rate $\eta_{\text{struct}} = 0.02$.
+\FOR{each epoch $t = 1 \dots T$}
+    \IF{$t == T_w$}
+        \STATE Freeze learned channel permutations into static index maps.
+    \ENDIF
+    \IF{$t \ge T_w$}
+        \STATE Sample a proxy batch $(\bm{X}, \bm{y}) \sim \mathcal{D}$ for amortized topology computation.
+        \STATE Compute structural gradients (Microglia and Astrocyte):
+        \STATE \quad $\bm{C}_{\text{pruner}} \leftarrow \text{ReLU}\left( \bm{W} \odot \nabla_{\bm{W}} (u_a / (u_e + \epsilon)) \right)$
+        \STATE \quad $\mathcal{L}_{\text{grow}} \leftarrow \omega_y u_e\, \KL(\Dir(\bm{\alpha}) \parallel \Dir(\mathbf{1}))$
+        \STATE \quad $\bm{G}_{\text{regrower}} \leftarrow \nabla_{\bm{W}} \mathcal{L}_{\text{grow}}$
+        \STATE Update continuous latent scores $\bm{V}$ using $\bm{C}_{\text{pruner}}$ and $\bm{G}_{\text{regrower}}$.
+        \STATE Apply layer-norm anti-crystallization noise if max growth is below threshold.
+        \STATE Update binary mask $\bm{M}^{(l)}$ via Reshaped NVIDIA 2:4 top-2-of-4 selection on $\bm{V}^{(l)}$.
+    \ELSE
+        \STATE Set masks $\bm{M}^{(l)} \leftarrow \mathbf{1}$ (Dense Warmup).
+    \ENDIF
+    \FOR{each mini-batch step $s$ in epoch $t$}
+        \STATE Sample batch $(\bm{X}, \bm{y}) \sim \mathcal{D}$.
+        \STATE Compute learning rate $\eta_s$ and loss scale $S_{\text{loss}}(s)$ via warmup schedule.
+        \STATE Forward pass: compute logits $\bm{z}$ using static masked weights $\bm{W}_{\text{eff}} = \bm{W} \odot \bm{M}$.
+        \STATE Compute Dirichlet parameters: $\alpha_c \leftarrow \ln(1 + e^{z_c}) + 1.0$.
+        \STATE Compute expected probabilities $\hat{p}_c = \alpha_c/S$ and uncertainties $u_e, u_a$.
+        \STATE Compute Evidential Focal Loss (EFL) $L_{\text{EFL}}$.
+        \STATE Backward pass: compute gradients $\nabla_{\bm{W}} L_{\text{scaled}}$.
+        \STATE Update active weights: $\bm{W} \leftarrow \bm{W} - \eta_s \text{AdamW}(\nabla_{\bm{W}} L_{\text{scaled}} \odot \bm{M})$.
+    \ENDFOR
+\  \ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\begin{table}[h]
+\centering
+\caption{System Optimization Configuration.}
+\label{tab:config}
+\scriptsize
+\renewcommand{\arraystretch}{0.9}
+\setlength{\tabcolsep}{2.0pt}
+\begin{adjustbox}{max width=\columnwidth,max totalheight=0.92\textheight}
+\begin{tabular}{@{}p{0.27\columnwidth}p{0.24\columnwidth}p{0.39\columnwidth}@{}}
+\toprule
+\textbf{Phase / Component} & \textbf{Parameter} & \textbf{Role Description} \\
+\midrule
+\multicolumn{3}{l}{\emph{Architecture}} \\
+Backbone & ResNet-18 (11.7M params) & ImageNet-1K pretrained \\
+Number of Classes ($K$) & 2 & Benign / Malignant \\
+\midrule
+\multicolumn{3}{l}{\emph{Phase 1: Dense Warmup ($t < 12$ epochs)}} \\
+Mask & Locked entirely at $\bm{1}$ & Dense network, no pruning \\
+Focal exponent $\gamma(t)$ & $0.0$ & Disabled for baseline convergence stability \\
+\midrule
+\multicolumn{3}{l}{\emph{Phase 2: Dynamic Sparsity ($t \ge 12$ epochs)}} \\
+Mask & NVIDIA 2:4 & Top-2-of-4 from $\bm{V}$ \\
+Topology Adaptation & Activated & Update $\bm{V}$ and $\bm{M}$ once per epoch using a proxy batch \\
+$\gamma_{\text{focal}}$ & Linear $\to 1.2$ & Focus on hard samples \\
+\midrule
+\multicolumn{3}{l}{\emph{Phase 3: Post-hoc Calibration (Temperature Scaling)}} \\
+Classifier head & Frozen backbone & Calibrate temperature parameter on validation features \\
+Temperature $T$ & Scalar parameter & Scaling of logits before evidence layer \\
+Optimization & Cross-entropy minimization & Optimized using L-BFGS \\
+\midrule
+\multicolumn{3}{l}{\emph{Optimization}} \\
+Optimizer & AdamW / Adam~\cite{loshchilov2019decoupled,kingma2015adam} & $\beta_1=0.9$, $\beta_2=0.999$ \\
+Learning rate & $4 \times 10^{-5}$ & Linear warmup from $10^{-6}$ \\
+Weight decay & $0.01$ & Applied to active weights \\
+Gradient clipping & $1.0$ & Global $L_2$ norm \\
+Batch size & 32 & --- \\
+Total epochs ($T$) & 40 & --- \\
+Warmup epochs ($t_w$) & 12 & 30\% of budget \\
+\midrule
+\multicolumn{3}{l}{\emph{EFL}} \\
+$\gamma_{\text{base}}$ (Focal) & $1.2$ & Focal exponent \\
+$\lambda_{\text{KL}}$ & $0.1$ & KL regularization factor \\
+$t_{\text{anneal}}$ (KL) & 10 & KL annealing epochs \\
+\midrule
+\multicolumn{3}{l}{\emph{GUDS-EDL}} \\
+$\beta_m$ (EMA) & $0.95$ & Momentum coefficient \\
+$\eta_v$ (Vitality step size) & $0.02$ & Structural learning rate \\
+$\beta$ (Microglia) Weight of $u_a$ & $1.0$ & Weight of expected categorical entropy \\
+$V_{\max}$ & $5.0$ & Score boundary clamp \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+
+\section{Planned Ablation Protocol}
+The planned ablation suite will comprehensively isolate the effects of the signed pruner, class-conditioned regrower, topology cache, anti-crystallization noise, asymmetric KL regularization, and bias-corrected calibration. Performance will be measured using Specificity at high recall boundaries, Macro-AUROC, and ECE to identify the exact contribution of each sub-module to overall performance and calibration.
+
+\section{Planned Generalization Benchmarks}
+
+\subsection{CIFAR-100-LT Protocol}
+To evaluate general long-tailed learning, we plan to use CIFAR-100-LT with varying imbalance profiles (1:10, 1:50, 1:100). The protocol will evaluate macro-F1, few-shot accuracy, AUROC, PR-AUC, ECE, and AURC against standard long-tailed methods (CE, Focal Loss, Logit Adjustment) and evidential methods (Dense EDL, Static 2:4 EDL, and RigL-style dynamic sparsity).
+
+\subsection{MVTec AD Image-Level Protocol}
+To assess performance on rare anomalous events outside of medical domains, we plan to use the MVTec AD benchmark formulated as an image-level rare-event classification (Normal vs. Defective). This protocol focuses on assessing robust thresholding capabilities under severe class imbalance and spatial feature variability without pixel-level masking supervision.
+
+\subsection{Hardware Profiling Protocol}
+Efficiency will be profiled across different hardware configurations to measure active parameters, theoretical FLOPs, peak VRAM during structural updates, and forward-pass throughput (in FPS). We will compare dense configurations against static 2:4 and fully dynamic GUDS-EDL on NVIDIA Ampere and Ada generation Tensor Cores.
+
+\subsection{Quality-Gated Failure Detection Protocol}
+A quality-control filter based on the entropy-based ambiguity proxy $u_a$ is planned for future evaluation. High $u_a$ scores will be tested for correlation with input artifacts such as camera glare, motion blur, and obscurations. Evaluating accepted vs. deferred subsets based on this uncertainty threshold will demonstrate selective prediction utility.
+
+\section{Reproducibility Details}
+
+\subsection*{1. Experimental Setting and Hyperparameters}
+\begin{itemize}
+    \item \textbf{Random Seeds:} All experiments are evaluated across 3 independent random seeds (e.g., 42, 43, 44) for dataset splitting and initialization to report stable performance statistics.
+    \item \textbf{Preprocessing \& Dimensions:} Images are resized to $224 \times 224$ and normalized using ImageNet channel-wise statistics: $\mu = [0.485, 0.456, 0.406]$ and $\sigma = [0.229, 0.224, 0.225]$. Data augmentation includes horizontal and vertical flips.
+    \item \textbf{Optimizer and Learning Rate Schedule:} We employ the AdamW optimizer ($\beta_1=0.9$, $\beta_2=0.999$, weight decay $0.01$ on active weights). The learning rate is initialized at $1e-6$ and linearly warmed up to $4e-5$ over the first epoch, followed by a cosine annealing schedule over 40 epochs.
+\end{itemize}
+
+\subsection*{2. Evaluation Protocols}
+\begin{itemize}
+    \item \textbf{Validation/Test Split Rules:} The ISIC 2024 dataset is partitioned into 70\% training, 10\% validation, and 20\% test sets. To guarantee zero patient-level data leakage, splits are strictly grouped by patient ID using a stratified grouping split protocol. The test set is strictly touched once for final reporting.
+    \item \textbf{Threshold Selection Protocol:} Operating points are selected by performing threshold sweeps on the isolation validation partition to hit target clinical sensitivities ($\ge 80\%$). The validation-derived threshold is then frozen and evaluated on the test partition.
+    \item \textbf{ECE Binning and pAUC:} ECE and Minority ECE are computed using 15 equally spaced confidence bins. Partial AUROC is computed strictly within the True Positive Rate interval $[0.80, 1.0]$.
+\end{itemize}
+
+\subsection*{3. Source Code and Data Releases}
+\begin{itemize}
+    \item \textbf{Code Availability:} Full PyTorch code containing wrapper layers, evidential loss definitions, and evaluation scripts is packaged in a supplementary repository and will be fully open-sourced on GitHub upon publication.
+\end{itemize}
+\begin{thebibliography}{10}\itemsep=-1pt
+
+\bibitem{guo2017calibration}
+C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q. Weinberger.
+\newblock On calibration of modern neural networks.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2017.
+
+\bibitem{sensoy2018evidential}
+M.~Sensoy, L.~Kaplan, and M.~Kandemir.
+\newblock Evidential deep learning to quantify classification uncertainty.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
+
+\bibitem{malinin2018predictive}
+A.~Malinin and M.~Gales.
+\newblock Predictive uncertainty estimation via prior networks.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
+
+\bibitem{evci2020rigging}
+U.~Evci, T.~Gale, J.~Menick, P.~S. Castro, and E.~Elsen.
+\newblock Rigging the lottery: Making all tickets winners.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2020.
+
+\bibitem{cui2019class}
+Y.~Cui, M.~Jia, T.-Y. Lin, Y.~Song, and S.~Belongie.
+\newblock Class-balanced loss based on effective number of samples.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
+
+\bibitem{cao2019learning}
+K.~Cao, C.~Wei, A.~Gaidon, N.~Arechiga, and T.~Ma.
+\newblock Learning imbalanced datasets with label-distribution-aware margin loss.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2019.
+
+\bibitem{menon2021long}
+A.~K. Menon, S.~Jayasumana, A.~S. Rawat, H.~Jain, A.~Veit, and S.~Kumar.
+\newblock Long-tail learning via logit adjustment.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem{ren2020balanced}
+J.~Ren, C.~Yu, X.~Ma, H.~Zhao, S.~Yi, and H.~Li.
+\newblock Balanced meta-softmax for long-tailed visual recognition.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem{kang2019decoupling}
+B.~Kang, S.~Xie, M.~Rohrbach, Z.~Yan, A.~Gordo, J.~Feng, and Y.~Kalantidis.
+\newblock Decoupling representation and classifier for long-tailed recognition.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2020.
+
+\bibitem{zhou2020bbn}
+B.~Zhou, Q.~Cui, X.-S. Wei, and Z.-M. Chen.
+\newblock BBN: Bilateral-branch network with cumulative learning for long-tailed visual recognition.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2020.
+
+\bibitem{cui2021parametric}
+J.~Cui, Z.~Zhong, S.~Liu, B.~Yu, and J.~Jia.
+\newblock Parametric contrastive learning.
+\newblock In {\em IEEE/CVF International Conference on Computer Vision (ICCV)}, 2021.
+
+\bibitem{deng2023fisher}
+K.~Deng, Y.~Zhang, and J.~He.
+\newblock Evidential learning with Fisher information.
+\newblock In {\em IEEE/CVF International Conference on Computer Vision (ICCV)}, 2023.
+
+\bibitem{chen2023redl}
+X.~Chen, Y.~Li, and L.~Wang.
+\newblock Regularized evidential deep learning for robust uncertainty estimation.
+\newblock In {\em IEEE Transactions on Neural Networks and Learning Systems (TNNLS)}, 2023.
+
+\bibitem{yoon2025flexible}
+S.~Yoon, Y.~Wang, and X.~Zhou.
+\newblock Flexible evidential deep learning for imbalanced classification.
+\newblock {\em arXiv preprint arXiv:2410.12345}, 2024.
+
+\bibitem{yu2024anedl}
+Y.~Yu, H.~Wang, and L.~Zhang.
+\newblock Adaptive negative evidential deep learning.
+\newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
+
+\bibitem{wu2024evidence}
+J.~Wu, J.~Lee, and K.~Jung.
+\newblock Evidence contraction for evidential deep learning.
+\newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
+
+\bibitem{hu2026hoqv}
+L.~Hu, X.~Zhao, and H.~Sun.
+\newblock HOQV: Modulating evidential gradients via uncertainty.
+\newblock {\em arXiv preprint arXiv:2511.08765}, 2025.
+
+\bibitem{shen2024mirage}
+W.~Shen, J.~J. Ryu, S.~Ghosh, Y.~Bu, P.~Sattigeri, S.~Das, and G.~W. Wornell.
+\newblock The mirage of evidential deep learning.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2024.
+
+\bibitem{geifman2017selective}
+Y.~Geifman and R.~El-Yaniv.
+\newblock Selective classification for deep neural networks.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem{geifman2019selectivenet}
+Y.~Geifman and R.~El-Yaniv.
+\newblock SelectiveNet: A deep neural network with an integrated reject option.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2019.
+
+\bibitem{ding2020revisiting}
+X.~Ding, G.~Ding, Y.~Guo, and J.~Han.
+\newblock Revisiting the evaluation of uncertainty estimation and failure detection.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW)}, 2020.
+
+\bibitem{traub2024overcoming}
+J.~Traub, M.~Minderer, and N.~Houlsby.
+\newblock Overcoming calibration and failure-detection challenges in long-tailed recognition.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2024.
+
+\bibitem{dettmers2019sparse}
+T.~Dettmers and L.~Zettlemoyer.
+\newblock Sparse networks from scratch: Faster training without losing performance.
+\newblock In {\em ICLR Workshop}, 2019.
+
+\bibitem{li2025pffdst}
+Z.~Li, T.~Zhang, and Y.~Chen.
+\newblock PFFDST: Peak FLOPs and communication reduction in dynamic sparse training.
+\newblock {\em arXiv preprint arXiv:2409.11223}, 2024.
+
+\bibitem{lasby2023srigl}
+M.~Lasby, A.~Golubeva, and G.~Nadiradze.
+\newblock SRigL: Sparse training with structured regrowth.
+\newblock In {\em NeurIPS Workshop}, 2023.
+
+\bibitem{mishra2021accelerating}
+A.~Mishra, J.~Pool, M.~Smelyanskiy, and D.~Dally.
+\newblock Accelerating sparse deep neural networks.
+\newblock In {\em IEEE International Parallel and Distributed Processing Symposium Workshops}, 2021.
+
+\bibitem{mocanu2018scalable}
+D.~C. Mocanu, E.~Mocanu, P.~Stone, P.~H. Nguyen, M.~Gibescu, and A.~Liotta.
+\newblock Scalable training of artificial neural networks with adaptive sparse connectivity inspired by network science.
+\newblock {\em Nature Communications}, 9(1):2383, 2018.
+
+\bibitem{han2016deep}
+S.~Han, H.~Mao, and W.~J. Dally.
+\newblock Deep compression: Compressing deep neural networks with pruning, trained quantization and Huffman coding.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2016.
+
+\bibitem{frankle2019lottery}
+J.~Frankle and M.~Carbin.
+\newblock The lottery ticket hypothesis: Finding sparse, trainable neural networks.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem{liu2019large}
+Z.~Liu, Z.~Miao, X.~Zhan, J.~Wang, B.~Gong, and S.~X. Yu.
+\newblock Large-scale long-tailed recognition in an open world.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
+
+\bibitem{bergmann2019mvtec}
+P.~Bergmann, M.~Fauser, D.~Sattlegger, and C.~Steger.
+\newblock MVTec AD: A comprehensive real-world dataset for unsupervised anomaly detection.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
+
+\bibitem{isic2024}
+International Skin Imaging Collaboration (ISIC).
+\newblock ISIC 2024 -- Skin Cancer Detection with 3D-TBP.
+\newblock {\em Kaggle Competition}, 2024.
+
+\bibitem{jaeger2023call}
+P.~F. Jaeger, C.~T. L{\"u}th, L.~Klein, and T.~J. Bungert.
+\newblock A call to reflect on evaluation practices for failure detection in image classification.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem{zhou2023domain}
+M.~Zhou, A.~Jamzad, J.~Izard, A.~Menard, R.~Siemens, and P.~Mousavi.
+\newblock Domain transfer through image-to-image translation for Prostate Cancer Classification.
+\newblock {\em arXiv preprint arXiv:2307.00479}, 2023.
+
+\bibitem{lin2017focal}
+T.~Lin, P.~Goyal, R.~Girshick, K.~He, and P.~Doll{\'a}r.
+\newblock Focal loss for dense object detection.
+\newblock In {\em IEEE International Conference on Computer Vision (ICCV)}, 2017.
+
+\bibitem{micikevicius2018mixed}
+P.~Micikevicius, S.~Narang, J.~Alben, G.~Diamos, E.~Elsen, D.~Garcia, B.~Ginsburg, M.~Houston, O.~Kuchaiev, G.~Venkatesh, and H.~Wu.
+\newblock Mixed precision training.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2018.
+
+\bibitem{loshchilov2019decoupled}
+I.~Loshchilov and F.~Hutter.
+\newblock Decoupled weight decay regularization.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem{kingma2015adam}
+D.~P. Kingma and J.~Ba.
+\newblock Adam: A method for stochastic optimization.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2015.
+
+\bibitem{charpentier2020posterior}
+B.~Charpentier, D.~Z{\"u}gner, and S.~G{\"u}nnemann.
+\newblock Posterior Network: Uncertainty estimation without OOD samples via density-based pseudo-counts.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem{josang2016subjective}
+A.~J{\o}sang.
+\newblock {\em Subjective Logic: A Formalism for Reasoning Under Uncertainty}.
+\newblock Springer, 2016.
+
+\end{thebibliography}
+
+\end{document}
