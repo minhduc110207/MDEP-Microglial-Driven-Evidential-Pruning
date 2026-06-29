@@ -539,6 +539,7 @@ def update_scores_agents(
             if use_anticryst and not disable_regrower and regrower_type not in {'gradient', 'random'}:
                 u_e_node = getattr(module, 'u_e_node', None)
                 if u_e_node is not None:
+                    u_e_node = u_e_node.to(w_val.device)  # FIX: Align device with weights for DataParallel
                     if isinstance(module, MDEPLinear):
                         g1 = u_e_node.unsqueeze(1).expand_as(w_val)
                     elif isinstance(module, MDEPConv2d):
