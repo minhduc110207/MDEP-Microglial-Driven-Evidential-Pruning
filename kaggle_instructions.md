@@ -21,18 +21,37 @@ Thí nghiệm được chia thành **5 script độc lập**, mỗi script chạ
 
 ## 🔧 Bước 1: Chuẩn bị Kaggle Notebook
 
-### 1.1 Clone mã nguồn
-Mở Terminal trong Kaggle Notebook và chạy:
-```bash
-!git clone https://github.com/minhduc110207/MDEP-Microglial-Driven-Evidential-Pruning.git
-%cd MDEP-Microglial-Driven-Evidential-Pruning
-```
+### 1.1 Setup Code Cell
+Chạy cell Python này ở đầu tiên trong Kaggle Notebook để tự động clone repository và cài đặt thư viện cần thiết. Đoạn code này cũng tự động cập nhật code mới (`git pull`) nếu bạn chạy lại nhiều lần:
 
-### 1.2 Cài thư viện bổ sung (nếu cần)
-```bash
-!pip install pandas scikit-learn
+```python
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_URL = "https://github.com/minhduc110207/MDEP-Microglial-Driven-Evidential-Pruning.git"
+REPO_DIR = Path("/kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning")
+
+def run(cmd, cwd=None):
+    cmd = list(map(str, cmd))
+    print("RUN:", " ".join(cmd))
+    subprocess.run(cmd, cwd=cwd, check=True)
+
+if REPO_DIR.exists():
+    run(["git", "pull", "--ff-only"], cwd=REPO_DIR)
+else:
+    run(["git", "clone", REPO_URL, str(REPO_DIR)])
+
+run([
+    sys.executable, "-m", "pip", "install", "-q",
+    "scikit-learn", "matplotlib", "pandas", "h5py", "tqdm", "scipy"
+])
+
+os.chdir(REPO_DIR)
+print("Repo:", REPO_DIR)
+run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_DIR)
 ```
-> `torch`, `torchvision`, `numpy` đã có sẵn trên Kaggle.
 
 ### 1.3 Add Data (liên kết bộ dữ liệu)
 Ở thanh bên phải Notebook → **Add Data**:
