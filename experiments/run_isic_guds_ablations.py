@@ -10,9 +10,10 @@ if __name__ == "__main__":
         "guds_no_posthoc_calibration"
     ]
     
-    # Check if --experiments is already passed
-    if not any(arg.startswith("--experiments") for arg in sys.argv):
-        sys.argv.extend(["--experiments"] + experiments)
+    # Inject --experiment flags if not already passed by user
+    if not any(arg.startswith("--experiment") for arg in sys.argv[1:]):
+        for exp in experiments:
+            sys.argv.extend(["--experiment", exp])
     
     print(f"Running ISIC GUDS-EDL Main and Ablations: {experiments}")
     main()
