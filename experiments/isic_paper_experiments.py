@@ -565,6 +565,7 @@ def optimize_thresholds(
     best_bal_acc = 0.0
     best_t_clinical = 0.5
     best_spec_at_sens80 = 0.0
+    found_sens80 = False
     p_min = float(probs[:, 1].min())
     p_max = float(probs[:, 1].max())
     if p_max - p_min < 1e-8:
@@ -694,6 +695,7 @@ def thresholds_from_probabilities(y_true: np.ndarray, probs: np.ndarray) -> dict
     best_bal_acc = 0.0
     best_t_clinical = 0.5
     best_spec_at_sens80 = 0.0
+    found_sens80 = False
     p_min = float(probs[:, 1].min())
     p_max = float(probs[:, 1].max())
     if p_max - p_min < 1e-8:
