@@ -43,6 +43,18 @@ import torchvision.models as models
 from sklearn.metrics import average_precision_score, balanced_accuracy_score, confusion_matrix, roc_auc_score
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+try:
+    from multi_gpu_utils import TransparentDataParallel
+except ImportError:
+    class TransparentDataParallel(nn.DataParallel):
+        def __getattr__(self, name):
+            try: return super().__getattr__(name)
+            except AttributeError: return getattr(self.module, name)
+        def __setattr__(self, name, value):
+            if name in ["module", "device_ids", "output_device", "dim", "_is_replica"]: super().__setattr__(name, value)
+            elif hasattr(self, "module") and hasattr(self.module, name): setattr(self.module, name, value)
+            else: super().__setattr__(name, value)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -1213,6 +1225,9 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     if spec.sparse:
         replace_conv2d_with_mdep(model)
     model = model.to(device)
+    if torch.cuda.device_count() > 1 and not args.cpu:
+        print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
+        model = TransparentDataParallel(model)
 
     if spec.use_mdep_trainer:
         history = train_guds(

@@ -60,7 +60,7 @@ run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_DIR)
 - **MVTec AD:** Tìm `mvtec-ad` hoặc upload bộ chuẩn
 
 ### 1.4 Cấu hình phần cứng
-- Accelerator: **GPU P100** hoặc **T4 x2**
+- Accelerator: **GPU T4 x2** (Khuyên dùng - code đã được trang bị `TransparentDataParallel` để tự động chạy song song 2 GPU giúp x2 tốc độ) hoặc **GPU P100**.
 - Persistence: **Bật** (để không mất output khi session timeout)
 
 ---

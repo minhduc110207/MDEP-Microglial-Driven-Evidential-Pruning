@@ -17,6 +17,19 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+
+try:
+    from multi_gpu_utils import TransparentDataParallel
+except ImportError:
+    class TransparentDataParallel(nn.DataParallel):
+        def __getattr__(self, name):
+            try: return super().__getattr__(name)
+            except AttributeError: return getattr(self.module, name)
+        def __setattr__(self, name, value):
+            if name in ["module", "device_ids", "output_device", "dim", "_is_replica"]: super().__setattr__(name, value)
+            elif hasattr(self, "module") and hasattr(self.module, name): setattr(self.module, name, value)
+            else: super().__setattr__(name, value)
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
@@ -433,6 +446,9 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     if spec.sparse:
         replace_conv2d_with_mdep(model)
     model = model.to(device)
+    if torch.cuda.device_count() > 1 and not args.cpu:
+        print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
+        model = TransparentDataParallel(model)
 
     lr = args.lr
     if lr is None:
