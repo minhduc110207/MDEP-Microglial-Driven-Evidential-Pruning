@@ -565,8 +565,14 @@ def optimize_thresholds(
     best_bal_acc = 0.0
     best_t_clinical = 0.5
     best_spec_at_sens80 = 0.0
-    found_sens80 = False
-    for threshold in np.linspace(0.01, 0.99, 199):
+    p_min = float(probs[:, 1].min())
+    p_max = float(probs[:, 1].max())
+    if p_max - p_min < 1e-8:
+        search_space = np.linspace(0.01, 0.99, 199)
+    else:
+        search_space = np.linspace(p_min, p_max, 199)
+        
+    for threshold in search_space:
         y_pred = (probs[:, 1] >= threshold).astype(int)
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
         sens = tp / (tp + fn + 1e-8)
@@ -688,8 +694,14 @@ def thresholds_from_probabilities(y_true: np.ndarray, probs: np.ndarray) -> dict
     best_bal_acc = 0.0
     best_t_clinical = 0.5
     best_spec_at_sens80 = 0.0
-    found_sens80 = False
-    for threshold in np.linspace(0.01, 0.99, 199):
+    p_min = float(probs[:, 1].min())
+    p_max = float(probs[:, 1].max())
+    if p_max - p_min < 1e-8:
+        search_space = np.linspace(0.01, 0.99, 199)
+    else:
+        search_space = np.linspace(p_min, p_max, 199)
+        
+    for threshold in search_space:
         y_pred = (probs[:, 1] >= threshold).astype(int)
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
         sens = tp / (tp + fn + 1e-8)
