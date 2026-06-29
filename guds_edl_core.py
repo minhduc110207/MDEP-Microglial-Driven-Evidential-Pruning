@@ -323,8 +323,8 @@ def valid_2_4_block_stats(mask):
 
 
 class MDEPLinear(nn.Linear):
-    """Drop-in replacement for nn.Linear with MDEP dynamic sparsity and learned permutation."""
-    def __init__(self, in_features, out_features, bias=True):
+    """Drop-in replacement for nn.Linear with MDEP dynamic sparsity."""
+    def __init__(self, in_features, out_features, bias=True, learn_permutation=False):
         super(MDEPLinear, self).__init__(in_features, out_features, bias)
         self.scores = nn.Parameter(torch.abs(self.weight.data).clone())
         self.register_buffer('mask', torch.ones_like(self.weight))
@@ -332,9 +332,12 @@ class MDEPLinear(nn.Linear):
         self.gamma = 1.0
         self.warmup = True
         
-        # PA-DST permutation parameters
-        self.perm_logits = nn.Parameter(torch.eye(in_features) * 5.0 + torch.randn(in_features, in_features) * 0.01)
-        self.register_buffer('freeze_perm', torch.tensor([0], dtype=torch.uint8))
+        # Channel ordering is optional. The paper configuration keeps a static
+        # identity ordering so pretrained features are not mixed during warmup.
+        self.learn_permutation = bool(learn_permutation)
+        self.perm_logits = nn.Parameter(torch.eye(in_features) * 12.0 + torch.randn(in_features, in_features) * 0.01)
+        self.perm_logits.requires_grad_(self.learn_permutation)
+        self.register_buffer('freeze_perm', torch.tensor([0 if self.learn_permutation else 1], dtype=torch.uint8))
         self.register_buffer('perm_indices', torch.arange(in_features, dtype=torch.long))
 
     def get_doubly_stochastic_matrix(self):
@@ -342,6 +345,8 @@ class MDEPLinear(nn.Linear):
 
     @torch.no_grad()
     def freeze_permutation(self):
+        if self.freeze_perm[0] == 1:
+            return
         M = self.get_doubly_stochastic_matrix()
         try:
             from scipy.optimize import linear_sum_assignment
@@ -361,6 +366,7 @@ class MDEPLinear(nn.Linear):
             perm_indices = perm_indices.to(self.weight.device)
         self.perm_indices.copy_(perm_indices)
         self.freeze_perm[0] = 1
+        self.perm_logits.requires_grad_(False)
 
     def forward(self, x):
         # Apply permutation
@@ -386,9 +392,9 @@ class MDEPLinear(nn.Linear):
 
 
 class MDEPConv2d(nn.Conv2d):
-    """Drop-in replacement for nn.Conv2d with MDEP dynamic sparsity and learned permutation."""
+    """Drop-in replacement for nn.Conv2d with MDEP dynamic sparsity."""
     def __init__(self, in_channels, out_channels, kernel_size,
-                 stride=1, padding=0, dilation=1, groups=1, bias=True):
+                 stride=1, padding=0, dilation=1, groups=1, bias=True, learn_permutation=False):
         super(MDEPConv2d, self).__init__(
             in_channels, out_channels, kernel_size,
             stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias,
@@ -399,9 +405,12 @@ class MDEPConv2d(nn.Conv2d):
         self.gamma = 1.0
         self.warmup = True
         
-        # PA-DST permutation parameters
-        self.perm_logits = nn.Parameter(torch.eye(in_channels) * 5.0 + torch.randn(in_channels, in_channels) * 0.01)
-        self.register_buffer('freeze_perm', torch.tensor([0], dtype=torch.uint8))
+        # Channel ordering is optional. The paper configuration keeps a static
+        # identity ordering so pretrained features are not mixed during warmup.
+        self.learn_permutation = bool(learn_permutation)
+        self.perm_logits = nn.Parameter(torch.eye(in_channels) * 12.0 + torch.randn(in_channels, in_channels) * 0.01)
+        self.perm_logits.requires_grad_(self.learn_permutation)
+        self.register_buffer('freeze_perm', torch.tensor([0 if self.learn_permutation else 1], dtype=torch.uint8))
         self.register_buffer('perm_indices', torch.arange(in_channels, dtype=torch.long))
 
     def get_doubly_stochastic_matrix(self):
@@ -409,6 +418,8 @@ class MDEPConv2d(nn.Conv2d):
 
     @torch.no_grad()
     def freeze_permutation(self):
+        if self.freeze_perm[0] == 1:
+            return
         M = self.get_doubly_stochastic_matrix()
         try:
             from scipy.optimize import linear_sum_assignment
@@ -428,6 +439,7 @@ class MDEPConv2d(nn.Conv2d):
             perm_indices = perm_indices.to(self.weight.device)
         self.perm_indices.copy_(perm_indices)
         self.freeze_perm[0] = 1
+        self.perm_logits.requires_grad_(False)
 
     def forward(self, x):
         # Apply permutation
@@ -913,10 +925,14 @@ class MDEPTrainer:
 
         # Freezing permutations when transition to sparsity happens
         if epoch == self.warmup_epochs:
+            learned_perm_count = 0
             print("❄️ Freezing learned permutations into hard index maps...")
             for module in self.model.modules():
                 if hasattr(module, 'freeze_permutation'):
+                    if getattr(module, 'freeze_perm', None) is not None and module.freeze_perm[0] == 0:
+                        learned_perm_count += 1
                     module.freeze_permutation()
+            print(f"MDEP channel permutations are frozen/static; learned maps frozen this epoch: {learned_perm_count}")
             print("Syncing MDEP scores to dense-warmup weights...")
             self.sync_scores_to_current_weights()
 
@@ -1355,7 +1371,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     return train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train
 
 
-def replace_conv2d_with_mdep(model):
+def replace_conv2d_with_mdep(model, learn_permutation=False):
     """Recursively swap nn.Conv2d / nn.Linear → MDEPConv2d / MDEPLinear."""
     for name, module in model.named_children():
         if isinstance(module, nn.Conv2d):
@@ -1367,6 +1383,7 @@ def replace_conv2d_with_mdep(model):
                 stride=module.stride, padding=module.padding,
                 dilation=module.dilation, groups=module.groups,
                 bias=(module.bias is not None),
+                learn_permutation=learn_permutation,
             )
             new.weight.data.copy_(module.weight.data)
             new.scores.data.copy_(torch.abs(module.weight.data))
@@ -1377,6 +1394,7 @@ def replace_conv2d_with_mdep(model):
             new = MDEPLinear(
                 module.in_features, module.out_features,
                 bias=(module.bias is not None),
+                learn_permutation=learn_permutation,
             )
             new.weight.data.copy_(module.weight.data)
             new.scores.data.copy_(torch.abs(module.weight.data))
@@ -1384,7 +1402,7 @@ def replace_conv2d_with_mdep(model):
                 new.bias.data.copy_(module.bias.data)
             setattr(model, name, new)
         else:
-            replace_conv2d_with_mdep(module)
+            replace_conv2d_with_mdep(module, learn_permutation=learn_permutation)
 
 
 # ============================================================================

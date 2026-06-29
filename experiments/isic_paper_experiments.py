@@ -1236,11 +1236,18 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         pretrained=not args.no_pretrained,
     )
     if spec.sparse:
-        replace_conv2d_with_mdep(model.backbone)
+        replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
+        print("[INFO] MDEP sparse mode: backbone convs only, dense classifier head, frozen identity channel order.")
     model = model.to(device)
     if torch.cuda.device_count() > 1 and not args.cpu:
-        print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
-        model = TransparentDataParallel(model)
+        if spec.sparse:
+            print(
+                f"[INFO] Detected {torch.cuda.device_count()} GPUs; running sparse MDEP/GUDS on single GPU "
+                "so cached masks and effective-weight structural gradients stay on the original modules."
+            )
+        else:
+            print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
+            model = TransparentDataParallel(model)
 
     if spec.use_mdep_trainer:
         history = train_guds(
