@@ -130,13 +130,6 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="Dense ResNet-18 trained with focal loss.",
         loss_name="focal",
     ),
-    "logit_adjustment": ExperimentSpec(
-        name="logit_adjustment",
-        family="long_tailed_baseline",
-        description="Dense ResNet-18 trained with logit-adjusted cross-entropy.",
-        loss_name="ce",
-        logit_adjustment_train=True,
-    ),
     "class_balanced_ce": ExperimentSpec(
         name="class_balanced_ce",
         family="long_tailed_baseline",

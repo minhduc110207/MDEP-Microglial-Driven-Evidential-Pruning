@@ -3,7 +3,7 @@ from isic_paper_experiments import main
 
 if __name__ == "__main__":
     experiments = [
-        "standard_ce", "focal_loss", "logit_adjustment", 
+        "standard_ce", "focal_loss", 
         "class_balanced_ce", "balanced_softmax", "ldam_drw", 
         "decoupled_crt", "mislas"
     ]
