@@ -100,7 +100,7 @@ Chạy 6 phương pháp Evidential Deep Learning:
 ### Notebook 3 — GUDS-EDL + Ablations (ISIC)
 
 Chạy mô hình chính và 10 ablation studies:
-`full_guds` · `w/o Pruner` · `w/o Regrower` · `Asymmetric KL` · `w/o EFL` · `w/o Anti-Cryst` · `Absolute Pruner` · `Class-Conditioned Regrower` · `w/o Topology Cache` · `Temperature Only` · `No Calibration`
+`full_guds` · `guds_without_pruner` · `guds_without_regrower` · `guds_asymmetric_kl` · `guds_without_efl` · `guds_without_anticryst` · `guds_absolute_pruner` · `guds_class_conditioned_regrower` · `guds_without_topology_cache` · `guds_temperature_only` · `guds_no_posthoc_calibration`
 
 ```python
 !python experiments/run_isic_guds_ablations.py \
