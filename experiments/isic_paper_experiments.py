@@ -1373,11 +1373,11 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "seed": seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
-        "temperature": temperature,
-        "bias": bias,
-        "calibration_bias": bias,
-        "evaluation_bias": eval_bias,
-        "prior_delta": prior_delta,
+        "temperature": float(temperature),
+        "bias": bias.tolist() if bias is not None else None,
+        "calibration_bias": bias.tolist() if bias is not None else None,
+        "evaluation_bias": eval_bias.tolist() if isinstance(eval_bias, torch.Tensor) else None,
+        "prior_delta": prior_delta.tolist() if isinstance(prior_delta, torch.Tensor) else None,
         "thresholds": thresholds,
         "p_true": p_true,
         "p_train": p_train,
@@ -1392,6 +1392,17 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         torch.save(model.state_dict(), run_dir / "model_state.pth")
     print(f"[DONE] Saved metrics and model state to {run_dir}")
     print_metrics_table(spec.name, metrics)
+    
+    # Explicitly clear memory to prevent Kaggle RAM accumulation
+    del model
+    del train_loader, val_loader, cal_loader, test_loader
+    if 'outputs' in locals():
+        del outputs
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
     return result
 
 
