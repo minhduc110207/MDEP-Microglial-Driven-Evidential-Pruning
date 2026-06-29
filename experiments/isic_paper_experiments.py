@@ -224,6 +224,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL without uncertainty-guided pruning.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         disable_pruner=True,
     ),
     "guds_without_regrower": ExperimentSpec(
@@ -232,6 +236,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL without evidence-seeking regrowth.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         disable_regrower=True,
     ),
     "guds_asymmetric_kl": ExperimentSpec(
@@ -251,6 +259,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL without Evidential Focal Loss modulation.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         disable_efl=True,
     ),
     "guds_without_anticryst": ExperimentSpec(
@@ -259,6 +271,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL without anti-crystallization noise.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         disable_anticryst=True,
     ),
     "guds_absolute_pruner": ExperimentSpec(
@@ -267,7 +283,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL with absolute-gradient pruning instead of signed pruning.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
         pruner_type="absolute_grad",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
     ),
     "guds_class_conditioned_regrower": ExperimentSpec(
         name="guds_class_conditioned_regrower",
@@ -286,6 +305,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL without amortized topology caching; structural signals are recomputed per batch.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         disable_topology_cache=True,
     ),
     "guds_temperature_only": ExperimentSpec(
@@ -294,6 +317,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL calibrated with scalar temperature only, without bias correction.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         calibration_mode="temperature_only",
     ),
     "guds_no_posthoc_calibration": ExperimentSpec(
@@ -302,6 +329,10 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         description="GUDS-EDL evaluated without post-hoc temperature or bias calibration.",
         sparse=True,
         use_mdep_trainer=True,
+        loss_name="edl",
+        pruner_type="signed_first_order",
+        regrower_type="kl_uniform",
+        kl_scaling="symmetric",
         calibration_mode="none",
     ),
 }
@@ -923,12 +954,15 @@ def ce_or_focal_loss(
 ) -> torch.Tensor:
     adjusted = logits
     if spec.logit_adjustment_train:
-        delta = torch.tensor(
-            [math.log(p_true[c] + 1e-8) - math.log(p_train[c] + 1e-8) for c in range(logits.shape[1])],
+        # Menon et al. (ICLR 2021): adjusted = logits + tau * log(pi_train)
+        # where pi_train is the class prior from the training distribution.
+        # tau = 1.0 for Fisher-consistent balanced-error minimisation.
+        log_prior = torch.tensor(
+            [math.log(max(p, 1e-8)) for p in p_train],
             dtype=logits.dtype,
             device=logits.device,
         )
-        adjusted = logits + delta
+        adjusted = logits + log_prior
 
     if spec.loss_name == "ce":
         return F.cross_entropy(adjusted, targets)
@@ -1183,6 +1217,22 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         )
 
     quality_metrics = {}
+
+    # Models that already compensate for class imbalance during training
+    # (logit_adjustment, balanced_softmax, cRT, MiSLAS) produce prior-free
+    # logits. Passing the skewed p_train to calibration would apply the
+    # prior correction a second time (double-adjustment). We neutralise this
+    # by telling the calibrator that training was uniform.
+    prior_corrected = (
+        spec.logit_adjustment_train
+        or spec.loss_name == "balanced_softmax"
+        or spec.classifier_retrain
+    )
+    effective_p_train = p_train
+    if prior_corrected:
+        K = len(p_train)
+        effective_p_train = [1.0 / K] * K
+
     if uses_softmax_evaluation(spec):
         temperature, bias, thresholds, prior_delta = run_softmax_calibration(
             model,
@@ -1191,7 +1241,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             device,
             spec.calibration_mode,
             p_true,
-            p_train,
+            effective_p_train,
         )
         eval_bias = prior_delta / max(temperature, 1e-8)
         if bias is not None:
