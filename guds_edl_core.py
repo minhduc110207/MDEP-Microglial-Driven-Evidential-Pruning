@@ -1116,7 +1116,7 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, subsample_scope="all", seed=42, allow_dummy_data=False):
+def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, subsample_scope="train", seed=42, allow_dummy_data=False):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
     Uses stratified splitting to create train, val, cal, and test sets.
