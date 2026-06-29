@@ -1224,6 +1224,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         batch_size=args.batch_size,
         test_ratio=args.test_ratio,
         subsample_ratio=args.subsample_ratio,
+        subsample_scope=args.subsample_scope,
         seed=seed,
         allow_dummy_data=args.allow_dummy_data,
     )
@@ -1430,6 +1431,7 @@ def main() -> int:
     parser.add_argument("--seeds", type=int, nargs="+", help="Run all selected experiments for these seeds.")
     parser.add_argument("--test_ratio", type=float, default=0.20)
     parser.add_argument("--subsample_ratio", type=int, default=20)
+    parser.add_argument("--subsample_scope", choices=["all", "train"], default="all", help="Apply ISIC majority-class subsampling before patient split or to train only.")
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--no_save_model", action="store_true")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")

@@ -77,6 +77,7 @@ Chạy 8 phương pháp long-tailed truyền thống:
     --epochs 40 \
     --batch_size 32 \
     --lr 4e-5 \
+    --subsample_scope all \
     --seeds 42 123 456
 ```
 
@@ -92,6 +93,7 @@ Chạy 6 phương pháp Evidential Deep Learning:
     --epochs 40 \
     --batch_size 32 \
     --lr 4e-5 \
+    --subsample_scope all \
     --seeds 42 123 456
 ```
 
@@ -107,6 +109,7 @@ Chạy mô hình chính và 10 ablation studies:
     --epochs 40 \
     --batch_size 32 \
     --lr 4e-5 \
+    --subsample_scope all \
     --seeds 42 123 456
 ```
 

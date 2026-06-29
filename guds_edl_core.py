@@ -1100,7 +1100,7 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, seed=42, allow_dummy_data=False):
+def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, subsample_scope="all", seed=42, allow_dummy_data=False):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
     Uses stratified splitting to create train, val, cal, and test sets.
@@ -1229,6 +1229,9 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
                 p_true,
                 p_train)
 
+    if subsample_scope not in {"all", "train"}:
+        raise ValueError("subsample_scope must be either 'all' or 'train'")
+
     df = pd.read_csv(csv_path)
     print(f"📊 Loaded CSV with {len(df)} rows, columns: {list(df.columns[:5])}")
     
@@ -1246,9 +1249,26 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     if os.path.isdir(dataset_root):
         print(f"📂 Dataset contents: {os.listdir(dataset_root)}")
     
+    def _subsample_majority(frame, split_name, random_state):
+        if subsample_ratio is None or subsample_ratio <= 0:
+            return frame.reset_index(drop=True)
+        malignant = frame[frame['target'] == 1]
+        benign = frame[frame['target'] == 0]
+        num_malignant = len(malignant)
+        if num_malignant == 0:
+            print(f"Subsample skipped for {split_name}: no malignant samples.")
+            return frame.reset_index(drop=True)
+        num_benign = min(len(benign), num_malignant * subsample_ratio)
+        benign_sampled = benign.sample(n=num_benign, random_state=random_state)
+        sampled = pd.concat([malignant, benign_sampled]).sample(frac=1.0, random_state=random_state)
+        print(f"Subsampled {split_name}: {num_malignant} malignant, {len(benign_sampled)} benign.")
+        return sampled.reset_index(drop=True)
+
     # Ensure patient_id exists and has no NaNs
     if 'patient_id' in df.columns:
         df = df.dropna(subset=['patient_id']).reset_index(drop=True)
+        if subsample_scope == "all":
+            df = _subsample_majority(df, "full dataset before patient split", seed)
         
         # Group by patient_id and get the max target for each patient to preserve class balance
         patient_df = df.groupby('patient_id')['target'].max().reset_index()
@@ -1274,6 +1294,9 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         cal_df = df[df['patient_id'].isin(cal_patients['patient_id'])].reset_index(drop=True)
         test_df = df[df['patient_id'].isin(test_patients['patient_id'])].reset_index(drop=True)
     else:
+        if subsample_scope == "all":
+            df = _subsample_majority(df, "full dataset before split", seed)
+
         # Fallback if patient_id doesn't exist
         train_df, test_df = train_test_split(
             df, test_size=test_ratio, stratify=df['target'], random_state=seed
@@ -1291,7 +1314,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     p_true = [class_counts_true.get(c, 0) / total_true for c in range(num_classes)]
 
     # Subsample benign class to match malignant class * subsample_ratio
-    if subsample_ratio is not None and subsample_ratio > 0:
+    if subsample_scope == "train" and subsample_ratio is not None and subsample_ratio > 0:
         train_malignant = train_df[train_df['target'] == 1]
         train_benign = train_df[train_df['target'] == 0]
         num_train_malignant = len(train_malignant)
