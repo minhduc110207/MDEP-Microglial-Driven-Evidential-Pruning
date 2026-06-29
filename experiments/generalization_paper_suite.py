@@ -84,7 +84,6 @@ from experiments.mvtec_ad_runner import get_mvtec_ad_classification_dataloaders 
 PLANNED_EXPERIMENTS = [
     "standard_ce",
     "focal_loss",
-    "logit_adjustment",
     "class_balanced_ce",
     "balanced_softmax",
     "ldam_drw",

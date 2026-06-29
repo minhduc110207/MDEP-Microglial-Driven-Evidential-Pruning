@@ -366,7 +366,6 @@ SUITES: dict[str, list[str]] = {
     "baselines": [
         "standard_ce",
         "focal_loss",
-        "logit_adjustment",
         "class_balanced_ce",
         "balanced_softmax",
         "ldam_drw",
