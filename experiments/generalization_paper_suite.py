@@ -17,21 +17,26 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     from multi_gpu_utils import TransparentDataParallel
 except ImportError:
     class TransparentDataParallel(nn.DataParallel):
         def __getattr__(self, name):
-            try: return super().__getattr__(name)
-            except AttributeError: return getattr(self.module, name)
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.module, name)
+
         def __setattr__(self, name, value):
-            if name in ["module", "device_ids", "output_device", "dim", "_is_replica"]: super().__setattr__(name, value)
-            elif hasattr(self, "module") and hasattr(self.module, name): setattr(self.module, name, value)
-            else: super().__setattr__(name, value)
-import torch.nn as nn
-import torch.nn.functional as F
+            if name in ["module", "device_ids", "output_device", "dim", "_is_replica"]:
+                super().__setattr__(name, value)
+            elif hasattr(self, "module") and hasattr(self.module, name):
+                setattr(self.module, name, value)
+            else:
+                super().__setattr__(name, value)
 import torchvision.models as models
 from sklearn.metrics import (
     accuracy_score,

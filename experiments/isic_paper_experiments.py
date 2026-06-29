@@ -32,7 +32,6 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -49,12 +48,18 @@ try:
 except ImportError:
     class TransparentDataParallel(nn.DataParallel):
         def __getattr__(self, name):
-            try: return super().__getattr__(name)
-            except AttributeError: return getattr(self.module, name)
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.module, name)
+
         def __setattr__(self, name, value):
-            if name in ["module", "device_ids", "output_device", "dim", "_is_replica"]: super().__setattr__(name, value)
-            elif hasattr(self, "module") and hasattr(self.module, name): setattr(self.module, name, value)
-            else: super().__setattr__(name, value)
+            if name in ["module", "device_ids", "output_device", "dim", "_is_replica"]:
+                super().__setattr__(name, value)
+            elif hasattr(self, "module") and hasattr(self.module, name):
+                setattr(self.module, name, value)
+            else:
+                super().__setattr__(name, value)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

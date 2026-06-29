@@ -44,8 +44,8 @@ except ImportError:
 from torch.utils.data import DataLoader, TensorDataset, Dataset, Subset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
-    balanced_accuracy_score, roc_auc_score, average_precision_score,
-    confusion_matrix, brier_score_loss, f1_score, precision_recall_curve, auc
+    average_precision_score,
+    confusion_matrix, f1_score, precision_recall_curve, auc
 )
 #  SECTION 1 — EDL Core (Evidential Deep Learning foundations)
 # ============================================================================
@@ -748,14 +748,7 @@ class MDEPTrainer:
             mag_ua = torch.abs(w_val * grad_microglia)
             mag_L = torch.abs(grad_astrocyte)
             
-            # Min-Max Normalization (Strategy 1)
-            mag_ua_min = mag_ua.min()
-            mag_ua_max = mag_ua.max()
-            mag_ua_norm = (mag_ua - mag_ua_min) / (mag_ua_max - mag_ua_min + 1e-8)
-            
-            mag_L_min = mag_L.min()
-            mag_L_max = mag_L.max()
-            mag_L_norm = (mag_L - mag_L_min) / (mag_L_max - mag_L_min + 1e-8)
+            # Extracted magnitudes
             
             # Print raw statistics
             print(f"Layer: {name}")
@@ -824,7 +817,7 @@ class MDEPTrainer:
         outputs = self.model(inputs)
         uncertainties = compute_uncertainties(outputs)
 
-        u_a = torch.mean(uncertainties['aleatoric'])
+        # Extracted epistemic uncertainties
         u_e = torch.mean(uncertainties['epistemic'])
 
         # 1. Microglia Agent (Relative Entropy Gradient)
@@ -926,7 +919,6 @@ class MDEPTrainer:
         ema_loss = None
         ema_grad = None
         num_batches = len(dataloader)
-        epoch_start = time.time()
 
         disable_topology_cache = getattr(self.args, 'disable_topology_cache', False) if self.args else False
 
@@ -1020,7 +1012,7 @@ class MDEPTrainer:
                 pruner_type = getattr(self.args, 'pruner_type', 'signed_first_order') if self.args else 'signed_first_order'
                 use_anticryst = getattr(self.args, 'use_anticryst', True) if self.args else True
                 
-                mask_flop_rate = update_scores_agents(
+                update_scores_agents(
                     self.model, epoch=epoch if batch_idx == 0 else None,
                     disable_pruner=disable_pruner,
                     disable_regrower=disable_regrower,
@@ -1182,7 +1174,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         print(f"📂 CSV path:   {csv_path}")
         print(f"📂 Image dir:  {image_dir}")
     else:
-        print(f"❌ train-metadata.csv not found in any search directories.")
+        print("❌ train-metadata.csv not found in any search directories.")
 
     train_tf = transforms.Compose([
         transforms.Resize((224, 224)),
