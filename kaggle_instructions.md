@@ -101,7 +101,7 @@ The all-in-one launcher defaults to:
 
 - ISIC `--isic_suite all`
 - CIFAR ratios `10 50 100`
-- seeds `42 43 44` unless `--smoke` is used
+- seeds `42 123 456` unless `--smoke` is used
 - CIFAR full planned suite when no `--experiment` is selected
 
 That is a very large workload. Use focused commands first, then expand.
@@ -166,7 +166,7 @@ matters.
     --batch_size 32 \
     --lr 4e-5 \
     --subsample_scope train \
-    --seeds 42 43 44 \
+    --seeds 42 123 456 \
     --no_save_model
 ```
 
@@ -178,7 +178,7 @@ matters.
     --batch_size 32 \
     --lr 4e-5 \
     --subsample_scope train \
-    --seeds 42 43 44 \
+    --seeds 42 123 456 \
     --no_save_model
 ```
 
@@ -190,7 +190,7 @@ matters.
     --batch_size 32 \
     --lr 4e-5 \
     --subsample_scope train \
-    --seeds 42 43 44 \
+    --seeds 42 123 456 \
     --no_save_model
 ```
 
@@ -207,16 +207,16 @@ Run one imbalance ratio per notebook. If you only need selected methods, repeat
     --experiment dense_edl \
     --epochs 100 \
     --batch_size 128 \
-    --seeds 42 43 44
+    --seeds 42 123 456
 ```
 
 Full CIFAR sweeps are expensive because each command runs every planned model
 when `--experiment` is omitted:
 
 ```python
-!python -u experiments/run_cifar_suite.py --ratio 100 --epochs 100 --batch_size 128 --seeds 42 43 44
-!python -u experiments/run_cifar_suite.py --ratio 50 --epochs 100 --batch_size 128 --seeds 42 43 44
-!python -u experiments/run_cifar_suite.py --ratio 10 --epochs 100 --batch_size 128 --seeds 42 43 44
+!python -u experiments/run_cifar_suite.py --ratio 100 --epochs 100 --batch_size 128 --seeds 42 123 456
+!python -u experiments/run_cifar_suite.py --ratio 50 --epochs 100 --batch_size 128 --seeds 42 123 456
+!python -u experiments/run_cifar_suite.py --ratio 10 --epochs 100 --batch_size 128 --seeds 42 123 456
 ```
 
 ## 7. Why Seed 42 Can Look Slow
@@ -343,7 +343,7 @@ python experiments/run_local_full_experiments.py `
     --epochs 40 `
     --cifar_epochs 100 `
     --batch_size 32 `
-    --seeds 42 43 44 `
+    --seeds 42 123 456 `
     --no_save_model `
     --keep_going `
     --wandb_mode offline `

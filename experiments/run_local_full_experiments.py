@@ -420,7 +420,7 @@ def main() -> int:
     parser.add_argument("--cifar_epochs", type=int, default=100)
     parser.add_argument("--backbone_epochs", type=int, default=40)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 456])
     parser.add_argument("--cifar_ratios", type=int, nargs="+", default=[10, 50, 100], choices=[10, 50, 100])
     parser.add_argument("--hardware_iters", type=int, default=50)
     parser.add_argument("--hardware_warmup", type=int, default=10)
