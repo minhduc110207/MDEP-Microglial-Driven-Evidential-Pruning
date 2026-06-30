@@ -82,6 +82,7 @@ from experiments.mvtec_ad_runner import get_mvtec_ad_classification_dataloaders 
 
 
 PLANNED_EXPERIMENTS = [
+    "full_guds",
     "standard_ce",
     "focal_loss",
     "class_balanced_ce",
@@ -95,7 +96,6 @@ PLANNED_EXPERIMENTS = [
     "r_edl",
     "static_24_edl",
     "rigl_style_24",
-    "full_guds",
 ]
 
 
@@ -450,9 +450,12 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     if spec.sparse:
         replace_conv2d_with_mdep(model)
     model = model.to(device)
-    if torch.cuda.device_count() > 1 and not args.cpu:
-        print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
-        model = TransparentDataParallel(model)
+    if False:  # Forced to single GPU execution
+        if benchmark == "cifar":
+            print(f"[INFO] Detected {torch.cuda.device_count()} GPUs, but using 1 GPU for CIFAR to avoid DataParallel overhead.")
+        else:
+            print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
+            model = TransparentDataParallel(model)
 
     lr = args.lr
     if lr is None:

@@ -233,3 +233,97 @@ Toàn bộ thí nghiệm đã được kiểm chứng (commit `2760f4d`):
 3. **Không Double-Adjustment:** Các model đã tự bù prior (LA, Balanced Softmax, cRT, MiSLAS) được truyền `p_train = uniform` khi calibrate
 4. **Ablation đơn biến:** Mỗi ablation chỉ thay đổi chính xác 1 component so với `full_guds`
 5. **Gradient clipping:** `clip_grad_norm_(max_norm=1.0)` cho toàn bộ model
+
+---
+
+## 💻 Bước 4: Hướng dẫn Chạy Local (Trên máy cá nhân)
+
+Nếu bạn muốn chạy các thí nghiệm này trên máy tính cá nhân (Local) thay vì Kaggle, dưới đây là cách thiết lập. Đặc biệt dành cho hệ điều hành Windows.
+
+### 4.1 Cài đặt môi trường
+Mở Terminal (PowerShell hoặc CMD) trong thư mục dự án và chạy:
+```powershell
+pip install scikit-learn matplotlib pandas h5py tqdm scipy torch torchvision
+```
+*(Nếu bạn dùng bộ dữ liệu ISIC gốc thay vì dummy, hãy đảm bảo tải bộ ISIC-2024 đặt vào thư mục phù hợp theo code).*
+
+### 4.2 Chạy TẤT CẢ các thí nghiệm tự động
+
+Do việc huấn luyện tốn rất nhiều tài nguyên Card đồ hoạ (VRAM), bạn có 2 lựa chọn: **chạy tuần tự** (an toàn nhất) hoặc **chạy song song cùng lúc** (chỉ dùng khi máy tính siêu mạnh).
+
+#### Lựa chọn A: Chạy Tuần tự (Khuyên dùng)
+Cách này sẽ chạy xong mô hình này mới tới mô hình khác. Điều này giúp máy tính không bị quá tải RAM/VRAM và rất phù hợp nếu bạn định "treo máy" qua đêm.
+
+Tạo một file có tên `run_all_sequential.bat` nằm ở ngay thư mục gốc `MDEP` (ngang hàng với thư mục `experiments`), sau đó dán nội dung sau vào:
+```bat
+@echo off
+echo ==============================================================
+echo BẮT ĐẦU CHẠY TOÀN BỘ THÍ NGHIỆM TRÊN MÁY TÍNH CÁ NHÂN (LOCAL)
+echo ==============================================================
+
+echo.
+echo [1/5] Dang chay ISIC Softmax Baselines...
+python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456
+
+echo.
+echo [2/5] Dang chay ISIC Evidential Baselines...
+python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456
+
+echo.
+echo [3/5] Dang chay ISIC GUDS Ablations...
+python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456
+
+echo.
+echo [4/5] Dang chay CIFAR-100-LT (Ratio 100)...
+python experiments/run_cifar_suite.py --ratio 100 --seeds 42 123 456
+
+echo.
+echo [4.1/5] Dang chay CIFAR-100-LT (Ratio 50)...
+python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456
+
+echo.
+echo [4.2/5] Dang chay CIFAR-100-LT (Ratio 10)...
+python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456
+
+echo.
+echo [5/5] Dang chay MVTec AD...
+python experiments/run_mvtec_suite.py --seeds 42 123 456
+
+echo.
+echo ==============================================================
+echo HOAN THANH TAT CA THI NGHIEM! KET QUA DA DUOC LUU.
+echo ==============================================================
+pause
+```
+
+**🔍 Giải thích chi tiết các tham số trong lệnh:**
+- `python experiments/...`: Lệnh gọi Python thực thi file code cấu hình thí nghiệm.
+- `--epochs 40`: Số vòng lặp huấn luyện toàn bộ tập dữ liệu (ở đây là 40 vòng).
+- `--batch_size 32`: Số lượng ảnh đưa vào GPU để xử lý cùng lúc trong 1 bước. Nếu GPU bị báo lỗi Out Of Memory (OOM), bạn có thể giảm xuống `16` hoặc `8`.
+- `--lr 4e-5`: Tốc độ học (Learning Rate), tương đương `0.00004`.
+- `--subsample_scope train`: Chỉ giảm bớt dữ liệu của class quá đông đảo trên tập huấn luyện (`train`), giữ nguyên tập đánh giá (`test`) để phản ánh đúng phân phối thực tế.
+- `--ratio`: Mức độ mất cân bằng (Imbalance Ratio) cho CIFAR-100-LT (vd: 10, 50, 100).
+- `--seeds 42 123 456`: Chạy lặp lại thí nghiệm 3 lần với 3 mầm ngẫu nhiên khác nhau để đảm bảo tính khách quan của kết quả.
+
+**🚀 Cách chạy file:**
+1. Mở thư mục `MDEP` bằng File Explorer.
+2. **Nhấp đúp chuột trái** vào file `run_all_sequential.bat` mà bạn vừa tạo.
+3. Một cửa sổ lệnh màu đen (CMD) sẽ hiện lên và tự động chạy toàn bộ quy trình từ 1 đến 5.
+
+
+#### Lựa chọn B: Chạy Song song cùng lúc (Yêu cầu VRAM siêu lớn)
+Nếu máy bạn có nhiều GPU hoặc lượng VRAM khổng lồ (VD: 24GB - 48GB+ VRAM) và bạn muốn chạy đồng thời tất cả để tiết kiệm thời gian, hãy tạo file `run_all_parallel.bat` trong thư mục dự án với nội dung:
+```bat
+@echo off
+echo Dang khoi dong tat ca thi nghiem cung luc...
+
+start "ISIC Softmax" cmd /k "python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456"
+start "ISIC Evidential" cmd /k "python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456"
+start "ISIC GUDS" cmd /k "python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456"
+start "CIFAR-100-LT" cmd /k "python experiments/run_cifar_suite.py --seeds 42 123 456"
+start "MVTec AD" cmd /k "python experiments/run_mvtec_suite.py --seeds 42 123 456"
+
+echo Cac cua so da duoc mo. Vui long theo doi tien do tren tung cua so rieng biet.
+pause
+```
+Khi chạy file này, 5 cửa sổ Terminal đen (CMD) sẽ tự động mở lên đồng thời và chạy 5 cụm thí nghiệm cùng một lúc. Màn hình của tiến trình nào sẽ được in ra tại cửa sổ tương ứng.

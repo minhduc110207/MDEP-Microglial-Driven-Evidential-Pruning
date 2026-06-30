@@ -110,7 +110,6 @@ class ExperimentSpec:
     kl_scaling: str = "symmetric"
     disable_efl: bool = False
     disable_anticryst: bool = False
-    logit_adjustment_train: bool = False
     disable_topology_cache: bool = False
     calibration_mode: str = "bias_temperature"
     classifier_retrain: bool = False
@@ -568,10 +567,8 @@ def optimize_thresholds(
     found_sens80 = False
     p_min = float(probs[:, 1].min())
     p_max = float(probs[:, 1].max())
-    if p_max - p_min < 1e-8:
-        search_space = np.linspace(0.01, 0.99, 199)
-    else:
-        search_space = np.linspace(p_min, p_max, 199)
+    percentiles = np.linspace(0, 100, 199)
+    search_space = np.unique(np.percentile(probs[:, 1], percentiles))
         
     for threshold in search_space:
         y_pred = (probs[:, 1] >= threshold).astype(int)
@@ -698,10 +695,8 @@ def thresholds_from_probabilities(y_true: np.ndarray, probs: np.ndarray) -> dict
     found_sens80 = False
     p_min = float(probs[:, 1].min())
     p_max = float(probs[:, 1].max())
-    if p_max - p_min < 1e-8:
-        search_space = np.linspace(0.01, 0.99, 199)
-    else:
-        search_space = np.linspace(p_min, p_max, 199)
+    percentiles = np.linspace(0, 100, 199)
+    search_space = np.unique(np.percentile(probs[:, 1], percentiles))
         
     for threshold in search_space:
         y_pred = (probs[:, 1] >= threshold).astype(int)
@@ -893,18 +888,18 @@ def logits_from_model(model: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
     return model.fc[0](model.backbone(inputs))
 
 
-def effective_number_weights(p_train: list[float], beta: float = 0.9999, device: torch.device | None = None) -> torch.Tensor:
-    """Class-Balanced Loss weights from relative training frequencies."""
-    counts = torch.tensor(p_train, dtype=torch.float32, device=device)
-    counts = counts / counts[counts > 0].min().clamp_min(1e-8)
+def effective_number_weights(p_train: list[float], total_samples: int = 10000, beta: float = 0.9999, device: torch.device | None = None) -> torch.Tensor:
+    """Class-Balanced Loss weights from absolute training frequencies."""
+    counts = torch.tensor(p_train, dtype=torch.float32, device=device) * total_samples
+    counts = counts.clamp_min(1.0)
     weights = (1.0 - beta) / (1.0 - torch.pow(torch.tensor(beta, device=counts.device), counts).clamp_max(1.0 - 1e-8))
     weights = weights / weights.mean().clamp_min(1e-8)
     return weights
 
 
-def ldam_margins(p_train: list[float], max_margin: float = 0.5, device: torch.device | None = None) -> torch.Tensor:
-    counts = torch.tensor(p_train, dtype=torch.float32, device=device)
-    counts = counts / counts[counts > 0].min().clamp_min(1e-8)
+def ldam_margins(p_train: list[float], total_samples: int = 10000, max_margin: float = 0.5, device: torch.device | None = None) -> torch.Tensor:
+    counts = torch.tensor(p_train, dtype=torch.float32, device=device) * total_samples
+    counts = counts.clamp_min(1.0)
     margins = 1.0 / torch.sqrt(torch.sqrt(counts.clamp_min(1.0)))
     margins = margins * (max_margin / margins.max().clamp_min(1e-8))
     return margins
@@ -976,24 +971,15 @@ def ce_or_focal_loss(
     p_train: list[float],
     epoch: int,
     total_epochs: int,
+    total_samples: int = 10000,
 ) -> torch.Tensor:
     adjusted = logits
-    if spec.logit_adjustment_train:
-        # Menon et al. (ICLR 2021): adjusted = logits + tau * log(pi_train)
-        # where pi_train is the class prior from the training distribution.
-        # tau = 1.0 for Fisher-consistent balanced-error minimisation.
-        log_prior = torch.tensor(
-            [math.log(max(p, 1e-8)) for p in p_train],
-            dtype=logits.dtype,
-            device=logits.device,
-        )
-        adjusted = logits + log_prior
 
     if spec.loss_name == "ce":
         return F.cross_entropy(adjusted, targets)
 
     if spec.loss_name == "class_balanced_ce":
-        cb_weights = effective_number_weights(p_train, device=logits.device)
+        cb_weights = effective_number_weights(p_train, total_samples=total_samples, device=logits.device)
         return F.cross_entropy(adjusted, targets, weight=cb_weights)
 
     if spec.loss_name == "balanced_softmax":
@@ -1005,13 +991,13 @@ def ce_or_focal_loss(
         return F.cross_entropy(adjusted + log_prior, targets)
 
     if spec.loss_name == "ldam_drw":
-        margins = ldam_margins(p_train, device=logits.device)
+        margins = ldam_margins(p_train, total_samples=total_samples, device=logits.device)
         one_hot = F.one_hot(targets, num_classes=logits.shape[1]).to(logits.dtype)
         logits_m = adjusted - one_hot * margins.unsqueeze(0)
         weight = None
         if epoch >= int(0.75 * total_epochs):
-            weight = effective_number_weights(p_train, device=logits.device)
-        return F.cross_entropy(30.0 * logits_m, targets, weight=weight)
+            weight = effective_number_weights(p_train, total_samples=total_samples, device=logits.device)
+        return F.cross_entropy(logits_m, targets, weight=weight)
 
     probs = F.softmax(adjusted, dim=1)
     pt = probs.gather(1, targets.view(-1, 1)).clamp_min(1e-8)
@@ -1036,7 +1022,7 @@ def retrain_classifier_crt(
     for param in model.fc[0].parameters():
         param.requires_grad = True
 
-    epochs = max(1, int(0.10 * total_epochs))
+    epochs = max(10, int(0.10 * total_epochs))
     optimizer = optim.AdamW(model.fc[0].parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     history: list[dict[str, float]] = []
@@ -1095,6 +1081,8 @@ def train_standard(
     if spec.loss_name not in DISCRIMINATIVE_LOSS_NAMES:
         criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
 
+    total_samples = len(train_loader.dataset) if hasattr(train_loader, "dataset") else 10000
+
     for epoch in range(total_epochs):
         model.train()
         if spec.static_sparse:
@@ -1108,7 +1096,7 @@ def train_standard(
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
                 if spec.loss_name in DISCRIMINATIVE_LOSS_NAMES:
                     logits = logits_from_model(model, inputs)
-                    loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train, epoch, total_epochs)
+                    loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train, epoch, total_epochs, total_samples=total_samples)
                 else:
                     evidence = model(inputs)
                     loss = criterion(evidence, targets, epoch=epoch)
@@ -1241,7 +1229,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
         print("[INFO] MDEP sparse mode: backbone convs only, dense classifier head, frozen identity channel order.")
     model = model.to(device)
-    if torch.cuda.device_count() > 1 and not args.cpu:
+    if False:  # Forced to single GPU execution
         if spec.sparse:
             print(
                 f"[INFO] Detected {torch.cuda.device_count()} GPUs; running sparse MDEP/GUDS on single GPU "
@@ -1280,13 +1268,12 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     quality_metrics = {}
 
     # Models that already compensate for class imbalance during training
-    # (logit_adjustment, balanced_softmax, cRT, MiSLAS) produce prior-free
+    # (balanced_softmax, cRT, MiSLAS) produce prior-free
     # logits. Passing the skewed p_train to calibration would apply the
     # prior correction a second time (double-adjustment). We neutralise this
     # by telling the calibrator that training was uniform.
     prior_corrected = (
-        spec.logit_adjustment_train
-        or spec.loss_name == "balanced_softmax"
+        spec.loss_name == "balanced_softmax"
         or spec.classifier_retrain
     )
     effective_p_train = p_train
@@ -1307,8 +1294,6 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         eval_bias = prior_delta / max(temperature, 1e-8)
         if bias is not None:
             eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
-        if hasattr(model.fc[1], "logit_adjustment"):
-            model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
         metrics = evaluate_softmax_baseline(
             model,
             test_loader,
@@ -1351,8 +1336,6 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         eval_bias = prior_delta / max(temperature, 1e-8)
         if bias is not None:
             eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
-        if hasattr(model.fc[1], "logit_adjustment"):
-            model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
         _, metrics = evaluate(
             model,
