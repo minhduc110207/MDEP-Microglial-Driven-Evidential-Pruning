@@ -130,10 +130,10 @@ Tham số mặc định: `epochs=100`, `batch_size=128`, `lr=1e-3` (AdamW + Cosi
 Muốn thay đổi tỷ lệ mất cân bằng:
 ```python
 # Imbalance ratio 1:50
-!python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456
+!python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456 > cifar_50_log.txt 2>&1
 
 # Imbalance ratio 1:10
-!python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456
+!python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456 > cifar_10_log.txt 2>&1
 ```
 
 ---
@@ -263,33 +263,38 @@ echo ==============================================================
 
 echo.
 echo [1/5] Dang chay ISIC Softmax Baselines...
-python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456
+python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_softmax_log.txt 2>&1
 
 echo.
 echo [2/5] Dang chay ISIC Evidential Baselines...
-python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456
+python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_evidential_log.txt 2>&1
 
 echo.
 echo [3/5] Dang chay ISIC GUDS Ablations...
-python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456
+python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_guds_ablations_log.txt 2>&1
 
 echo.
 echo [4/5] Dang chay CIFAR-100-LT (Ratio 100)...
-python experiments/run_cifar_suite.py --ratio 100 --seeds 42 123 456
+python experiments/run_cifar_suite.py --ratio 100 --seeds 42 123 456 > cifar_100_log.txt 2>&1
 
 echo.
 echo [4.1/5] Dang chay CIFAR-100-LT (Ratio 50)...
-python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456
+python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456 > cifar_50_log.txt 2>&1
 
 echo.
 echo [4.2/5] Dang chay CIFAR-100-LT (Ratio 10)...
-python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456
+python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456 > cifar_10_log.txt 2>&1
 
 echo.
 echo [5/5] Dang chay MVTec AD...
-python experiments/run_mvtec_suite.py --seeds 42 123 456
+python experiments/run_mvtec_suite.py --seeds 42 123 456 > mvtec_log.txt 2>&1
 
 echo.
+echo ==============================================================
+echo.
+echo [6/6] Dang chay Optional Backbone Generalization (ResNet18, ConvNeXt, Swin)...
+python experiments/backbone_generalization_runner.py --epochs 40 --batch_size 16 --lr 4e-5 --seeds 42 123 456 > backbone_generalization_log.txt 2>&1
+
 echo ==============================================================
 echo HOAN THANH TAT CA THI NGHIEM! KET QUA DA DUOC LUU.
 echo ==============================================================
@@ -317,11 +322,11 @@ Nếu máy bạn có nhiều GPU hoặc lượng VRAM khổng lồ (VD: 24GB - 4
 @echo off
 echo Dang khoi dong tat ca thi nghiem cung luc...
 
-start "ISIC Softmax" cmd /k "python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456"
-start "ISIC Evidential" cmd /k "python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456"
-start "ISIC GUDS" cmd /k "python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456"
+start "ISIC Softmax" cmd /k "python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_softmax_log.txt 2>&1"
+start "ISIC Evidential" cmd /k "python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_evidential_log.txt 2>&1"
+start "ISIC GUDS" cmd /k "python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_guds_ablations_log.txt 2>&1"
 start "CIFAR-100-LT" cmd /k "python experiments/run_cifar_suite.py --seeds 42 123 456"
-start "MVTec AD" cmd /k "python experiments/run_mvtec_suite.py --seeds 42 123 456"
+start "MVTec AD" cmd /k "python experiments/run_mvtec_suite.py --seeds 42 123 456 > mvtec_log.txt 2>&1"
 
 echo Cac cua so da duoc mo. Vui long theo doi tien do tren tung cua so rieng biet.
 pause

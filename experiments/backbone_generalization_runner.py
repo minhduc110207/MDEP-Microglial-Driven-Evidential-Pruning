@@ -149,8 +149,6 @@ def run_one(backbone: str, args: argparse.Namespace, seed: int) -> dict:
     eval_bias = prior_delta / max(temperature, 1e-8)
     if bias is not None:
         eval_bias = eval_bias + bias.to(device=device, dtype=eval_bias.dtype)
-    if hasattr(model.fc[1], "logit_adjustment"):
-        model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
     _, metrics = evaluate(model, val_loader, test_loader, device, num_classes, temperature=temperature, bias=eval_bias, plot=False)
     print_sparsity_report(model)
