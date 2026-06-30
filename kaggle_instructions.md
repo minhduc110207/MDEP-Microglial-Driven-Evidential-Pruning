@@ -9,6 +9,7 @@ without downloading datasets manually to your local machine.
 - Internet: On.
 - Persistence: On.
 - ISIC access: accept the ISIC 2024 Challenge rules once in your Kaggle account.
+- CIFAR-100 access: Add the `CIFAR-100 Python` dataset from Kaggle to your notebook via the "Add Data" button.
 
 ## 2. Setup Cell
 
@@ -72,6 +73,31 @@ if isic_root is None:
     run(["kaggle", "competitions", "download", "-c", "isic-2024-challenge", "-p", isic_root])
     for archive in isic_root.glob("*.zip"):
         run(["unzip", "-q", "-n", archive, "-d", isic_root])
+
+def link_cifar_dataset():
+    candidates = [
+        Path("/kaggle/input/cifar-100-python"),
+        Path("/kaggle/input/cifar100"),
+        Path("/kaggle/input/cifar-100"),
+    ]
+    cifar_source = None
+    for base in candidates:
+        if (base / "train").exists() and (base / "meta").exists():
+            cifar_source = base
+            break
+            
+    if cifar_source is not None:
+        cifar_target_dir = REPO_DIR / "data"
+        cifar_target = cifar_target_dir / "cifar-100-python"
+        cifar_target_dir.mkdir(parents=True, exist_ok=True)
+        if not cifar_target.exists():
+            try:
+                os.symlink(cifar_source, cifar_target)
+                print("Linked CIFAR-100 from:", cifar_source, flush=True)
+            except OSError as e:
+                print("Warning: Could not symlink CIFAR-100:", e, flush=True)
+
+link_cifar_dataset()
 
 os.environ["ISIC_ROOT"] = str(isic_root)
 os.chdir(REPO_DIR)
