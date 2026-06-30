@@ -120,7 +120,7 @@ def profile_forward(model: nn.Module, device: torch.device, batch_size: int, ima
 
 
 def build_model(mode: str, num_classes: int, pretrained: bool) -> nn.Module:
-    model = EvidenceResNet(num_classes=num_classes, dataset="mvtec", pretrained=pretrained)
+    model = EvidenceResNet(num_classes=num_classes, dataset="isic", pretrained=pretrained)
     if mode in {"static_24", "guds"}:
         replace_conv2d_with_mdep(model)
         activate_sparse_masks(model)

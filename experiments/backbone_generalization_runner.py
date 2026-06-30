@@ -48,7 +48,7 @@ class EvidenceTorchvisionBackbone(nn.Module):
         super().__init__()
         self.backbone_name = backbone_name
         if backbone_name == "resnet18":
-            wrapped = EvidenceResNet(num_classes=num_classes, dataset="mvtec", pretrained=pretrained)
+            wrapped = EvidenceResNet(num_classes=num_classes, dataset="isic", pretrained=pretrained)
             self.backbone = wrapped.backbone
             self.fc = wrapped.fc
             return

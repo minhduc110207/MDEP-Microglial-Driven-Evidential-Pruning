@@ -1,28 +1,22 @@
-# 🧪 Hướng dẫn Chạy Thí nghiệm MDEP trên Kaggle
+# Kaggle Training Instructions For MDEP
 
-> **Phiên bản:** Commit `2760f4d` (29/06/2026)
-> **Tổng số thí nghiệm:** 25 model × 3 seeds = 75 lượt chạy
+This guide runs the active ISIC 2024 and CIFAR-100-LT experiments on Kaggle
+without downloading datasets manually to your local machine.
 
----
+## 1. Kaggle Notebook Settings
 
-## 📋 Tổng quan Cấu trúc
+- Accelerator: GPU P100 preferred, T4 also works.
+- Internet: On.
+- Persistence: On.
+- ISIC access: accept the ISIC 2024 Challenge rules once in your Kaggle account.
 
-Thí nghiệm được chia thành **5 script độc lập**, mỗi script chạy trên 1 Kaggle Notebook riêng:
+## 2. Setup Cell
 
-| # | Script | Bộ dữ liệu | Số model | GPU ước tính |
-|---|--------|------------|----------|-------------|
-| 1 | `run_isic_softmax_baselines.py` | ISIC 2024 | 8 | ~6h (P100) |
-| 2 | `run_isic_evidential_baselines.py` | ISIC 2024 | 6 | ~5h |
-| 3 | `run_isic_guds_ablations.py` | ISIC 2024 | 11 | ~10h |
-| 4 | `run_cifar_suite.py` | CIFAR-100-LT | Tất cả | ~8h |
-| 5 | `run_mvtec_suite.py` | MVTec AD | Tất cả | ~3h |
-
----
-
-## 🔧 Bước 1: Chuẩn bị Kaggle Notebook
-
-### 1.1 Setup Code Cell
-Chạy cell Python này ở đầu tiên trong Kaggle Notebook để tự động clone repository và cài đặt thư viện cần thiết. Đoạn code này cũng tự động cập nhật code mới (`git pull`) nếu bạn chạy lại nhiều lần:
+Run this first in every Kaggle notebook. It clones or updates the repo, installs
+lightweight dependencies, enables faster runtime defaults, and finds the ISIC
+dataset automatically. If the dataset is mounted under `/kaggle/input`, it uses
+that copy. Otherwise it downloads the competition data into Kaggle working
+storage through the Kaggle API.
 
 ```python
 import os
@@ -35,7 +29,7 @@ REPO_DIR = Path("/kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning")
 
 def run(cmd, cwd=None):
     cmd = list(map(str, cmd))
-    print("RUN:", " ".join(cmd))
+    print("RUN:", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=cwd, check=True)
 
 if REPO_DIR.exists():
@@ -48,29 +42,123 @@ run([
     "scikit-learn", "matplotlib", "pandas", "h5py", "tqdm", "scipy"
 ])
 
+os.environ.setdefault("MDEP_NUM_WORKERS", "4")
+os.environ.setdefault("MDEP_PREFETCH_FACTOR", "4")
+os.environ.setdefault("MDEP_CUDNN_BENCHMARK", "1")
+os.environ.setdefault("MDEP_MATMUL_PRECISION", "high")
+os.environ.setdefault("WANDB_MODE", "offline")
+os.environ.setdefault("WANDB_SILENT", "true")
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
+def find_isic_root():
+    candidates = [
+        Path("/kaggle/input/isic-2024-challenge"),
+        Path("/kaggle/input"),
+        REPO_DIR / "data" / "isic-2024-challenge",
+    ]
+    for base in candidates:
+        if not base.exists():
+            continue
+        if (base / "train-metadata.csv").exists():
+            return base
+        for path in base.rglob("train-metadata.csv"):
+            return path.parent
+    return None
+
+isic_root = find_isic_root()
+if isic_root is None:
+    isic_root = REPO_DIR / "data" / "isic-2024-challenge"
+    isic_root.mkdir(parents=True, exist_ok=True)
+    run(["kaggle", "competitions", "download", "-c", "isic-2024-challenge", "-p", isic_root])
+    for archive in isic_root.glob("*.zip"):
+        run(["unzip", "-q", "-n", archive, "-d", isic_root])
+
+os.environ["ISIC_ROOT"] = str(isic_root)
 os.chdir(REPO_DIR)
 print("Repo:", REPO_DIR)
+print("ISIC_ROOT:", os.environ["ISIC_ROOT"])
 run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_DIR)
+print("SETUP COMPLETE. Run the experiment command in a new cell.", flush=True)
 ```
 
-### 1.3 Add Data (liên kết bộ dữ liệu)
-Ở thanh bên phải Notebook → **Add Data**:
-- **ISIC:** Tìm `isic-2024-challenge`
-- **CIFAR-100:** Không cần — `torchvision` sẽ tự tải
-- **MVTec AD:** Tìm `mvtec-ad` hoặc upload bộ chuẩn
+## 3. Smoke And Syntax Checks
 
-### 1.4 Cấu hình phần cứng
-- Accelerator: **GPU P100** (Khuyên dùng - nhanh hơn và ổn định hơn) hoặc **GPU T4 x1**.
-- Persistence: **Bật** (để không mất output khi session timeout)
+Run this before spending GPU hours:
 
----
+```python
+!python experiments/run_kaggle_paper_suite.py --smoke --no_save_model
+```
 
-## 🚀 Bước 2: Chạy Thí nghiệm
+For a syntax-only check in Kaggle:
 
-### Notebook 1 — Softmax Baselines (ISIC)
+```python
+!python -m py_compile guds_edl_core.py experiments/*.py
+```
 
-Chạy 8 phương pháp long-tailed truyền thống:
-`Standard CE` · `Focal Loss` · `Logit Adjustment` · `Class-Balanced CE` · `Balanced Softmax` · `LDAM-DRW` · `cRT` · `MiSLAS`
+## 4. Do Not Start With The Largest Run
+
+The all-in-one launcher defaults to:
+
+- ISIC `--isic_suite all`
+- CIFAR ratios `10 50 100`
+- seeds `42 43 44` unless `--smoke` is used
+- CIFAR full planned suite when no `--experiment` is selected
+
+That is a very large workload. Use focused commands first, then expand.
+
+## 5. Recommended First Real Runs
+
+### ISIC Main Table, One Seed
+
+```python
+!python experiments/isic_paper_experiments.py \
+    --suite main_tables \
+    --epochs 40 \
+    --batch_size 32 \
+    --seeds 42 \
+    --no_save_model
+```
+
+### CIFAR One Experiment, One Seed
+
+Use `standard_ce` for a fast pipeline sanity check:
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment standard_ce \
+    --epochs 1 \
+    --batch_size 128 \
+    --seeds 42
+```
+
+Use `full_guds` for the slow sparse code path:
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 5 \
+    --batch_size 128 \
+    --seeds 42
+```
+
+If the notebook shows only clone/setup lines for several minutes, it has not
+entered the CIFAR runner yet. Stop the cell, make sure the setup cell ends with
+`SETUP COMPLETE`, then run the CIFAR command in a separate cell.
+
+Optional CIFAR download preflight:
+
+```python
+!python -u -c "import torchvision; root='/kaggle/working/cifar_data'; print('CIFAR root:', root, flush=True); torchvision.datasets.CIFAR100(root=root, train=True, download=True); torchvision.datasets.CIFAR100(root=root, train=False, download=True); print('CIFAR download ready', flush=True)"
+```
+
+## 6. Split Full Training Across Notebooks
+
+Run separate Kaggle notebooks/sessions for each group when wall-clock time
+matters.
+
+### ISIC Softmax Baselines
 
 ```python
 !python experiments/run_isic_softmax_baselines.py \
@@ -78,15 +166,11 @@ Chạy 8 phương pháp long-tailed truyền thống:
     --batch_size 32 \
     --lr 4e-5 \
     --subsample_scope train \
-    --seeds 42 123 456
+    --seeds 42 43 44 \
+    --no_save_model
 ```
 
----
-
-### Notebook 2 — Evidential Baselines (ISIC)
-
-Chạy 6 phương pháp Evidential Deep Learning:
-`Dense EDL` · `Fisher EDL` · `Flexible EDL` · `R-EDL` · `Static 2:4 EDL` · `RigL-style 2:4`
+### ISIC Evidential Baselines
 
 ```python
 !python experiments/run_isic_evidential_baselines.py \
@@ -94,15 +178,11 @@ Chạy 6 phương pháp Evidential Deep Learning:
     --batch_size 32 \
     --lr 4e-5 \
     --subsample_scope train \
-    --seeds 42 123 456
+    --seeds 42 43 44 \
+    --no_save_model
 ```
 
----
-
-### Notebook 3 — GUDS-EDL + Ablations (ISIC)
-
-Chạy mô hình chính và 10 ablation studies:
-`full_guds` · `guds_without_pruner` · `guds_without_regrower` · `guds_asymmetric_kl` · `guds_without_efl` · `guds_without_anticryst` · `guds_absolute_pruner` · `guds_class_conditioned_regrower` · `guds_without_topology_cache` · `guds_temperature_only` · `guds_no_posthoc_calibration`
+### ISIC GUDS-EDL And Ablations
 
 ```python
 !python experiments/run_isic_guds_ablations.py \
@@ -110,225 +190,211 @@ Chạy mô hình chính và 10 ablation studies:
     --batch_size 32 \
     --lr 4e-5 \
     --subsample_scope train \
-    --seeds 42 123 456
+    --seeds 42 43 44 \
+    --no_save_model
 ```
 
-> **Lưu ý quan trọng:** `full_guds` sử dụng cấu hình chính thức theo bài báo:
-> Symmetric KL + KL-Uniform Regrower + Signed First-Order Pruner (Strength=0.5) + EFL (Gamma=5.0).
-> Mỗi ablation chỉ thay đổi **đúng 1 biến** so với `full_guds`.
+### CIFAR-100-LT
 
----
-
-### Notebook 4 — CIFAR-100-LT
+Run one imbalance ratio per notebook. If you only need selected methods, repeat
+`--experiment` and avoid the full 14-model suite.
 
 ```python
-!python experiments/run_cifar_suite.py \
-    --seeds 42 123 456
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --experiment standard_ce \
+    --experiment dense_edl \
+    --epochs 100 \
+    --batch_size 128 \
+    --seeds 42 43 44
 ```
 
-Tham số mặc định: `epochs=100`, `batch_size=128`, `lr=1e-3` (AdamW + CosineAnnealing).
-Muốn thay đổi tỷ lệ mất cân bằng:
-```python
-# Imbalance ratio 1:50
-!python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456 > cifar_50_log.txt 2>&1
-
-# Imbalance ratio 1:10
-!python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456 > cifar_10_log.txt 2>&1
-```
-
----
-
-### Notebook 5 — MVTec AD
+Full CIFAR sweeps are expensive because each command runs every planned model
+when `--experiment` is omitted:
 
 ```python
-!python experiments/run_mvtec_suite.py \
-    --seeds 42 123 456
+!python -u experiments/run_cifar_suite.py --ratio 100 --epochs 100 --batch_size 128 --seeds 42 43 44
+!python -u experiments/run_cifar_suite.py --ratio 50 --epochs 100 --batch_size 128 --seeds 42 43 44
+!python -u experiments/run_cifar_suite.py --ratio 10 --epochs 100 --batch_size 128 --seeds 42 43 44
 ```
 
-Tham số tự động: `epochs=20`, `batch_size=32` (tự hạ khi nhận diện benchmark=mvtec).
-Muốn chạy trên category khác:
+## 7. Why Seed 42 Can Look Slow
+
+ISIC training is not finished when the final epoch prints. After epoch 40, the
+runner still performs calibration, adaptive-mode evaluation, quality-gate
+reporting, extended metrics, and result writing. This is especially visible for
+seed 42 because the split includes large validation, calibration, and test
+loaders. Wait for the final `[DONE]` line before assuming the run is stuck.
+
+Use `--no_save_model` for broad ISIC sweeps. It avoids checkpoint writes and
+keeps Kaggle storage smaller.
+
+## 8. CIFAR Speed Notes
+
+- `run_cifar_suite.py` without `--experiment` runs all 14 planned CIFAR models.
+- A healthy CIFAR run prints `Running CIFAR-100-LT Generalization Suite`, then
+  `[RUN]`, then `[CIFAR] Downloading/validating ...` before training.
+- Sparse methods such as `full_guds`, `static_24_edl`, and `rigl_style_24` are
+  slower than dense baselines because they update structural masks during
+  training.
+- Use `--experiment standard_ce --epochs 1` for a fast data/training sanity
+  check.
+- Use `--experiment full_guds --epochs 5` when checking the slow sparse path.
+
+## 9. All-In-One Launcher
+
+Use this only after the focused runs work:
+
 ```python
-!python experiments/run_mvtec_suite.py --category bottle --seeds 42 123 456
+!python experiments/run_kaggle_paper_suite.py \
+    --isic_suite all \
+    --no_save_model \
+    --keep_going
 ```
 
----
+For a cheaper all-in-one pass:
 
-## 📊 Bước 3: Đọc Kết quả
-
-### 3.1 Bảng kết quả trực tiếp trên Console
-Mỗi model sau khi train xong sẽ tự động in bảng ASCII được thiết kế riêng cho từng loại dataset:
-
-**Ví dụ (ISIC):**
-```text
-======================================================================
-🏥 CLINICAL EVALUATION (ISIC) | full_guds
-======================================================================
-Metric                                   |      Value
------------------------------------------+-----------
- RANKING & DETECTION
-  Macro Auroc                            |     0.9234
-  Pr Auc                                 |     0.4521
-  pAUC (TPR > 0.8) 🌟                    |     0.1876
------------------------------------------+-----------
- CLINICAL BALANCE
-  Balanced Accuracy Default              |     0.8745
-...
+```python
+!python experiments/run_kaggle_paper_suite.py \
+    --isic_suite main_tables \
+    --cifar_ratios 100 \
+    --seeds 42 \
+    --no_save_model \
+    --keep_going
 ```
 
-**Ví dụ (MVTec AD):**
-```text
-======================================================================
-🏭 MVTec AD (Anomaly Detection) | full_guds
-======================================================================
-Metric                                   |      Value
------------------------------------------+-----------
- ANOMALY DETECTION
-  Image Auroc                            |     0.9850
-  Image Ap                               |     0.9620
-...
+To run ISIC only:
+
+```python
+!python experiments/run_kaggle_paper_suite.py \
+    --skip_cifar \
+    --skip_hardware \
+    --isic_suite main_tables \
+    --seeds 42 \
+    --no_save_model
 ```
 
-### 3.2 File output
-Mỗi lượt chạy lưu vào `outputs/<ngày>/<tên_model>/`:
-- `metrics.json` — Toàn bộ metrics chi tiết
-- `run_config.json` — Cấu hình thí nghiệm
-- `model_state.pth` — Trọng số model (bỏ qua nếu thêm `--no_save_model`)
+## 10. Speed And Storage Knobs
 
-Tổng hợp tất cả lượt chạy: `outputs/isic_summary.json`
+- Keep `MDEP_NUM_WORKERS=4` and `MDEP_PREFETCH_FACTOR=4` on Kaggle. Try `6`
+  workers only if CPU/RAM usage is stable.
+- Keep `MDEP_CUDNN_BENCHMARK=1` because image inputs are fixed-size.
+- Use `--no_save_model` for ISIC broad sweeps unless checkpoints are required.
+- For CIFAR, checkpoints are already off by default. Add `--save_model` only
+  when needed.
+- Use one seed first, then launch multi-seed runs.
+- Split ISIC softmax, ISIC evidential, ISIC ablations, and each CIFAR ratio into
+  separate notebooks for faster wall-clock completion.
+- If data loading stalls, retry with `MDEP_NUM_WORKERS=2`.
 
-### 3.3 Tải về máy
-```bash
-# Zip toàn bộ kết quả
-!zip -r /kaggle/working/mdep_results.zip outputs/
-```
-Sau đó vào tab **Output** ở Kaggle Notebook → Download file zip.
+## 11. Local Full Experiment Runner
 
----
+Use the local runner when training from this Windows workspace. CIFAR-100-LT
+downloads automatically through `torchvision`. Real ISIC training still needs a
+local ISIC folder, either through `ISIC_ROOT` or `--isic_root`.
 
-## ⚙️ Tham số CLI đầy đủ (ISIC)
+Install the local logging dependency once:
 
-| Tham số | Mặc định | Mô tả |
-|---------|----------|-------|
-| `--epochs` | 40 | Số epoch huấn luyện |
-| `--batch_size` | 32 | Kích thước batch |
-| `--lr` | 4e-5 | Learning rate (AdamW) |
-| `--seed` | 42 | Random seed đơn |
-| `--seeds` | — | Chạy nhiều seeds, VD: `--seeds 42 123 456` |
-| `--subsample_ratio` | 20 | Tỷ lệ lấy mẫu con (1/20 dữ liệu ISIC gốc) |
-| `--test_ratio` | 0.20 | Tỷ lệ tập test |
-| `--no_save_model` | — | Không lưu model weights (tiết kiệm dung lượng) |
-| `--no_pretrained` | — | Không dùng ImageNet pretrained |
-| `--cpu` | — | Ép chạy trên CPU |
-| `--log_every` | 5 | In log mỗi N epoch |
-| `--allow_dummy_data` | — | Cho phép dữ liệu giả (chỉ dùng khi dry-run) |
-
----
-
-## ✅ Đảm bảo Tính Công bằng
-
-Toàn bộ thí nghiệm đã được kiểm chứng (commit `2760f4d`):
-
-1. **Optimizer thống nhất:** Tất cả model dùng AdamW + CosineAnnealing (không có SGD hay fixed LR)
-2. **Logit Adjustment:** Đúng công thức Menon et al. ICLR 2021: `logits + log(π_train)`
-3. **Không Double-Adjustment:** Các model đã tự bù prior (LA, Balanced Softmax, cRT, MiSLAS) được truyền `p_train = uniform` khi calibrate
-4. **Ablation đơn biến:** Mỗi ablation chỉ thay đổi chính xác 1 component so với `full_guds`
-5. **Gradient clipping:** `clip_grad_norm_(max_norm=1.0)` cho toàn bộ model
-
----
-
-## 💻 Bước 4: Hướng dẫn Chạy Local (Trên máy cá nhân)
-
-Nếu bạn muốn chạy các thí nghiệm này trên máy tính cá nhân (Local) thay vì Kaggle, dưới đây là cách thiết lập. Đặc biệt dành cho hệ điều hành Windows.
-
-### 4.1 Cài đặt môi trường
-Mở Terminal (PowerShell hoặc CMD) trong thư mục dự án và chạy:
 ```powershell
-pip install scikit-learn matplotlib pandas h5py tqdm scipy torch torchvision
-```
-*(Nếu bạn dùng bộ dữ liệu ISIC gốc thay vì dummy, hãy đảm bảo tải bộ ISIC-2024 đặt vào thư mục phù hợp theo code).*
-
-### 4.2 Chạy TẤT CẢ các thí nghiệm tự động
-
-Do việc huấn luyện tốn rất nhiều tài nguyên Card đồ hoạ (VRAM), bạn có 2 lựa chọn: **chạy tuần tự** (an toàn nhất) hoặc **chạy song song cùng lúc** (chỉ dùng khi máy tính siêu mạnh).
-
-#### Lựa chọn A: Chạy Tuần tự (Khuyên dùng)
-Cách này sẽ chạy xong mô hình này mới tới mô hình khác. Điều này giúp máy tính không bị quá tải RAM/VRAM và rất phù hợp nếu bạn định "treo máy" qua đêm.
-
-Tạo một file có tên `run_all_sequential.bat` nằm ở ngay thư mục gốc `MDEP` (ngang hàng với thư mục `experiments`), sau đó dán nội dung sau vào:
-```bat
-@echo off
-echo ==============================================================
-echo BẮT ĐẦU CHẠY TOÀN BỘ THÍ NGHIỆM TRÊN MÁY TÍNH CÁ NHÂN (LOCAL)
-echo ==============================================================
-
-echo.
-echo [1/5] Dang chay ISIC Softmax Baselines...
-python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_softmax_log.txt 2>&1
-
-echo.
-echo [2/5] Dang chay ISIC Evidential Baselines...
-python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_evidential_log.txt 2>&1
-
-echo.
-echo [3/5] Dang chay ISIC GUDS Ablations...
-python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_guds_ablations_log.txt 2>&1
-
-echo.
-echo [4/5] Dang chay CIFAR-100-LT (Ratio 100)...
-python experiments/run_cifar_suite.py --ratio 100 --seeds 42 123 456 > cifar_100_log.txt 2>&1
-
-echo.
-echo [4.1/5] Dang chay CIFAR-100-LT (Ratio 50)...
-python experiments/run_cifar_suite.py --ratio 50 --seeds 42 123 456 > cifar_50_log.txt 2>&1
-
-echo.
-echo [4.2/5] Dang chay CIFAR-100-LT (Ratio 10)...
-python experiments/run_cifar_suite.py --ratio 10 --seeds 42 123 456 > cifar_10_log.txt 2>&1
-
-echo.
-echo [5/5] Dang chay MVTec AD...
-python experiments/run_mvtec_suite.py --seeds 42 123 456 > mvtec_log.txt 2>&1
-
-echo.
-echo ==============================================================
-echo.
-echo [6/6] Dang chay Optional Backbone Generalization (ResNet18, ConvNeXt, Swin)...
-python experiments/backbone_generalization_runner.py --epochs 40 --batch_size 16 --lr 4e-5 --seeds 42 123 456 > backbone_generalization_log.txt 2>&1
-
-echo ==============================================================
-echo HOAN THANH TAT CA THI NGHIEM! KET QUA DA DUOC LUU.
-echo ==============================================================
-pause
+pip install wandb
 ```
 
-**🔍 Giải thích chi tiết các tham số trong lệnh:**
-- `python experiments/...`: Lệnh gọi Python thực thi file code cấu hình thí nghiệm.
-- `--epochs 40`: Số vòng lặp huấn luyện toàn bộ tập dữ liệu (ở đây là 40 vòng).
-- `--batch_size 32`: Số lượng ảnh đưa vào GPU để xử lý cùng lúc trong 1 bước. Nếu GPU bị báo lỗi Out Of Memory (OOM), bạn có thể giảm xuống `16` hoặc `8`.
-- `--lr 4e-5`: Tốc độ học (Learning Rate), tương đương `0.00004`.
-- `--subsample_scope train`: Chỉ giảm bớt dữ liệu của class quá đông đảo trên tập huấn luyện (`train`), giữ nguyên tập đánh giá (`test`) để phản ánh đúng phân phối thực tế.
-- `--ratio`: Mức độ mất cân bằng (Imbalance Ratio) cho CIFAR-100-LT (vd: 10, 50, 100).
-- `--seeds 42 123 456`: Chạy lặp lại thí nghiệm 3 lần với 3 mầm ngẫu nhiên khác nhau để đảm bảo tính khách quan của kết quả.
+The runner uses W&B in offline mode by default. It saves local W&B files under
+`paper_experiment_outputs/wandb/`, raw sub-run logs under
+`paper_experiment_outputs/local_logs/<timestamp>/`, and a local parameter
+manifest named `local_run_config.json`.
 
-**🚀 Cách chạy file:**
-1. Mở thư mục `MDEP` bằng File Explorer.
-2. **Nhấp đúp chuột trái** vào file `run_all_sequential.bat` mà bạn vừa tạo.
-3. Một cửa sổ lệnh màu đen (CMD) sẽ hiện lên và tự động chạy toàn bộ quy trình từ 1 đến 5.
+### Local Smoke Test With Real ISIC
 
-
-#### Lựa chọn B: Chạy Song song cùng lúc (Yêu cầu VRAM siêu lớn)
-Nếu máy bạn có nhiều GPU hoặc lượng VRAM khổng lồ (VD: 24GB - 48GB+ VRAM) và bạn muốn chạy đồng thời tất cả để tiết kiệm thời gian, hãy tạo file `run_all_parallel.bat` trong thư mục dự án với nội dung:
-```bat
-@echo off
-echo Dang khoi dong tat ca thi nghiem cung luc...
-
-start "ISIC Softmax" cmd /k "python experiments/run_isic_softmax_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_softmax_log.txt 2>&1"
-start "ISIC Evidential" cmd /k "python experiments/run_isic_evidential_baselines.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_evidential_log.txt 2>&1"
-start "ISIC GUDS" cmd /k "python experiments/run_isic_guds_ablations.py --epochs 40 --batch_size 32 --lr 4e-5 --subsample_scope train --seeds 42 123 456 > isic_guds_ablations_log.txt 2>&1"
-start "CIFAR-100-LT" cmd /k "python experiments/run_cifar_suite.py --seeds 42 123 456"
-start "MVTec AD" cmd /k "python experiments/run_mvtec_suite.py --seeds 42 123 456 > mvtec_log.txt 2>&1"
-
-echo Cac cua so da duoc mo. Vui long theo doi tien do tren tung cua so rieng biet.
-pause
+```powershell
+$env:ISIC_ROOT="D:\datasets\isic-2024-challenge"
+python experiments/run_local_full_experiments.py `
+    --smoke `
+    --isic_root $env:ISIC_ROOT `
+    --no_save_model `
+    --wandb_mode offline `
+    --wandb_project mdep-local-experiments
 ```
-Khi chạy file này, 5 cửa sổ Terminal đen (CMD) sẽ tự động mở lên đồng thời và chạy 5 cụm thí nghiệm cùng một lúc. Màn hình của tiến trình nào sẽ được in ra tại cửa sổ tương ứng.
+
+### Local CIFAR-Only Run
+
+Use this when you do not have ISIC locally yet:
+
+```powershell
+python experiments/run_local_full_experiments.py `
+    --skip_isic `
+    --cifar_ratios 100 `
+    --cifar_epochs 1 `
+    --seeds 42 `
+    --skip_hardware `
+    --wandb_mode offline `
+    --wandb_project mdep-local-experiments
+```
+
+### Local Full Run
+
+```powershell
+$env:ISIC_ROOT="D:\datasets\isic-2024-challenge"
+python experiments/run_local_full_experiments.py `
+    --isic_root $env:ISIC_ROOT `
+    --isic_suite all `
+    --cifar_ratios 10 50 100 `
+    --epochs 40 `
+    --cifar_epochs 100 `
+    --batch_size 32 `
+    --seeds 42 43 44 `
+    --no_save_model `
+    --keep_going `
+    --wandb_mode offline `
+    --wandb_project mdep-local-experiments
+```
+
+### Local Dry-Run Without ISIC
+
+This checks wiring only. Do not use dummy data for paper results.
+
+```powershell
+python experiments/run_local_full_experiments.py `
+    --smoke `
+    --allow_dummy_data `
+    --no_save_model `
+    --wandb_mode offline
+```
+
+To disable W&B completely:
+
+```powershell
+python experiments/run_local_full_experiments.py --smoke --wandb_mode disabled
+```
+
+## 12. Outputs
+
+All runners write under:
+
+```text
+paper_experiment_outputs/
+```
+
+Aggregate and zip results:
+
+```python
+!python experiments/summarize_results.py
+!zip -r /kaggle/working/mdep_results.zip paper_experiment_outputs/ -x "*.pth"
+```
+
+Download `mdep_results.zip` from the Kaggle notebook Output panel.
+
+## 13. Common Fixes
+
+- If ISIC download fails, confirm the competition rules are accepted and
+  Internet is enabled.
+- If GPU memory runs out, reduce ISIC `--batch_size` to `16` or CIFAR
+  `--batch_size` to `64`.
+- If Kaggle shows only setup lines such as `git rev-parse --short HEAD`, stop
+  the cell and rerun setup separately. The setup cell should end with
+  `SETUP COMPLETE`.
+- If a run appears frozen after the final epoch, check the logs for `[CAL]`,
+  `[EVAL]`, adaptive-mode messages, and finally `[DONE]`.
+- If local W&B is not installed, either run `pip install wandb` or add
+  `--wandb_mode disabled`.

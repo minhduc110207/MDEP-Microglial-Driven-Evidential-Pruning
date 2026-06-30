@@ -268,13 +268,13 @@ def binary_image_anomaly_metrics(
     probs: np.ndarray,
     prefix: str = "",
 ) -> dict[str, float]:
-    """Standard image-level binary metrics for MVTec-style anomaly detection.
+    """Standard image-level binary metrics for generic image screening.
 
     This deliberately excludes clinical reporting fields such as Wilson
     sensitivity/specificity intervals, deployment-prevalence PPV/NPV, and
-    decision-curve net benefit. For MVTec AD image-level evaluation, AUROC and
-    average precision are the primary threshold-independent metrics; thresholded
-    classification metrics are reported at 0.5 and at the best F1 threshold.
+    decision-curve net benefit. AUROC and average precision are the primary
+    threshold-independent metrics; thresholded classification metrics are
+    reported at 0.5 and at the best F1 threshold.
     """
     pos = probs[:, 1]
     y_pred_default = (pos >= 0.5).astype(int)

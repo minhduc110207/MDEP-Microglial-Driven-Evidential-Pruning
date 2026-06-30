@@ -73,6 +73,7 @@ from guds_edl_core import (  # noqa: E402
     MDEPTrainer,
     MDEPConv2d,
     MDEPLinear,
+    configure_training_runtime,
     compute_adaptive_ece,
     compute_aurc,
     compute_class_conditional_ece,
@@ -83,6 +84,9 @@ from guds_edl_core import (  # noqa: E402
     evaluate,
     evaluate_adaptive_modes,
     get_imbalanced_dataloaders,
+    dataloader_runtime_kwargs,
+    make_grad_scaler,
+    move_batch_to_device,
     print_sparsity_report,
     replace_conv2d_with_mdep,
 )
@@ -521,7 +525,7 @@ def collect_logits_labels(model: nn.Module, loader, device: torch.device) -> tup
     logits_list = []
     labels_list = []
     for inputs, targets in loader:
-        inputs = inputs.to(device)
+        inputs, targets = move_batch_to_device(inputs, targets, device)
         if hasattr(model, "backbone"):
             features = model.backbone(inputs)
         else:
@@ -535,7 +539,7 @@ def collect_logits_labels(model: nn.Module, loader, device: torch.device) -> tup
                 features = model(inputs)
                 model.head = original_head
         logits_list.append(linear(features).detach())
-        labels_list.append(targets.to(device))
+        labels_list.append(targets)
     return torch.cat(logits_list, dim=0), torch.cat(labels_list, dim=0)
 
 
@@ -837,7 +841,8 @@ def quality_gate_report(decision_support: AdaptiveThresholdDecisionSupport, test
     decisions_all = []
     ua_all = []
     for inputs, targets in test_loader:
-        final_decision, _, _, u_a = decision_support(inputs.to(device), mode="balanced", quality_gated=True)
+        inputs, _ = move_batch_to_device(inputs, targets, device)
+        final_decision, _, _, u_a = decision_support(inputs, mode="balanced", quality_gated=True)
         targets_all.append(targets.numpy())
         decisions_all.append(final_decision.cpu().numpy())
         ua_all.append(u_a.squeeze(-1).cpu().numpy())
@@ -933,8 +938,10 @@ def make_class_balanced_loader(train_loader) -> DataLoader:
         train_loader.dataset,
         batch_size=train_loader.batch_size,
         sampler=sampler,
-        num_workers=getattr(train_loader, "num_workers", 0),
-        pin_memory=getattr(train_loader, "pin_memory", False),
+        **dataloader_runtime_kwargs(
+            num_workers=getattr(train_loader, "num_workers", 0),
+            pin_memory=getattr(train_loader, "pin_memory", False),
+        ),
         drop_last=False,
     )
 
@@ -1032,8 +1039,7 @@ def retrain_classifier_crt(
         losses = []
         start = time.time()
         for inputs, targets in crt_loader:
-            inputs = inputs.to(device)
-            targets = targets.to(device)
+            inputs, targets = move_batch_to_device(inputs, targets, device)
             optimizer.zero_grad(set_to_none=True)
             logits = logits_from_model(model, inputs)
             if spec.label_aware_smoothing:
@@ -1071,7 +1077,7 @@ def train_standard(
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = make_grad_scaler(enabled=device.type == "cuda")
     history: list[dict[str, float]] = []
 
     if spec.static_sparse:
@@ -1090,10 +1096,9 @@ def train_standard(
         losses = []
         start = time.time()
         for inputs, targets in train_loader:
-            inputs = inputs.to(device)
-            targets = targets.to(device)
+            inputs, targets = move_batch_to_device(inputs, targets, device)
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+            with torch.amp.autocast('cuda', enabled=device.type == "cuda"):
                 if spec.loss_name in DISCRIMINATIVE_LOSS_NAMES:
                     logits = logits_from_model(model, inputs)
                     loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train, epoch, total_epochs, total_samples=total_samples)
@@ -1413,6 +1418,7 @@ def selected_experiments(args: argparse.Namespace) -> list[ExperimentSpec]:
 
 
 def main() -> int:
+    configure_training_runtime()
     parser = argparse.ArgumentParser(description="Run ISIC 2024 paper experiments.")
     parser.add_argument("--experiment", action="append", choices=sorted(EXPERIMENTS), help="Run one experiment; can be repeated.")
     parser.add_argument("--suite", choices=sorted(SUITES), default="main_tables")

@@ -6,9 +6,7 @@ This script runs the experiment groups referenced by main_text.tex:
 1. ISIC 2024 main-table baselines, GUDS-EDL ablations, calibration ablations,
    topology-cache ablation, and quality-gated reports.
 2. CIFAR-100-LT planned generalization baselines for ratios 1:10, 1:50, 1:100.
-3. MVTec AD image-level planned generalization baselines for selected categories.
-4. MVTec AD normal-only PatchCore-style reference baseline.
-5. Hardware profiling for dense/static-2:4/GUDS structural efficiency.
+3. Hardware profiling for dense/static-2:4/GUDS structural efficiency.
 
 Recommended Kaggle usage:
 
@@ -131,61 +129,6 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
                 )
             )
 
-    if not args.skip_mvtec:
-        for category in args.mvtec_categories:
-            commands.append(
-                CommandSpec(
-                    name=f"mvtec_{category}",
-                    command=[
-                        sys.executable,
-                        str(REPO_ROOT / "experiments" / "generalization_paper_suite.py"),
-                        "--benchmark",
-                        "mvtec",
-                        "--category",
-                        category,
-                        "--epochs",
-                        str(args.mvtec_epochs if not args.smoke else 1),
-                        "--batch_size",
-                        str(min(batch_size, 16)),
-                        "--seeds",
-                        *[str(seed) for seed in args.seeds],
-                    ],
-                )
-            )
-            if not args.skip_mvtec_reference:
-                commands.append(
-                    CommandSpec(
-                        name=f"mvtec_patchcore_{category}",
-                        command=[
-                            sys.executable,
-                            str(REPO_ROOT / "experiments" / "mvtec_patchcore_reference.py"),
-                            "--category",
-                            category,
-                            "--batch_size",
-                            str(min(batch_size, 16)),
-                            "--seeds",
-                            *[str(seed) for seed in args.seeds],
-                        ],
-                    )
-                )
-            if not args.skip_mvtec_simplenet:
-                commands.append(
-                    CommandSpec(
-                        name=f"mvtec_simplenet_{category}",
-                        command=[
-                            sys.executable,
-                            str(REPO_ROOT / "experiments" / "mvtec_simplenet_reference.py"),
-                            "--category",
-                            category,
-                            "--batch_size",
-                            str(min(batch_size, 16)),
-                            "--epochs",
-                            str(1 if args.smoke else args.simplenet_epochs),
-                            "--seeds",
-                            *[str(seed) for seed in args.seeds],
-                        ],
-                    )
-                )
     if not args.skip_hardware:
         commands.append(
             CommandSpec(
@@ -237,19 +180,13 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=40, help="Epochs for ISIC experiments.")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--cifar_epochs", type=int, default=100)
-    parser.add_argument("--mvtec_epochs", type=int, default=20)
-    parser.add_argument("--simplenet_epochs", type=int, default=10)
     parser.add_argument("--backbone_epochs", type=int, default=40)
     parser.add_argument("--hardware_iters", type=int, default=50)
     parser.add_argument("--hardware_warmup", type=int, default=10)
     parser.add_argument("--cifar_ratios", type=int, nargs="+", default=[10, 50, 100])
-    parser.add_argument("--mvtec_categories", nargs="+", default=["hazelnut", "bottle"])
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--skip_isic", action="store_true")
     parser.add_argument("--skip_cifar", action="store_true")
-    parser.add_argument("--skip_mvtec", action="store_true")
-    parser.add_argument("--skip_mvtec_reference", action="store_true", help="Skip PatchCore-style MVTec reference runs.")
-    parser.add_argument("--skip_mvtec_simplenet", action="store_true", help="Skip SimpleNet-style MVTec reference runs.")
     parser.add_argument("--skip_hardware", action="store_true")
     parser.add_argument("--skip_summary", action="store_true")
     parser.add_argument("--include_backbones", action="store_true", help="Also run the heavyweight ConvNeXt/Swin backbone protocol.")

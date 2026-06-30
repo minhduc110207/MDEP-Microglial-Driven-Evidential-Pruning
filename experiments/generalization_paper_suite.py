@@ -1,10 +1,10 @@
 """
-Run the planned non-ISIC generalization protocols from main_text.tex.
+Run the planned non-ISIC generalization protocol from main_text.tex.
 
 The ISIC case study has its own richer runner. This file covers the planned
-CIFAR-100-LT and MVTec AD protocols with the baseline families named in the
-paper: CE, Focal Loss, Logit Adjustment, Dense EDL, Static 2:4 EDL,
-RigL-style 2:4, and full GUDS-EDL.
+CIFAR-100-LT protocol with the baseline families named in the paper: CE,
+Focal Loss, Logit Adjustment, Dense EDL, Static 2:4 EDL, RigL-style 2:4, and
+full GUDS-EDL.
 """
 
 from __future__ import annotations
@@ -53,6 +53,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from guds_edl_core import (  # noqa: E402
     EvidenceLayer,
+    configure_training_runtime,
     compute_adaptive_ece,
     compute_aurc,
     compute_ece,
@@ -73,12 +74,8 @@ from experiments.isic_paper_experiments import (  # noqa: E402
     uses_softmax_evaluation,
 )
 from experiments.metrics_ext import (  # noqa: E402
-    binary_image_anomaly_metrics,
-    collect_evidential_outputs,
     multiclass_extended_metrics,
-    uncertainty_separation_metrics,
 )
-from experiments.mvtec_ad_runner import get_mvtec_ad_classification_dataloaders  # noqa: E402
 
 
 PLANNED_EXPERIMENTS = [
@@ -209,79 +206,6 @@ def calibrate_multiclass(
     raise ValueError(f"Unknown calibration mode: {mode}")
 
 
-def calibrate_binary_image(
-    model: nn.Module,
-    cal_loader,
-    device: torch.device,
-    mode: str,
-    p_true: list[float],
-    p_train: list[float],
-    probability_family: str = "evidential",
-) -> tuple[float, torch.Tensor | None, dict[str, float]]:
-    logits, labels = collect_multiclass_logits(model, cal_loader, device)
-    prior_delta = prior_logit_delta(
-        p_true,
-        p_train,
-        logits.shape[1],
-        device=logits.device,
-        dtype=logits.dtype,
-    )
-    if mode == "none":
-        prior_delta = torch.zeros_like(prior_delta)
-    logits_for_calibration = logits + prior_delta
-    evidence_layer = model.fc[1]
-
-    def calibration_loss(scaled_logits: torch.Tensor) -> torch.Tensor:
-        if probability_family == "softmax":
-            return F.cross_entropy(scaled_logits, labels)
-        evidence = evidence_layer(scaled_logits)
-        unc = compute_uncertainties(evidence)
-        probs = (unc["alpha"] / unc["S"]).clamp_min(1e-8)
-        return F.nll_loss(torch.log(probs), labels)
-
-    if mode == "none":
-        temperature = 1.0
-        bias = None
-    elif mode == "temperature_only":
-        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
-        optimizer = torch.optim.LBFGS([temp_param], lr=0.01, max_iter=50)
-
-        def closure():
-            optimizer.zero_grad()
-            model.zero_grad(set_to_none=True)
-            loss = calibration_loss(logits_for_calibration / temp_param.clamp_min(0.1))
-            loss.backward()
-            return loss
-
-        optimizer.step(closure)
-        temperature = max(0.1, float(temp_param.detach().item()))
-        bias = None
-    elif mode == "bias_temperature":
-        temp_param = nn.Parameter(torch.ones(1, device=device) * 1.5)
-        bias_param = nn.Parameter(torch.zeros(logits.shape[1], device=device))
-        optimizer = torch.optim.LBFGS([temp_param, bias_param], lr=0.01, max_iter=50)
-
-        def closure():
-            optimizer.zero_grad()
-            model.zero_grad(set_to_none=True)
-            loss = calibration_loss(logits_for_calibration / temp_param.clamp_min(0.1) + bias_param)
-            loss.backward()
-            return loss
-
-        optimizer.step(closure)
-        temperature = max(0.1, float(temp_param.detach().item()))
-        bias = bias_param.detach()
-    else:
-        raise ValueError(f"Unknown calibration mode: {mode}")
-
-    print(
-        f"[CAL] binary_image mode={mode} | T={temperature:.4f} | "
-        f"prior_delta={prior_delta.detach().cpu().numpy()} | "
-        f"bias={None if bias is None else bias.detach().cpu().numpy()}"
-    )
-    return temperature, bias, {}
-
-
 def cifar_class_counts(imbalance_ratio: int) -> list[int]:
     return [
         max(1, int(500 * (1.0 / imbalance_ratio) ** (cls_idx / 99.0)))
@@ -366,21 +290,12 @@ def evaluate_multiclass(
 def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
     if benchmark == "cifar":
         return get_cifar100_lt_dataloaders(args.ratio, args.batch_size, seed=seed)
-    if benchmark == "mvtec":
-        return get_mvtec_ad_classification_dataloaders(
-            args.category,
-            args.batch_size,
-            seed=seed,
-            allow_dummy_data=args.allow_dummy_data,
-            defect_train_fraction=args.defect_train_fraction,
-        )
     raise ValueError(f"Unsupported benchmark: {benchmark}")
 
 
 def print_metrics_table(spec_name: str, metrics: dict[str, float]):
-    is_mvtec = "image_auroc" in metrics
-    benchmark_name = "MVTec AD (Anomaly Detection)" if is_mvtec else "CIFAR-100-LT (General Long-Tail)"
-    icon = "🏭" if is_mvtec else "📦"
+    benchmark_name = "CIFAR-100-LT (General Long-Tail)"
+    icon = "📦"
     
     print(f"\n{'='*70}")
     print(f"{icon} {benchmark_name} | {spec_name}")
@@ -388,21 +303,13 @@ def print_metrics_table(spec_name: str, metrics: dict[str, float]):
     print(f"{'Metric':<40} | {'Value':>10}")
     print(f"{'-'*40}-+-{'-'*10}")
     
-    if is_mvtec:
-        groups = {
-            "Anomaly Detection": ["image_auroc", "image_ap", "f1_max"],
-            "Classification": ["balanced_accuracy"],
-            "Uncertainty & Reliability": ["ece_adaptive", "aurc", "nll", "brier"],
-            "Sparsity": ["active_density", "valid_24_fraction", "masked_throughput_relative"]
-        }
-    else:
-        groups = {
-            "Top Accuracy": ["acc_top1", "acc_top5", "balanced_accuracy", "f1_macro"],
-            "Stratified Accuracy": ["acc_many", "acc_medium", "acc_few"],
-            "Ranking": ["macro_auroc", "macro_pr_auc"],
-            "Uncertainty & Reliability": ["ece_adaptive", "aurc", "nll", "brier"],
-            "Sparsity": ["active_density", "valid_24_fraction", "masked_throughput_relative"]
-        }
+    groups = {
+        "Top Accuracy": ["acc_top1", "acc_top5", "balanced_accuracy", "f1_macro"],
+        "Stratified Accuracy": ["acc_many", "acc_medium", "acc_few"],
+        "Ranking": ["macro_auroc", "macro_pr_auc"],
+        "Uncertainty & Reliability": ["ece_adaptive", "aurc", "nll", "brier"],
+        "Sparsity": ["active_density", "valid_24_fraction", "masked_throughput_relative"]
+    }
         
     printed_keys = set()
     for group_name, keys in groups.items():
@@ -434,37 +341,35 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     spec = EXPERIMENTS[experiment_name]
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    run_name = f"ir{args.ratio}"
+    run_dir = output_root(benchmark) / run_name / experiment_name / f"seed_{seed}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        f"\n[RUN] benchmark={benchmark} case={run_name} experiment={experiment_name} "
+        f"seed={seed} epochs={args.epochs} output={run_dir}",
+        flush=True,
+    )
     loaders = make_loaders(benchmark, args, seed)
     train_loader, val_loader, cal_loader, test_loader, class_weights, p_true, p_train = loaders
-    num_classes = 100 if benchmark == "cifar" else 2
-    class_counts = cifar_class_counts(args.ratio) if benchmark == "cifar" else None
+    num_classes = 100
+    class_counts = cifar_class_counts(args.ratio)
     softmax_eval = uses_softmax_evaluation(spec)
 
-    pretrained = benchmark != "cifar" and not args.no_pretrained
     model = EvidenceResNet(
         num_classes=num_classes,
         dataset=benchmark,
-        pretrained=pretrained,
+        pretrained=False,
         flexible=(spec.name == "flexible_edl"),
     )
     if spec.sparse:
         replace_conv2d_with_mdep(model)
     model = model.to(device)
     if False:  # Forced to single GPU execution
-        if benchmark == "cifar":
-            print(f"[INFO] Detected {torch.cuda.device_count()} GPUs, but using 1 GPU for CIFAR to avoid DataParallel overhead.")
-        else:
-            print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
-            model = TransparentDataParallel(model)
+        print(f"[INFO] Detected {torch.cuda.device_count()} GPUs, but using 1 GPU for CIFAR to avoid DataParallel overhead.")
 
     lr = args.lr
     if lr is None:
-        lr = 1e-3 if benchmark == "cifar" else 1e-4
-
-    run_name = f"ir{args.ratio}" if benchmark == "cifar" else args.category
-    run_dir = output_root(benchmark) / run_name / experiment_name / f"seed_{seed}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\n[RUN] benchmark={benchmark} case={run_name} experiment={experiment_name} seed={seed} epochs={args.epochs} output={run_dir}")
+        lr = 1e-3
 
     if spec.use_mdep_trainer:
         history = train_guds(
@@ -492,26 +397,15 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             log_every=args.log_every,
         )
 
-    if benchmark == "cifar":
-        temperature, bias, thresholds = calibrate_multiclass(
-            model,
-            cal_loader,
-            device,
-            spec.calibration_mode,
-            p_true,
-            p_train,
-            probability_family="softmax" if softmax_eval else "evidential",
-        )
-    else:
-        temperature, bias, thresholds = calibrate_binary_image(
-            model,
-            cal_loader,
-            device,
-            spec.calibration_mode,
-            p_true,
-            p_train,
-            probability_family="softmax" if softmax_eval else "evidential",
-        )
+    temperature, bias, thresholds = calibrate_multiclass(
+        model,
+        cal_loader,
+        device,
+        spec.calibration_mode,
+        p_true,
+        p_train,
+        probability_family="softmax" if softmax_eval else "evidential",
+    )
     prior_delta = prior_logit_delta(
         p_true,
         p_train,
@@ -527,50 +421,26 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     if hasattr(model.fc[1], "logit_adjustment"):
         model.fc[1].logit_adjustment = torch.zeros(1, dtype=torch.float32, device=device)
 
-    if benchmark == "cifar":
-        metrics = evaluate_multiclass(
-            model,
-            test_loader,
-            device,
-            num_classes=num_classes,
-            temperature=temperature,
-            bias=eval_bias,
-            class_counts=class_counts,
-            probability_family="softmax" if softmax_eval else "evidential",
-        )
-        print(
-            "[EVAL] "
-            f"acc={metrics.get('accuracy', float('nan')):.4f} "
-            f"bal_acc={metrics.get('balanced_accuracy', float('nan')):.4f} "
-            f"macro_f1={metrics.get('macro_f1', float('nan')):.4f} "
-            f"macro_auroc={metrics.get('macro_auroc', float('nan')):.4f} "
-            f"macro_pr_auc={metrics.get('macro_pr_auc', float('nan')):.4f} "
-            f"aurc={metrics.get('aurc', float('nan')):.4f} "
-            f"ece={metrics.get('ece_adaptive', float('nan')):.4f}"
-        )
-    else:
-        if softmax_eval:
-            outputs = collect_softmax_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
-        else:
-            outputs = collect_evidential_outputs(model, test_loader, device, temperature=temperature, bias=eval_bias)
-        metrics = binary_image_anomaly_metrics(outputs["y_true"], outputs["probs"])
-        y_pred_default = (outputs["probs"][:, 1] >= 0.5).astype(int)
-        confidences = outputs["probs"].max(axis=1)
-        correct = (y_pred_default == outputs["y_true"]).astype(float)
-        ece_adaptive, _, _, _ = compute_adaptive_ece(confidences, correct)
-        ece_eq_width, _, _, _ = compute_ece(confidences, correct)
-        metrics["ece_adaptive"] = float(ece_adaptive)
-        metrics["ece_eq_width"] = float(ece_eq_width)
-        thresholds = {"default": 0.5}
-        if "threshold_f1_max" in metrics:
-            thresholds["f1_max"] = float(metrics["threshold_f1_max"])
-        if "u_e" in outputs and "u_a" in outputs:
-            metrics.update(uncertainty_separation_metrics(
-                outputs["y_true"],
-                outputs.get("y_pred", y_pred_default),
-                outputs["u_e"],
-                outputs["u_a"],
-            ))
+    metrics = evaluate_multiclass(
+        model,
+        test_loader,
+        device,
+        num_classes=num_classes,
+        temperature=temperature,
+        bias=eval_bias,
+        class_counts=class_counts,
+        probability_family="softmax" if softmax_eval else "evidential",
+    )
+    print(
+        "[EVAL] "
+        f"acc={metrics.get('accuracy', float('nan')):.4f} "
+        f"bal_acc={metrics.get('balanced_accuracy', float('nan')):.4f} "
+        f"macro_f1={metrics.get('macro_f1', float('nan')):.4f} "
+        f"macro_auroc={metrics.get('macro_auroc', float('nan')):.4f} "
+        f"macro_pr_auc={metrics.get('macro_pr_auc', float('nan')):.4f} "
+        f"aurc={metrics.get('aurc', float('nan')):.4f} "
+        f"ece={metrics.get('ece_adaptive', float('nan')):.4f}"
+    )
 
     if spec.sparse:
         print_sparsity_report(model)
@@ -619,11 +489,11 @@ def selected_experiments(args: argparse.Namespace) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run planned CIFAR-100-LT and MVTec AD paper protocols.")
-    parser.add_argument("--benchmark", choices=["cifar", "mvtec"], required=True)
+    configure_training_runtime()
+    parser = argparse.ArgumentParser(description="Run the planned CIFAR-100-LT paper protocol.")
+    parser.add_argument("--benchmark", choices=["cifar"], default="cifar")
     parser.add_argument("--experiment", action="append", choices=PLANNED_EXPERIMENTS)
     parser.add_argument("--ratio", type=int, default=100, choices=[10, 50, 100])
-    parser.add_argument("--category", type=str, default="hazelnut")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float)
@@ -632,16 +502,10 @@ def main() -> int:
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--save_model", action="store_true")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
-    parser.add_argument("--defect_train_fraction", type=float, default=0.20, help="MVTec few-shot labeled defect fraction for supervised classifier runs.")
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
-
-    if args.benchmark == "mvtec" and args.batch_size == 128:
-        args.batch_size = 32
-    if args.benchmark == "mvtec" and args.epochs == 100:
-        args.epochs = 20
 
     all_results = []
     seeds = args.seeds if args.seeds else [args.seed]
@@ -649,7 +513,7 @@ def main() -> int:
         for experiment_name in selected_experiments(args):
             all_results.append(run_one(args.benchmark, experiment_name, args, seed))
 
-    suffix = f"ir{args.ratio}" if args.benchmark == "cifar" else args.category
+    suffix = f"ir{args.ratio}"
     summary_path = output_root(args.benchmark) / f"{suffix}_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(json_safe(all_results), indent=2), encoding="utf-8")

@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import argparse
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,14 +15,28 @@ from torchvision import transforms, models
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from guds_edl_core import (
     EvidenceLayer, replace_conv2d_with_mdep, EvidentialFocalLoss, 
-    MDEPTrainer
+    MDEPTrainer, configure_training_runtime, dataloader_runtime_kwargs
 )
+
+
+def cifar_data_root() -> str:
+    if os.environ.get("CIFAR_ROOT"):
+        return os.environ["CIFAR_ROOT"]
+    if Path("/kaggle/working").exists():
+        return "/kaggle/working/cifar_data"
+    return "./data"
+
 
 def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
     """
     Loads CIFAR-100 and applies exponential decay to class frequencies.
     """
-    print(f"Loading CIFAR-100-LT with Imbalance Ratio 1:{imbalance_ratio}...")
+    data_root = cifar_data_root()
+    print(
+        f"Loading CIFAR-100-LT with Imbalance Ratio 1:{imbalance_ratio} "
+        f"from {data_root}...",
+        flush=True,
+    )
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -33,8 +48,11 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ])
     
-    train_ds = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
-    test_ds = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
+    print("[CIFAR] Downloading/validating train split...", flush=True)
+    train_ds = torchvision.datasets.CIFAR100(root=data_root, train=True, download=True, transform=transform_train)
+    print("[CIFAR] Downloading/validating test split...", flush=True)
+    test_ds = torchvision.datasets.CIFAR100(root=data_root, train=False, download=True, transform=transform_test)
+    print(f"[CIFAR] Loaded train={len(train_ds)} test={len(test_ds)}", flush=True)
     
     num_classes = 100
     img_num_per_cls = []
@@ -63,13 +81,12 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
         generator=torch.Generator().manual_seed(seed)
     )
 
-    # Use 0 workers on Windows to avoid multiprocess issues during testing
-    workers = 0 if os.name == 'nt' else 4
-    
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=workers)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=workers)
-    cal_loader = DataLoader(cal_ds, batch_size=batch_size, shuffle=False, num_workers=workers)
-    test_loader = DataLoader(test_final_ds, batch_size=batch_size, shuffle=False, num_workers=workers)
+    loader_kwargs = dataloader_runtime_kwargs()
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs)
+    cal_loader = DataLoader(cal_ds, batch_size=batch_size, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_final_ds, batch_size=batch_size, shuffle=False, **loader_kwargs)
     
     # Dampened inverse-frequency weights for GUDS/EDL. Standard CE-style
     # baselines decide separately whether to use class weights.
@@ -83,6 +100,7 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
     return train_loader, val_loader, cal_loader, test_loader, cw, p_true, p_train
 
 if __name__ == "__main__":
+    configure_training_runtime()
     parser = argparse.ArgumentParser(description="CIFAR-100-LT Benchmark Runner for GUDS-EDL")
     parser.add_argument("--imbalance_ratio", type=int, default=100, choices=[10, 50, 100])
     parser.add_argument("--epochs", type=int, default=100)

@@ -1,79 +1,75 @@
 # Kaggle Setup From GitHub
 
-This guide is the recommended way to run the paper experiments on Kaggle once
-the repository is available on GitHub. The code should come from GitHub; the
-datasets should be attached through Kaggle inputs.
+Use this when the code lives on GitHub and the experiments run inside a Kaggle
+notebook.
 
-## 1. Create the Kaggle Notebook
+## 1. Notebook Settings
 
-1. Create a new Kaggle notebook.
-2. Set accelerator to GPU.
-3. Add the required datasets under **Add Input**:
-   - ISIC 2024 training metadata and images for the main paper experiments.
-   - MVTec AD only if you want to run the planned industrial anomaly protocol.
-   - CIFAR-100 is downloaded automatically by `torchvision`, so it usually does
-     not need a Kaggle input dataset.
+- Accelerator: GPU P100 or T4.
+- Internet: on.
+- Persistence: on.
 
-## 2. Clone the Repository
-
-For a public GitHub repository, run this in the first notebook cell:
-
-```bash
-%cd /kaggle/working
-!git clone https://github.com/minhduc110207/MDEP-Microglial-Driven-Evidential-Pruning.git
-%cd MDEP-Microglial-Driven-Evidential-Pruning
-```
-
-For a private repository, create a Kaggle secret named `GITHUB_TOKEN` with read
-access to the repository, then run:
+## 2. Clone And Install
 
 ```python
-from kaggle_secrets import UserSecretsClient
-token = UserSecretsClient().get_secret("GITHUB_TOKEN")
-!git clone https://{token}@github.com/minhduc110207/MDEP-Microglial-Driven-Evidential-Pruning.git
-%cd MDEP-Microglial-Driven-Evidential-Pruning
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_URL = "https://github.com/minhduc110207/MDEP-Microglial-Driven-Evidential-Pruning.git"
+REPO_DIR = Path("/kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning")
+
+def run(cmd, cwd=None):
+    cmd = list(map(str, cmd))
+    print("RUN:", " ".join(cmd))
+    subprocess.run(cmd, cwd=cwd, check=True)
+
+if REPO_DIR.exists():
+    run(["git", "pull", "--ff-only"], cwd=REPO_DIR)
+else:
+    run(["git", "clone", REPO_URL, str(REPO_DIR)])
+
+run([sys.executable, "-m", "pip", "install", "-q", "scikit-learn", "matplotlib", "pandas", "h5py", "tqdm", "scipy"])
+
+os.environ.setdefault("MDEP_NUM_WORKERS", "4")
+os.environ.setdefault("MDEP_PREFETCH_FACTOR", "4")
+os.chdir(REPO_DIR)
 ```
 
-Do not print the token in notebook output.
+## 3. Dataset Setup
 
-## 3. Install Runtime Dependencies
+The runners first search `/kaggle/input`, then repo-local `data/` paths. The
+fastest path is to attach the ISIC 2024 competition dataset as a Kaggle input.
+If it is not attached, use the Kaggle API after accepting the competition rules:
 
-Kaggle normally includes PyTorch, torchvision, numpy, pandas, scikit-learn, and
-matplotlib. If a package is missing, install only the missing package:
+```python
+from pathlib import Path
+
+DATA_DIR = Path("/kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning/data/isic-2024-challenge")
+if not (DATA_DIR / "train-metadata.csv").exists():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    run(["kaggle", "competitions", "download", "-c", "isic-2024-challenge", "-p", DATA_DIR])
+    for archive in DATA_DIR.glob("*.zip"):
+        run(["unzip", "-q", "-n", archive, "-d", DATA_DIR])
+os.environ["ISIC_ROOT"] = str(DATA_DIR)
+```
+
+CIFAR-100 is downloaded automatically by `torchvision` into `./data`.
+
+## 4. Smoke Test
 
 ```bash
-!pip install -q scikit-learn matplotlib pandas
+!python experiments/run_kaggle_paper_suite.py --smoke --no_save_model
 ```
 
-## 4. Verify the Code Path
-
-Run a smoke test before launching the full experiment suite:
-
-```bash
-!python experiments/run_kaggle_paper_suite.py --smoke
-```
-
-The smoke test is the fastest check that imports, dataset discovery, output
-folders, and the core training loop are wired correctly.
-
-## 5. Run the Paper-Facing Suite
-
-Run all ISIC baselines and ablations described by the paper-facing experiment
-map:
+## 5. Full Runs
 
 ```bash
 !python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
-The outputs are written to:
-
-```text
-paper_experiment_outputs/
-```
-
-## 6. Optional Protocols
-
-Run the complete planned CIFAR-100-LT baseline suite:
+CIFAR-only ratios:
 
 ```bash
 !python experiments/generalization_paper_suite.py --benchmark cifar --ratio 10 --epochs 100 --seeds 42 43 44
@@ -81,45 +77,11 @@ Run the complete planned CIFAR-100-LT baseline suite:
 !python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
 ```
 
-Run the complete MVTec AD baseline suite after attaching a real MVTec dataset:
+## 6. Outputs
+
+Metrics and logs are written under `paper_experiment_outputs/`. Use:
 
 ```bash
-!python experiments/generalization_paper_suite.py --benchmark mvtec --category hazelnut --epochs 20 --seeds 42 43 44
-!python experiments/generalization_paper_suite.py --benchmark mvtec --category bottle --epochs 20 --seeds 42 43 44
-!python experiments/mvtec_patchcore_reference.py --category hazelnut --seeds 42 43 44
-!python experiments/mvtec_patchcore_reference.py --category bottle --seeds 42 43 44
-!python experiments/mvtec_simplenet_reference.py --category hazelnut --epochs 10 --seeds 42 43 44
-!python experiments/mvtec_simplenet_reference.py --category bottle --epochs 10 --seeds 42 43 44
-```
-
-If no real MVTec category is found, the runner fails fast by default. This is
-intentional for paper experiments: all reported runs should use the real MVTec
-AD folders. Use `--allow_dummy_data` only for local dry-runs of the classifier
-runner; the PatchCore-style and SimpleNet-style references always require real
-MVTec images.
-
-Run hardware profiling and aggregate all seed results:
-
-```bash
-!python experiments/hardware_profile.py
 !python experiments/summarize_results.py
+!zip -r /kaggle/working/mdep_results.zip paper_experiment_outputs/
 ```
-
-The optional additional-backbone protocol is heavy and should be run in a
-separate notebook/session:
-
-```bash
-!python experiments/backbone_generalization_runner.py --backbones resnet18 convnext_tiny swin_t --epochs 40 --seeds 42 43 44
-```
-
-## 7. Updating Code During a Kaggle Run
-
-If you push fixes to GitHub while the Kaggle notebook is open, update the local
-copy with:
-
-```bash
-%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
-!git pull
-```
-
-Then rerun the smoke test before the full run.

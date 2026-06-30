@@ -16,8 +16,8 @@ resume from or overwrite each other by accident.
 Scope note:
     This is a legacy single-core wrapper around guds_edl_core.py. For the
     complete paper-facing suite, including Fisher/Flexible/R-EDL proxies,
-    topology-cache and calibration ablations, CIFAR-100-LT, MVTec AD,
-    multi-seed execution, and hardware profiling, use:
+    topology-cache and calibration ablations, CIFAR-100-LT, multi-seed
+    execution, and hardware profiling, use:
 
         python experiments/run_kaggle_paper_suite.py --isic_suite all
 """
@@ -97,7 +97,6 @@ PAPER_COVERAGE = (
     "Use run_kaggle_paper_suite.py for complete paper coverage:",
     "- ISIC long-tailed, evidential, dynamic sparse, GUDS, topology-cache, and calibration ablations.",
     "- CIFAR-100-LT planned baseline suite for 1:10, 1:50, and 1:100.",
-    "- MVTec AD planned baseline suite for selected categories.",
     "- Multi-seed execution, hardware profiling, and summary CSV generation.",
 )
 

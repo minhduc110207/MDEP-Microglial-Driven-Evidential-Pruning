@@ -47,6 +47,61 @@ from sklearn.metrics import (
     average_precision_score,
     confusion_matrix, f1_score, precision_recall_curve, auc
 )
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def configure_training_runtime():
+    """Enable safe CUDA speed defaults for fixed-size image training."""
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cudnn.benchmark = os.environ.get("MDEP_CUDNN_BENCHMARK", "1") != "0"
+    try:
+        torch.set_float32_matmul_precision(os.environ.get("MDEP_MATMUL_PRECISION", "high"))
+    except Exception:
+        pass
+
+
+def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
+    if num_workers is None:
+        if os.name == "nt":
+            num_workers = 0
+        else:
+            default_workers = min(4, os.cpu_count() or 4)
+            num_workers = _env_int("MDEP_NUM_WORKERS", default_workers)
+    num_workers = max(0, int(num_workers))
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
+
+    kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": bool(pin_memory),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = max(2, _env_int("MDEP_PREFETCH_FACTOR", 4))
+    return kwargs
+
+
+def move_batch_to_device(inputs, targets, device):
+    non_blocking = getattr(device, "type", None) == "cuda"
+    return (
+        inputs.to(device, non_blocking=non_blocking),
+        targets.to(device, non_blocking=non_blocking),
+    )
+
+
+def make_grad_scaler(enabled=True):
+    enabled = bool(enabled and torch.cuda.is_available())
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=enabled)
 #  SECTION 1 — EDL Core (Evidential Deep Learning foundations)
 # ============================================================================
 
@@ -694,6 +749,7 @@ def update_scores_agents(
 
 class MDEPTrainer:
     def __init__(self, model, optimizer, criterion, total_epochs, warmup_epochs=None, args=None, scheduler=None):
+        configure_training_runtime()
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
@@ -710,8 +766,8 @@ class MDEPTrainer:
         self.gamma_initial = 5.0
         self.gamma_final = 0.15
         
-        # AMP Scaler for Mixed Precision
-        self.scaler = torch.cuda.amp.GradScaler()
+        # AMP scaler for mixed precision on CUDA.
+        self.scaler = make_grad_scaler(enabled=torch.cuda.is_available())
 
     def step_gamma(self, epoch):
         """Cosine-annealed temperature for the Smoothed STE."""
@@ -971,7 +1027,7 @@ class MDEPTrainer:
                     current_lr = self.optimizer.param_groups[0]['lr']
                 current_loss_scale = 1.0
 
-            inputs, targets = inputs.to(device), targets.to(device)
+            inputs, targets = move_batch_to_device(inputs, targets, device)
 
             # Amortized uncertainty-gradient pass. The default caches one structural
             # pass per epoch; the no-cache ablation recomputes it for each batch.
@@ -982,8 +1038,10 @@ class MDEPTrainer:
             self.model.zero_grad()
             self.reset_effective_weight_grads()
             
+            amp_enabled = getattr(device, "type", None) == "cuda"
+
             # Use Automatic Mixed Precision for Forward Pass
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast('cuda', enabled=amp_enabled):
                 evidence = self.model(inputs)
                 
             # Ensure Evidential Loss runs strictly in FP32 to avoid digamma/log underflow
@@ -1236,10 +1294,11 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
         te = Subset(full, range(160, 200))
         p_true = [0.5, 0.5]
         p_train = [0.5, 0.5]
-        return (DataLoader(tr, batch_size=batch_size, shuffle=True),
-                DataLoader(va, batch_size=batch_size),
-                DataLoader(ca, batch_size=batch_size),
-                DataLoader(te, batch_size=batch_size),
+        loader_kwargs = dataloader_runtime_kwargs()
+        return (DataLoader(tr, batch_size=batch_size, shuffle=True, **loader_kwargs),
+                DataLoader(va, batch_size=batch_size, **loader_kwargs),
+                DataLoader(ca, batch_size=batch_size, **loader_kwargs),
+                DataLoader(te, batch_size=batch_size, **loader_kwargs),
                 num_classes,
                 torch.ones(num_classes),
                 p_true,
@@ -1348,13 +1407,12 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     cal_ds   = LongTailedDataset(cal_df,   image_dir, transform=test_tf,  hdf5_path=hdf5_path)
     test_ds  = LongTailedDataset(test_df,  image_dir, transform=test_tf,  hdf5_path=hdf5_path)
     
-    import platform
-    workers = 0 if platform.system() == 'Windows' else 4
-    
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True, prefetch_factor=2 if workers > 0 else None)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True, prefetch_factor=2 if workers > 0 else None)
-    cal_loader   = DataLoader(cal_ds,   batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True, prefetch_factor=2 if workers > 0 else None)
-    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True, prefetch_factor=2 if workers > 0 else None)
+    loader_kwargs = dataloader_runtime_kwargs()
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, **loader_kwargs)
+    cal_loader   = DataLoader(cal_ds,   batch_size=batch_size, shuffle=False, **loader_kwargs)
+    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, **loader_kwargs)
 
     # Compute class weights (dampened inverse frequency to prevent loss/gradient explosion)
     import math

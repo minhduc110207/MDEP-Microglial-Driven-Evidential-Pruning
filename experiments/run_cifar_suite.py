@@ -6,5 +6,5 @@ if __name__ == "__main__":
     if not any(arg.startswith("--benchmark") for arg in sys.argv):
         sys.argv.extend(["--benchmark", "cifar"])
     
-    print("Running CIFAR-100-LT Generalization Suite")
+    print("Running CIFAR-100-LT Generalization Suite", flush=True)
     main()
