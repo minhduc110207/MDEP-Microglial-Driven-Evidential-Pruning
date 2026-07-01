@@ -115,6 +115,8 @@ if __name__ == "__main__":
     parser.add_argument('--kl_scaling', type=str, default='asymmetric', choices=['asymmetric', 'symmetric'])
     parser.add_argument('--disable_efl', action='store_true')
     parser.add_argument('--disable_anticryst', action='store_true')
+    parser.add_argument('--structural_proxy_batches', type=int, default=8)
+    parser.add_argument('--structural_proxy_min_classes', type=int, default=20)
     
     args = parser.parse_args()
     args.use_anticryst = not args.disable_anticryst
@@ -140,8 +142,9 @@ if __name__ == "__main__":
     nn.init.normal_(model.fc[0].weight, mean=0, std=0.001)
     nn.init.constant_(model.fc[0].bias, 0)
     
-    # 2. Convert Dense to MDEP Sparse Multi-Agent Framework
-    replace_conv2d_with_mdep(model)
+    # 2. Convert backbone convs to GUDS-EDL sparse layers. Keep the
+    # 100-class classifier head unmasked so CIFAR follows the paper protocol.
+    replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     model = model.to(device)
     
     # 3. Setup Loss and Trainer

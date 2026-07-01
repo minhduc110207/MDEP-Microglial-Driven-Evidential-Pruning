@@ -793,7 +793,7 @@ class MDEPTrainer:
                 target_layers.append((name, m))
                 
         if not target_layers:
-            print("No MDEP layers found to check gradient flow.")
+            print("No GUDS-EDL sparse layers found to check gradient flow.")
             return
             
         print(f"\n🔍 [Gradient Flow Check - Epoch {epoch}]")
@@ -861,7 +861,7 @@ class MDEPTrainer:
 
     @torch.no_grad()
     def sync_scores_to_current_weights(self):
-        """Refresh latent morphology scores from the dense-warmup weights."""
+        """Refresh latent morphology scores from the warmup-phase weights."""
         for module in self.model.modules():
             if isinstance(module, (MDEPLinear, MDEPConv2d)):
                 module.scores.data.copy_(torch.abs(module.weight.data))
@@ -979,17 +979,17 @@ class MDEPTrainer:
     def train_epoch(self, epoch, dataloader, device, print_interval=200):
         self.model.train()
 
-        # Freezing permutations when transition to sparsity happens
+        # Freeze optional channel permutations when the sparse phase starts.
         if epoch == self.warmup_epochs:
             learned_perm_count = 0
-            print("❄️ Freezing learned permutations into hard index maps...")
+            print("[GUDS-EDL] Entering sparse phase; freezing channel index maps...")
             for module in self.model.modules():
                 if hasattr(module, 'freeze_permutation'):
                     if getattr(module, 'freeze_perm', None) is not None and module.freeze_perm[0] == 0:
                         learned_perm_count += 1
                     module.freeze_permutation()
-            print(f"MDEP channel permutations are frozen/static; learned maps frozen this epoch: {learned_perm_count}")
-            print("Syncing MDEP scores to dense-warmup weights...")
+            print(f"[GUDS-EDL] Channel index maps are static; learned maps frozen this epoch: {learned_perm_count}")
+            print("[GUDS-EDL] Syncing topology scores to warmup weights...")
             self.sync_scores_to_current_weights()
 
         is_warmup = epoch < self.warmup_epochs
@@ -1010,6 +1010,8 @@ class MDEPTrainer:
         proxy_has_run = False
         max_proxy_batches = getattr(self.args, 'structural_proxy_batches', 4) if self.args else 4
         max_proxy_batches = max(1, int(max_proxy_batches))
+        min_proxy_classes = getattr(self.args, 'structural_proxy_min_classes', 2) if self.args else 2
+        min_proxy_classes = max(2, int(min_proxy_classes))
 
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             # Smooth per-batch LR Warmup
@@ -1049,12 +1051,12 @@ class MDEPTrainer:
                     proxy_inputs_buf.append(inputs.detach())
                     proxy_targets_buf.append(targets.detach().view(-1))
                     stacked_targets = torch.cat(proxy_targets_buf, dim=0)
-                    has_multiple_classes = torch.unique(stacked_targets).numel() > 1
+                    has_enough_classes = torch.unique(stacked_targets).numel() >= min_proxy_classes
                     reached_proxy_budget = (
                         len(proxy_targets_buf) >= max_proxy_batches
                         or batch_idx == num_batches - 1
                     )
-                    if has_multiple_classes or reached_proxy_budget:
+                    if has_enough_classes or reached_proxy_budget:
                         proxy_inputs = torch.cat(proxy_inputs_buf, dim=0)
                         proxy_targets = stacked_targets
                         structural_probe_batch = True
@@ -1770,7 +1772,7 @@ def print_sparsity_report(model, detail=False):
     print("-" * 75)
     print(f"  {'TOTAL PARAMS':30s} | {overall:5.1f}% sparse")
     print(f"  {'VALID 2:4 BLOCKS':30s} | {valid_24}/{checked_24}")
-    print(f"  {'THEORETICAL MACs SAVED':30s} | {macs_saved:5.1f}% reduction in MDEP layers")
+    print(f"  {'THEORETICAL MACs SAVED':30s} | {macs_saved:5.1f}% reduction in GUDS-EDL sparse layers")
     print("  *(Masked PyTorch diagnostic; real speedup requires sparse Tensor Core kernels.)*")
     print()
     
@@ -2515,7 +2517,7 @@ def main():
             print(f"⚠️ Error loading checkpoint: {e}. Starting from scratch.")
 
     # ── Training ───────────────────────────────────────────────────
-    print("\n🚀 Starting Training (MDEP Framework)")
+    print("\n[GUDS-EDL] Starting training")
     print("=" * 60)
     for epoch in range(start_epoch, total_epochs):
         # Time-out check (Kaggle T4 limit is 9 hours, we stop early at 8.2 hours = 29500s to save outputs gracefully)

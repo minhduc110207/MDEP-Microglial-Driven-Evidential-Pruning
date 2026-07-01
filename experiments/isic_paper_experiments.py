@@ -1134,6 +1134,7 @@ def train_guds(
     log_every: int = 5,
     verbose_structural_logs: bool = False,
     structural_proxy_batches: int = 4,
+    structural_proxy_min_classes: int = 2,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
@@ -1153,14 +1154,25 @@ def train_guds(
         pruning_strength=spec.pruning_strength,
         verbose_structural_logs=verbose_structural_logs,
         structural_proxy_batches=structural_proxy_batches,
+        structural_proxy_min_classes=structural_proxy_min_classes,
     )
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scheduler=scheduler)
     history = []
     for epoch in range(total_epochs):
         loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
-        history.append({"epoch": epoch + 1, "loss": float(loss), "gamma": float(trainer.step_gamma(epoch))})
+        topo_gamma = float(trainer.step_gamma(epoch))
+        efl_gamma = float(getattr(criterion, "gamma", 0.0))
+        history.append({
+            "epoch": epoch + 1,
+            "objective_loss": float(loss),
+            "topology_gamma": topo_gamma,
+            "efl_gamma": efl_gamma,
+        })
         if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
-            print(f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} loss={loss:.4f} gamma={trainer.step_gamma(epoch):.4f}")
+            print(
+                f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} "
+                f"objective_loss={loss:.4f} topo_gamma={topo_gamma:.4f} efl_gamma={efl_gamma:.4f}"
+            )
     return history
 
 
@@ -1235,12 +1247,12 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     )
     if spec.sparse:
         replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
-        print("[INFO] MDEP sparse mode: backbone convs only, dense classifier head, frozen identity channel order.")
+        print("[INFO] GUDS-EDL sparse mode: 2:4 backbone convs only; classifier head is unmasked by design; identity channel order is frozen.")
     model = model.to(device)
     if False:  # Forced to single GPU execution
         if spec.sparse:
             print(
-                f"[INFO] Detected {torch.cuda.device_count()} GPUs; running sparse MDEP/GUDS on single GPU "
+                f"[INFO] Detected {torch.cuda.device_count()} GPUs; running sparse GUDS-EDL on single GPU "
                 "so cached masks and effective-weight structural gradients stay on the original modules."
             )
         else:

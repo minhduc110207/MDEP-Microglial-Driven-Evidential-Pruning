@@ -362,7 +362,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         flexible=(spec.name == "flexible_edl"),
     )
     if spec.sparse:
-        replace_conv2d_with_mdep(model)
+        replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     model = model.to(device)
     if False:  # Forced to single GPU execution
         print(f"[INFO] Detected {torch.cuda.device_count()} GPUs, but using 1 GPU for CIFAR to avoid DataParallel overhead.")
@@ -382,6 +382,8 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             lr,
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
+            structural_proxy_batches=args.structural_proxy_batches,
+            structural_proxy_min_classes=args.structural_proxy_min_classes,
         )
     else:
         history = train_standard(
@@ -504,6 +506,8 @@ def main() -> int:
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
+    parser.add_argument("--structural_proxy_batches", type=int, default=8, help="Maximum mini-batches accumulated for one cached CIFAR GUDS structural proxy batch.")
+    parser.add_argument("--structural_proxy_min_classes", type=int, default=20, help="Minimum distinct CIFAR classes requested before caching a structural proxy batch.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

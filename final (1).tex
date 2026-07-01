@@ -126,10 +126,12 @@ through a virtual dense probe that preserves gradient isolation, and
 (iii)~projecting the resulting latent scores onto the valid-block 2:4
 feasible set through blockwise Top-2 selection. On the ISIC 2024 skin
 lesion benchmark (${\sim}0.15\%$ minority prevalence), GUDS-EDL
-achieves mean pAUC$_{0.80}{=}0.0868$, Macro-AUROC${=}0.8520$, and
-ECE${=}0.0539$ over three seeds while maintaining exact valid-block
-2:4 feasibility across all wrapped layers, performing competitively
-with both dense evidential baselines and dynamic sparse alternatives.
+achieves the best mean pAUC$_{0.80}{=}0.1168$ and
+Macro-AUROC${=}0.8891$ among the compared dense evidential and
+sparse 2:4 baselines over three seeds, while maintaining exact
+valid-block 2:4 feasibility across all wrapped layers. The gain is
+not uniform across all metrics: Dense EDL remains stronger in balanced
+specificity and calibration, and Static 2:4 EDL obtains higher PR-AUC.
 We position GUDS-EDL as a principled uncertainty-to-topology
 adaptation mechanism for structured-sparse evidential learning rather
 than as a universally dominant classifier.
@@ -426,32 +428,32 @@ The validity checks above establish that the proposed structural update is well-
 \section{Experimental Setup}\label{sec:experiment}
 
 \subsection{Evaluation Benchmark}
-The main empirical claims are centered on ISIC 2024. CIFAR-100-LT, additional backbones, and realized sparse-kernel profiling are treated as future validation targets unless explicitly reported. This distinction is important because the current evidence supports feasibility and stability under the reported case study, not domain-general SOTA performance.
+The main empirical claims are centered on ISIC 2024. A completed CIFAR-100-LT 1:100 diagnostic is reported in Appendix~\ref{app:external}, while additional imbalance profiles, backbones, and realized sparse-kernel profiling remain future validation targets unless explicitly reported. This distinction is important because the current evidence supports feasibility and stability under the reported case study, not domain-general SOTA performance.
 
-\paragraph{ISIC 2024 Case Study.} We instantiate GUDS-EDL on the ISIC 2024 Challenge dataset~\cite{isic2024} (3D-TBP images with approximately 0.15\% minority prevalence). To prevent data leakage, we use a stratified 70/5/5/20 train/validation/calibration/test split grouped by patient\_id. The validation partition is used for decision-threshold sweeps, the calibration partition for temperature and bias calibration, and the held-out test partition for final reporting. Images are resized to $224\times224$ and normalized using ImageNet-1K statistics.
+\paragraph{ISIC 2024 Case Study.} We instantiate GUDS-EDL on the ISIC 2024 Challenge dataset~\cite{isic2024} (3D-TBP images with approximately 0.15\% minority prevalence). To prevent data leakage, we use a stratified 70/5/5/20 train/validation/calibration/test split grouped by patient\_id with split seed 42. The resulting partitions contain 5,775 training images, 21,930 validation images, 24,235 calibration images, and 65,931 held-out test images; the test partition contains 77 malignant and 65,854 benign samples. The validation partition is used for decision-threshold sweeps, the calibration partition for temperature and bias calibration, and the held-out test partition for final reporting. Images are resized to $224\times224$ and normalized using ImageNet-1K statistics.
 
 \paragraph{Metrics.} Because default thresholds are unreliable under extreme prevalence skew, we report validation-selected balanced operating points together with threshold-independent ranking and calibration metrics. The main comparison reports Balanced Accuracy, pAUC$_{0.80}$, Macro-AUROC, PR-AUC, AURC, ECE, and valid-block 2:4 feasibility. Sensitivity and Specificity are reported when available for operating-point diagnostics. Lower AURC and ECE indicate better risk ordering and calibration, respectively. AURC is computed from the empirical risk-coverage curve using the same unnormalized scale across methods.
 
 \subsection{Baselines and Backbones}
-\paragraph{Baselines.} The reported ISIC tables include dense evidential baselines with completed metrics (Dense EDL, Fisher EDL, Flexible EDL, R-EDL), static and dynamic sparse 2:4 baselines (Static 2:4 EDL, RigL-style 2:4), and GUDS-EDL. Softmax long-tailed baselines such as standard CE, focal loss, logit adjustment, class-balanced CE, balanced softmax, LDAM-DRW, cRT, and MiSLAS were trained in the extended suite, but are not included in the main performance tables because complete held-out metrics are not yet available. Additional CIFAR-100-LT baseline training runs were initiated but do not yet contain complete held-out test metrics; these runs are treated as planned validation rather than empirical evidence in the main paper.
+\paragraph{Baselines.} The reported ISIC tables include dense evidential baselines with completed metrics (Dense EDL, Fisher EDL, Flexible EDL, R-EDL), static and dynamic sparse 2:4 baselines (Static 2:4 EDL, RigL-style 2:4), and GUDS-EDL. Softmax long-tailed baselines such as standard CE, focal loss, logit adjustment, class-balanced CE, balanced softmax, LDAM-DRW, cRT, and MiSLAS were trained in the extended suite, but are not included in the main ISIC performance tables because complete held-out metrics are not yet available. The completed CIFAR-100-LT 1:100 runs compare Standard CE, Dense EDL, and GUDS-EDL only as a separate long-tailed diagnostic, not as evidence for domain-general superiority.
 
 \paragraph{Backbone Instantiation and Wrapping.}
 The reported case study uses a ResNet-18 instantiation. Inside each residual block, the $3 \times 3$ convolutional layers are replaced with sparse convolutional wrappers that apply masks generated by latent scores; the first input convolution is kept dense. The structural proxy pass computes the risk-ratio gradient for the pruner and the KL-to-uniform gradient saliency for the regrower. Additional grouping diagnostics are documented in Appendix~B and are not separate claimed contributions.
 
-\paragraph{Implementation Details.} Models are trained using 16-bit mixed precision (AMP)~\cite{micikevicius2018mixed}, while evidential losses are evaluated in FP32. To ensure a strictly fair and consistent evaluation, all models (including standard Long-Tailed baselines that originally employed SGD) are subjected to an identical, modern optimization regime using the AdamW optimizer with Cosine Annealing learning rate scheduling over 100 epochs. This isolates the fundamental algorithmic advantages from discrepancies in hyperparameter tuning. We apply square-root balanced sampling on majority classes, subsampled at approximately 1:20 in training for ISIC, and use validation-based threshold sweeps to select operating points. ECE is computed with 15 equal-width bins unless otherwise stated.
+\paragraph{Implementation Details.} Models are trained using 16-bit mixed precision (AMP)~\cite{micikevicius2018mixed}, while evidential losses are evaluated in FP32. To ensure a consistent evaluation, the reported ISIC models use AdamW with cosine annealing over 40 epochs, a one-epoch learning-rate warmup, and the same validation/calibration/test protocol. We apply square-root balanced sampling on majority classes, subsampled at approximately 1:20 in training for ISIC, and use validation-based threshold sweeps to select operating points. ECE is computed with 15 equal-width bins unless otherwise stated.
 
 \section{Results on the ISIC 2024 Case Study}\label{sec:results}
 
 \subsection{Repeated-Seed Evidential Comparison}
-Table~\ref{tab:main_evidential_comparison} compares GUDS-EDL with dense evidential baselines using repeated seeds and the same calibration/threshold-selection protocol when available. The central claim is conservative: GUDS-EDL demonstrates that Dirichlet-derived uncertainty can guide stable valid-block 2:4 sparse topology under extreme class imbalance, achieving competitive ranking-calibration behavior while preserving exact structured sparsity.
+Table~\ref{tab:main_evidential_comparison} compares GUDS-EDL with dense evidential and sparse 2:4 baselines using repeated seeds and the same split and threshold-selection protocol. The central empirical finding is that GUDS-EDL is the strongest high-sensitivity ranking model in this ISIC 2024 comparison: it obtains the best mean pAUC$_{0.80}$ and Macro-AUROC while preserving exact valid-block 2:4 sparsity.
 
 
 
-Compared with dense evidential baselines, GUDS-EDL should not be interpreted as a uniformly better classifier. Its main advantage is that it obtains competitive threshold-independent ranking and calibration while enforcing exact valid-block 2:4 sparsity. Dense baselines remain important upper-reference models because they do not impose the same structured sparsity constraint. GUDS-EDL achieves the best mean Macro-AUROC, competitive pAUC$_{0.80}$, and strong AURC among the compared methods.
+Compared with dense evidential baselines, GUDS-EDL should not be interpreted as a uniformly better classifier. Its main advantage is high-sensitivity ranking under exact structured sparsity: mean pAUC$_{0.80}$ improves over Dense EDL ($0.1168$ vs. $0.0885$), and mean Macro-AUROC improves from $0.8663$ to $0.8891$. Dense EDL remains slightly stronger in balanced accuracy and calibration, and several evidential baselines obtain higher PR-AUC. This supports a ranking--specificity--calibration trade-off rather than a claim of global dominance.
 
 \begin{table*}[t]
 \centering
-\caption{ISIC 2024 repeated-seed comparison under validation-selected balanced operating points. Values are mean $\pm$ standard deviation over completed seeds. Lower AURC and ECE are better. GUDS-EDL is evaluated under exact valid-block 2:4 sparsity; dense evidential baselines use the same split, calibration protocol, and threshold selection.}
+\caption{ISIC 2024 repeated-seed comparison under validation-selected balanced operating points. Values are mean $\pm$ standard deviation over seeds 42, 123, and 456. Lower AURC and ECE are better. GUDS-EDL is evaluated under exact valid-block 2:4 sparsity; dense evidential baselines use the same split, calibration protocol, and threshold selection.}
 \label{tab:main_evidential_comparison}
 \renewcommand{\arraystretch}{1.08}
 \setlength{\tabcolsep}{3.2pt}
@@ -460,23 +462,23 @@ Compared with dense evidential baselines, GUDS-EDL should not be interpreted as 
 \toprule
 \textbf{Model} & \textbf{Type} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
 \midrule
-Dense EDL & Dense evid. & $\mathbf{0.8020\pm0.0396}$ & $0.0600\pm0.0306$ & $0.8210\pm0.0577$ & $0.0279\pm0.0024$ & $0.0004\pm0.0002$ & $0.0519\pm0.0021$ \\
-Fisher EDL & Dense evid. & $0.7359\pm0.0272$ & $0.0428\pm0.0263$ & $0.7684\pm0.0624$ & $\mathbf{0.0313\pm0.0035}$ & $0.0006\pm0.0002$ & $\mathbf{0.0501\pm0.0013}$ \\
-Flexible EDL & Dense evid. & $0.7897\pm0.0660$ & $0.0650\pm0.0247$ & $0.8308\pm0.0428$ & $0.0243\pm0.0043$ & $0.0005\pm0.0002$ & $0.0508\pm0.0021$ \\
-R-EDL & Dense evid. & $0.7605\pm0.0381$ & $0.0396\pm0.0140$ & $0.7702\pm0.0378$ & $0.0291\pm0.0044$ & $0.0006\pm0.0002$ & $0.0510\pm0.0021$ \\
+Dense EDL & Dense evid. & $\mathbf{0.8221\pm0.0195}$ & $0.0885\pm0.0124$ & $0.8663\pm0.0102$ & $0.0413\pm0.0085$ & $0.00030\pm0.00010$ & $0.0524\pm0.0013$ \\
+Fisher EDL & Dense evid. & $0.8080\pm0.0152$ & $0.0842\pm0.0111$ & $0.8604\pm0.0163$ & $0.0414\pm0.0104$ & $0.00030\pm0.00010$ & $\mathbf{0.0519\pm0.0009}$ \\
+Flexible EDL & Dense evid. & $0.8059\pm0.0116$ & $0.0847\pm0.0022$ & $0.8595\pm0.0078$ & $0.0373\pm0.0064$ & $0.00027\pm0.00006$ & $0.0525\pm0.0013$ \\
+R-EDL & Dense evid. & $0.8034\pm0.0357$ & $0.0743\pm0.0175$ & $0.8479\pm0.0241$ & $0.0422\pm0.0051$ & $0.00037\pm0.00015$ & $0.0523\pm0.0012$ \\
 \midrule
-\textbf{GUDS-EDL} & Sparse 2:4 & $0.7790\pm0.0418$ & $\mathbf{0.0868\pm0.0293}$ & $\mathbf{0.8520\pm0.0382}$ & $0.0230\pm0.0074$ & $\mathbf{0.00035\pm0.0002}$ & $0.0539\pm0.0018$ \\
+\textbf{GUDS-EDL} & Sparse 2:4 & $0.8110\pm0.0050$ & $\mathbf{0.1168\pm0.0070}$ & $\mathbf{0.8891\pm0.0080}$ & $0.0355\pm0.0063$ & $\mathbf{0.00023\pm0.00006}$ & $0.0564\pm0.0009$ \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
 \end{table*}
 
 \subsection{Sparse 2:4 Baseline Comparison}
-Table~\ref{tab:sparse_comparison} compares GUDS-EDL against sparse 2:4 baselines with completed metrics. Models with fewer completed seeds are explicitly marked.
+Table~\ref{tab:sparse_comparison} compares GUDS-EDL against sparse 2:4 baselines with completed three-seed metrics.
 
 \begin{table*}[t]
 \centering
-\caption{Comparison with sparse 2:4 baselines. Values are mean $\pm$ standard deviation over completed seeds. Static 2:4 EDL and RigL-style 2:4 are reported over two completed seeds; GUDS-EDL is reported over three seeds. All sparse models maintain 50\% active density in wrapped layers. Lower AURC and ECE are better.}
+\caption{Comparison with sparse 2:4 baselines over seeds 42, 123, and 456. Values are mean $\pm$ standard deviation. All sparse models maintain 50\% active density in wrapped layers. Lower AURC and ECE are better.}
 \label{tab:sparse_comparison}
 \renewcommand{\arraystretch}{1.08}
 \setlength{\tabcolsep}{3.0pt}
@@ -485,18 +487,19 @@ Table~\ref{tab:sparse_comparison} compares GUDS-EDL against sparse 2:4 baselines
 \toprule
 \textbf{Model} & \textbf{Seeds} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
 \midrule
-Static 2:4 EDL & 2 & $0.7520\pm0.0166$ & $0.0421\pm0.0186$ & $0.7789\pm0.0415$ & $0.0217\pm0.0023$ & $0.0005\pm0.0001$ & $0.0571\pm0.0060$ \\
-RigL-style 2:4 & 2 & $0.7727\pm0.1037$ & $\mathbf{0.0863\pm0.0638}$ & $0.8299\pm0.1150$ & $0.0234\pm0.0121$ & $\mathbf{0.0003\pm0.0004}$ & $\mathbf{0.0545\pm0.0001}$ \\
-\textbf{GUDS-EDL} & 3 & $\mathbf{0.7790\pm0.0418}$ & $0.0868\pm0.0293$ & $\mathbf{0.8520\pm0.0382}$ & $\mathbf{0.0230\pm0.0074}$ & $0.00035\pm0.0002$ & $0.0539\pm0.0018$ \\
+Static 2:4 EDL & 3 & $0.7956\pm0.0121$ & $0.0965\pm0.0109$ & $0.8663\pm0.0149$ & $\mathbf{0.0444\pm0.0099}$ & $\mathbf{0.00023\pm0.00006}$ & $\mathbf{0.0529\pm0.0006}$ \\
+RigL-style 2:4 & 3 & $0.7696\pm0.0608$ & $0.1096\pm0.0100$ & $0.8829\pm0.0170$ & $0.0373\pm0.0034$ & $\mathbf{0.00023\pm0.00006}$ & $0.0541\pm0.0004$ \\
+\textbf{GUDS-EDL} & 3 & $\mathbf{0.8110\pm0.0050}$ & $\mathbf{0.1168\pm0.0070}$ & $\mathbf{0.8891\pm0.0080}$ & $0.0355\pm0.0063$ & $\mathbf{0.00023\pm0.00006}$ & $0.0564\pm0.0009$ \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
 \end{table*}
 
-Compared with Static 2:4 EDL, GUDS-EDL improves ranking metrics such as pAUC$_{0.80}$ and Macro-AUROC, suggesting that uncertainty-guided topology adaptation is more informative than a fixed valid-block sparse mask. Compared with RigL-style 2:4, GUDS-EDL is numerically comparable on pAUC$_{0.80}$ and higher on Macro-AUROC, while RigL remains a strong sparse ranking baseline. Therefore, the sparse comparison supports competitive uncertainty-guided topology rather than a claim of uniform superiority over dynamic sparse training.
+Compared with Static 2:4 EDL, GUDS-EDL improves balanced accuracy ($0.8110$ vs. $0.7956$), pAUC$_{0.80}$ ($0.1168$ vs. $0.0965$), and Macro-AUROC ($0.8891$ vs. $0.8663$), suggesting that uncertainty-guided topology adaptation is more informative than a fixed valid-block sparse mask for high-sensitivity ranking. Compared with RigL-style 2:4, GUDS-EDL improves pAUC$_{0.80}$ ($0.1168$ vs. $0.1096$), Macro-AUROC ($0.8891$ vs. $0.8829$), and balanced accuracy ($0.8110$ vs. $0.7696$), with substantially lower operating-point variance. Static 2:4 remains stronger in PR-AUC and ECE, so the sparse comparison supports a ranking/stability advantage rather than uniform superiority.
 
 \subsection{Seed-Level GUDS-EDL Behavior}
-Seed-level results are reported in Appendix~\ref{app:seed_level}; across three seeds, GUDS-EDL obtains mean pAUC$_{0.80}=0.0868$, Macro-AUROC $=0.8520$, and ECE $=0.0539$.
+Seed-level results are reported in Appendix~\ref{app:seed_level}; across seeds 42, 123, and 456, GUDS-EDL obtains mean balanced accuracy $0.8110$, sensitivity $0.7835$, specificity $0.8386$, pAUC$_{0.80}=0.1168$, Macro-AUROC $=0.8891$, PR-AUC $=0.0355$, AURC $=0.00023$, and ECE $=0.0564$.
+The repeated-seed behavior is also more stable than the RigL-style sparse baseline at the balanced operating point: GUDS-EDL has balanced-accuracy, sensitivity, and specificity standard deviations of $0.0050$, $0.0418$, and $0.0399$, respectively, compared with $0.0608$, $0.2088$, and $0.1251$ for RigL-style 2:4.
 
 \subsection{Historical Design-Selection Diagnostics}
 \label{subsec:ablation}
@@ -506,18 +509,18 @@ absolute-gradient pruning, and symmetric KL/KL-uniform variants were
 competitive. These findings motivated the official conservative GUDS-EDL
 configuration. Because these diagnostics were conducted on a prior
 configuration, we use them only for design attribution rather than as proof
-that the official configuration dominates all variants. Full tables are provided in Appendix~\ref{app:ablation}.
+that the default configuration dominates all variants. Full tables are provided in Appendix~\ref{app:ablation}.
 
 \paragraph{Sparse morphology diagnostics.}
-All sparse models preserved 50.0\% active density, satisfied 21/21 valid 2:4 wrapped layers, and showed no detected structural collapse (see Appendix~\ref{app:seed_level}). This diagnostic rules out a trivial explanation in which performance differences arise from invalid masks or collapsed sparse layers.
+All sparse models preserved 50.0\% active density and showed no detected structural collapse (see Appendix~\ref{app:seed_level}). For the current GUDS-EDL runs, all wrapped sparse layers satisfied exact valid-block 2:4 feasibility, with 2,789,376/2,789,376 valid blocks and no detected representational collapse. This diagnostic rules out a trivial explanation in which performance differences arise from invalid masks or collapsed sparse layers.
 
 \section{Limitations and Broader Impact}\label{sec:limitations}
-GUDS-EDL should not be interpreted as a universally dominant sparse classifier. RigL-style 2:4 remains a strong sparse ranking baseline, and dense evidential models remain important reference models when structured sparsity is not required. The current evidence is centered on ISIC 2024; CIFAR-100-LT logs do not yet contain complete held-out metrics and are therefore not used to support domain-general claims.
+GUDS-EDL should not be interpreted as a universally dominant sparse classifier. On ISIC 2024 it is the strongest high-sensitivity ranking model among the compared methods, but it does not dominate all metrics. Dense EDL remains stronger in balanced accuracy, specificity, and calibration; Static 2:4 EDL obtains higher PR-AUC and lower ECE; and GUDS-EDL trades some specificity for higher sensitivity and high-TPR ranking. At the balanced operating point, GUDS-EDL reaches mean sensitivity $0.7835$ but specificity $0.8386$, below the reported Dense EDL and Static 2:4 specificities of $0.9158$ and $0.9140$. The current evidence is centered on ISIC 2024. The completed CIFAR-100-LT 1:100 diagnostic in Appendix~\ref{app:external} preserves exact 2:4 structure for GUDS-EDL but is unfavorable on classification and ranking metrics relative to Standard CE and Dense EDL; it is therefore used as a limitation and stress test rather than as support for domain-general claims.
 
 The ablations further narrow the claim. Historical diagnostics suggest that signed pruning preserves sensitivity and ranking better than absolute-gradient pruning in the prior configuration, but this should not be read as a repeated-seed ablation of the default v2\_A model. Asymmetric KL is not uniformly superior to symmetric KL, and calibration remains difficult under extreme prevalence. Exact valid-block 2:4 feasibility does not imply realized acceleration without sparse Tensor Core-compatible kernels and compatible layouts. In high-stakes use, such models should support human decision making rather than act as autonomous diagnostic systems, and dataset bias across skin types remains a concern.
 
 \section{Conclusion}\label{sec:conclusion}
-We introduced GUDS-EDL, a conservative uncertainty-to-topology sparse evidential framework for extremely imbalanced classification. The default configuration combines topology caching, softened signed first-order pruning, KL-uniform regrowth, symmetric KL regularization, and evidential focal learning under exact valid-block 2:4 sparsity. Its structural controller is supported by well-posedness checks for Dirichlet signals, proxy-batch risk-ratio concentration, local first-order saliency, gradient isolation, bounded latent scores, and exact valid-block projection. On ISIC 2024, GUDS-EDL achieves competitive ranking and calibration behavior---mean pAUC$_{0.80}=0.0868$, Macro-AUROC$=0.8520$, and ECE$=0.0539$---while preserving exact structured sparsity and showing no detected representational collapse. Historical design diagnostics identify topology caching and signed pruning as useful design choices, while RigL-style 2:4 remains a strong sparse ranking baseline. Overall, GUDS-EDL is best viewed as a well-defined, cache-stabilized uncertainty-guided sparse adaptation mechanism whose broader validity should be tested on additional datasets, backbones, ablations, and hardware-aware sparse kernels.
+We introduced GUDS-EDL, a conservative uncertainty-to-topology sparse evidential framework for extremely imbalanced classification. The default configuration combines topology caching, softened signed first-order pruning, KL-uniform regrowth, symmetric KL regularization, and evidential focal learning under exact valid-block 2:4 sparsity. Its structural controller is supported by well-posedness checks for Dirichlet signals, proxy-batch risk-ratio concentration, local first-order saliency, gradient isolation, bounded latent scores, and exact valid-block projection. On ISIC 2024, GUDS-EDL achieves the best mean pAUC$_{0.80}=0.1168$ and Macro-AUROC$=0.8891$ among the compared dense evidential and sparse 2:4 baselines, while preserving exact structured sparsity and showing no detected representational collapse. It is not the best calibrated or highest-PR-AUC model, so the strongest supported conclusion is narrower: GUDS-EDL is the strongest high-sensitivity ranking model in this comparison under exact 2:4 structured sparsity. Historical design diagnostics identify topology caching and signed pruning as useful design choices, while broader validity should be tested on additional datasets, backbones, ablations, and hardware-aware sparse kernels.
 
 
 \begin{thebibliography}{10}
@@ -1113,22 +1116,24 @@ LaTeX moves the double-column table to the next page.
 
 \begin{table*}[!t]
 \centering
-\caption{Seed-level GUDS-EDL results on ISIC 2024. Lower AURC and ECE are better. Mean Epi. and Mean Alea. denote the average epistemic and aleatoric uncertainty over the test set. SE@15 denotes sensitivity at a fixed 15\% review budget.}
+\caption{Seed-level GUDS-EDL results on ISIC 2024 for split seed 42. Lower AURC and ECE are better. Thresholds are selected on the validation partition and then frozen for held-out test evaluation.}
 \label{tab:seed_level}
 \small
 \renewcommand{\arraystretch}{1.1}
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}l c c c c c c c c c@{}}
+\setlength{\tabcolsep}{3.2pt}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}l c c c c c c c c@{}}
 \toprule
-\textbf{Seed} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{SE@15} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ & \textbf{Mean Epi.} & \textbf{Mean Alea.} \\
+\textbf{Seed} & \textbf{Bal. Acc.} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro-AUROC} $\uparrow$ & \textbf{PR-AUC} $\uparrow$ & \textbf{AURC} $\downarrow$ & \textbf{ECE} $\downarrow$ \\
 \midrule
-42 & $0.7590$ & $0.0621$ & $0.8100$ & $0.4286$ & $0.0143$ & $0.00059$ & $0.0556$ & $0.1135$ & $0.1817$ \\
-43 & $0.7503$ & $0.1204$ & $0.8861$ & $0.5281$ & $0.0267$ & $0.00022$ & $0.0539$ & $0.1100$ & $0.1812$ \\
-44 & $0.8278$ & $0.0780$ & $0.8598$ & $0.5256$ & $0.0281$ & $0.00023$ & $0.0521$ & $0.1059$ & $0.1786$ \\
+42 & $0.8155$ & $0.7662$ & $0.8649$ & $0.1244$ & $0.8982$ & $0.0421$ & $0.0002$ & $0.0555$ \\
+123 & $0.8119$ & $0.8312$ & $0.7927$ & $0.1105$ & $0.8834$ & $0.0349$ & $0.0003$ & $0.0565$ \\
+456 & $0.8057$ & $0.7532$ & $0.8581$ & $0.1155$ & $0.8857$ & $0.0296$ & $0.0002$ & $0.0573$ \\
 \midrule
-Mean & $0.7790$ & $0.0868$ & $0.8520$ & $0.4941$ & $0.0230$ & $0.00035$ & $0.0539$ & $0.1098$ & $0.1805$ \\
+Mean $\pm$ Std & $0.8110\pm0.0050$ & $0.7835\pm0.0418$ & $0.8386\pm0.0399$ & $0.1168\pm0.0070$ & $0.8891\pm0.0080$ & $0.0355\pm0.0063$ & $0.00023\pm0.00006$ & $0.0564\pm0.0009$ \\
 \bottomrule
 \end{tabular}
+\end{adjustbox}
 \end{table*}
 
 Table~\ref{tab:structural_diagnostics} reports the corresponding structural
@@ -1136,18 +1141,18 @@ validity diagnostics for the sparse models.
 
 \begin{table}[!t]
 \centering
-\caption{Structural diagnostics on ISIC 2024. All models maintained exact valid-block 2:4 sparsity across all 21 wrapped convolutional layers with no detected structural collapse.}
+\caption{Structural diagnostics on ISIC 2024. Sparse models maintained 50.0\% active density with no detected structural collapse. The current GUDS-EDL runs satisfy all complete valid 2:4 blocks in the wrapped sparse layers.}
 \label{tab:structural_diagnostics}
 \small
 \renewcommand{\arraystretch}{1.1}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}l c c c@{}}
 \toprule
-\textbf{Model} & \textbf{Active Density} & \textbf{Valid 2:4 Layers} & \textbf{Collapse Detected} \\
+\textbf{Model} & \textbf{Active Density} & \textbf{Valid 2:4 Blocks} & \textbf{Collapse Detected} \\
 \midrule
-Static 2:4 EDL & 50.0\% & 21/21 & No \\
-RigL-style 2:4 & 50.0\% & 21/21 & No \\
-\textbf{GUDS-EDL (official)} & 50.0\% & 21/21 & No \\
+Static 2:4 EDL & 50.0\% & Exact 2:4 & No \\
+RigL-style 2:4 & 50.0\% & Exact 2:4 & No \\
+\textbf{GUDS-EDL} & 50.0\% & 2,789,376/2,789,376 & No \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1256,6 +1261,26 @@ Broader validation on CIFAR-100-LT, additional backbones, sparse Tensor Core-com
 \subsection{CIFAR-100-LT Protocol}
 To evaluate general long-tailed learning, we plan to use CIFAR-100-LT with varying imbalance profiles (1:10, 1:50, 1:100). The protocol will evaluate top-1/top-5 accuracy, balanced accuracy, macro-F1, many/medium/few-shot accuracy, macro-AUROC, macro-PR-AUC, NLL, Brier score, ECE, AURC, and failure-detection metrics against standard long-tailed methods (CE, Focal Loss, Logit Adjustment, Class-Balanced Loss, Balanced Softmax, LDAM-DRW, cRT, and MiSLAS-style LAS+cRT), evidential baselines (Dense EDL, Fisher EDL, Flexible EDL, and R-EDL), and sparse baselines (Static 2:4 EDL and RigL-style dynamic sparsity).
 
+A completed CIFAR-100-LT 1:100 run over seeds 42, 123, and 456 is included only as a diagnostic stress test. As shown in Table~\ref{tab:cifar_ir100_diagnostic}, GUDS-EDL remains structurally healthy but does not outperform Standard CE or Dense EDL on this general long-tailed benchmark. This negative result supports the paper's conservative scope: the present contribution is a well-defined uncertainty-guided valid-block sparse mechanism validated primarily in the ISIC screening setting, not a universal long-tailed classification recipe.
+
+\begin{table*}[!t]
+\centering
+\small
+\caption{CIFAR-100-LT 1:100 diagnostic over seeds 42, 123, and 456. Values are mean $\pm$ std. The run is reported as a scope and stress-test result, not as a central performance claim.}
+\label{tab:cifar_ir100_diagnostic}
+\begin{tabular}{lcccccc}
+\toprule
+Model & Bal. Acc. & Macro-F1 & Macro-AUROC & Macro-PR-AUC & ECE & AURC \\
+\midrule
+Standard CE & $0.4097 \pm 0.0061$ & $0.3842 \pm 0.0080$ & $0.9409 \pm 0.0029$ & $0.4228 \pm 0.0085$ & $0.2578 \pm 0.0116$ & $0.3513 \pm 0.0093$ \\
+Dense EDL & $0.3623 \pm 0.0148$ & $0.3268 \pm 0.0166$ & $0.7600 \pm 0.0080$ & $0.2757 \pm 0.0242$ & $0.2321 \pm 0.0216$ & $0.4809 \pm 0.0409$ \\
+GUDS-EDL & $0.3294 \pm 0.0064$ & $0.2991 \pm 0.0076$ & $0.7542 \pm 0.0053$ & $0.2463 \pm 0.0104$ & $0.1858 \pm 0.0084$ & $0.5454 \pm 0.0134$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+For GUDS-EDL, all three CIFAR-100-LT runs preserved 50.0\% active density, satisfied all valid 2:4 blocks in the wrapped layers (2,802,176/2,802,176), and showed no detected representational collapse. Thus the diagnostic separates structural feasibility from task-level competitiveness: exact 2:4 validity remains intact, but CIFAR-100-LT performance indicates that additional tuning or dataset-specific design is needed before making broader long-tailed claims.
+
 \subsection{Hardware Profiling Protocol}
 Efficiency will be profiled across different hardware configurations to measure active parameters, valid 2:4 block fraction, theoretical active-density reduction, peak VRAM during structural updates, and forward-pass throughput. Standard masked PyTorch execution is treated as an implementation diagnostic. Actual acceleration claims require sparse Tensor Core-compatible kernels and layouts, such as cuSPARSELt or TensorRT sparse execution, and should be reported separately from structural feasibility.
 
@@ -1269,14 +1294,14 @@ For controlled long-tailed recognition, CIFAR-100-LT should be used to separate 
 
 \subsection*{1. Experimental Setting and Hyperparameters}
 \begin{itemize}
-    \item \textbf{Random Seeds:} Main evidential baseline comparisons are evaluated over three independent random seeds when available. Component ablations are reported over the completed seeds available for each variant; single-seed ablations are explicitly marked as diagnostic.
+    \item \textbf{Random Seeds:} Main ISIC comparisons use model seeds 42, 123, and 456 with split seed 42. Component ablations are reported over the completed seeds available for each variant; single-seed ablations are explicitly marked as diagnostic.
     \item \textbf{Preprocessing \& Dimensions:} Images are resized to $224 \times 224$ and normalized using ImageNet channel-wise statistics: $\mu = [0.485, 0.456, 0.406]$ and $\sigma = [0.229, 0.224, 0.225]$. Data augmentation includes horizontal and vertical flips.
     \item \textbf{Optimizer and Learning Rate Schedule:} We employ the AdamW optimizer ($\beta_1=0.9$, $\beta_2=0.999$, weight decay $0.01$ on active weights). The learning rate is initialized at $1e-6$ and linearly warmed up to $4e-5$ over the first epoch, followed by a cosine annealing schedule over 40 epochs.
 \end{itemize}
 
 \subsection*{2. Evaluation Protocols}
 \begin{itemize}
-    \item \textbf{Validation/Test Split Rules:} The ISIC 2024 dataset is partitioned into 70\% training, 5\% validation, 5\% calibration, and 20\% test sets. To guarantee zero patient-level data leakage, splits are strictly grouped by patient ID using a stratified grouping split protocol. The test set is strictly touched once for final reporting.
+    \item \textbf{Validation/Test Split Rules:} The ISIC 2024 dataset is partitioned into 70\% training, 5\% validation, 5\% calibration, and 20\% test sets using split seed 42. The resulting split contains 5,775 training images, 21,930 validation images, 24,235 calibration images, and 65,931 test images, with 77 malignant and 65,854 benign test cases. To guarantee zero patient-level data leakage, splits are strictly grouped by patient ID using a stratified grouping split protocol. The test set is strictly touched once for final reporting.
     \item \textbf{Threshold Selection Protocol:} For ISIC, operating points are selected by performing threshold sweeps on the isolated validation partition to hit target clinical sensitivities ($\ge 80\%$), while temperature and bias parameters are fitted on the separate calibration partition. Validation-derived thresholds are frozen before final test evaluation.
     \item \textbf{ECE Binning and pAUC:} ECE is computed using 15 equally spaced confidence bins, and partial AUROC is computed strictly within the True Positive Rate interval $[0.80, 1.0]$.
 \end{itemize}

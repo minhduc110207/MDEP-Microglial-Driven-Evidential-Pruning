@@ -128,6 +128,8 @@ The all-in-one launcher defaults to:
 - ISIC `--isic_suite all`
 - CIFAR ratios `10 50 100`
 - seeds `42 123 456` unless `--smoke` is used
+- ISIC `--split_seed 42`, so all model seeds share the same patient-level
+  train/validation/calibration/test split
 - CIFAR full planned suite when no `--experiment` is selected
 
 That is a very large workload. Use focused commands first, then expand.
@@ -142,6 +144,7 @@ That is a very large workload. Use focused commands first, then expand.
     --epochs 40 \
     --batch_size 32 \
     --seeds 42 \
+    --split_seed 42 \
     --no_save_model
 ```
 
@@ -193,6 +196,7 @@ matters.
     --lr 4e-5 \
     --subsample_scope train \
     --seeds 42 123 456 \
+    --split_seed 42 \
     --no_save_model
 ```
 
@@ -205,6 +209,7 @@ matters.
     --lr 4e-5 \
     --subsample_scope train \
     --seeds 42 123 456 \
+    --split_seed 42 \
     --no_save_model
 ```
 
@@ -217,8 +222,14 @@ matters.
     --lr 4e-5 \
     --subsample_scope train \
     --seeds 42 123 456 \
+    --split_seed 42 \
     --no_save_model
 ```
+
+`run_isic_guds_ablations.py` lists `full_guds` first. Because the ISIC runner
+now loops experiment-first and seed-second, the first three ablation jobs are
+`full_guds` with model seeds `42`, `123`, and `456` on the fixed
+`split_seed=42` split.
 
 ### CIFAR-100-LT
 
@@ -245,13 +256,15 @@ when `--experiment` is omitted:
 !python -u experiments/run_cifar_suite.py --ratio 10 --epochs 100 --batch_size 128 --seeds 42 123 456
 ```
 
-## 7. Why Seed 42 Can Look Slow
+## 7. Why ISIC Can Look Slow After Training
 
 ISIC training is not finished when the final epoch prints. After epoch 40, the
 runner still performs calibration, adaptive-mode evaluation, quality-gate
-reporting, extended metrics, and result writing. This is especially visible for
-seed 42 because the split includes large validation, calibration, and test
-loaders. Wait for the final `[DONE]` line before assuming the run is stuck.
+reporting, extended metrics, and result writing. With the fixed
+`--split_seed 42` protocol, model seeds `42`, `123`, and `456` use the same
+validation, calibration, and test loaders; runtime differences mostly come from
+training dynamics and sparse structural updates, not from different data splits.
+Wait for the final `[DONE]` line before assuming the run is stuck.
 
 Use `--no_save_model` for broad ISIC sweeps. It avoids checkpoint writes and
 keeps Kaggle storage smaller.
@@ -275,6 +288,7 @@ Use this only after the focused runs work:
 ```python
 !python experiments/run_kaggle_paper_suite.py \
     --isic_suite all \
+    --split_seed 42 \
     --no_save_model \
     --keep_going
 ```
@@ -286,6 +300,7 @@ For a cheaper all-in-one pass:
     --isic_suite main_tables \
     --cifar_ratios 100 \
     --seeds 42 \
+    --split_seed 42 \
     --no_save_model \
     --keep_going
 ```
@@ -298,6 +313,7 @@ To run ISIC only:
     --skip_hardware \
     --isic_suite main_tables \
     --seeds 42 \
+    --split_seed 42 \
     --no_save_model
 ```
 
@@ -309,7 +325,8 @@ To run ISIC only:
 - Use `--no_save_model` for ISIC broad sweeps unless checkpoints are required.
 - For CIFAR, checkpoints are already off by default. Add `--save_model` only
   when needed.
-- Use one seed first, then launch multi-seed runs.
+- Use one model seed first, then launch multi-seed runs with the same
+  `--split_seed`.
 - Split ISIC softmax, ISIC evidential, ISIC ablations, and each CIFAR ratio into
   separate notebooks for faster wall-clock completion.
 - If data loading stalls, retry with `MDEP_NUM_WORKERS=2`.

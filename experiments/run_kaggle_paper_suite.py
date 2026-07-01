@@ -97,6 +97,8 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
             str(batch_size),
             "--seeds",
             *[str(seed) for seed in args.seeds],
+            "--split_seed",
+            str(args.split_seed),
         ]
         if args.no_save_model:
             isic_command.append("--no_save_model")
@@ -185,6 +187,7 @@ def main() -> int:
     parser.add_argument("--hardware_warmup", type=int, default=10)
     parser.add_argument("--cifar_ratios", type=int, nargs="+", default=[10, 50, 100])
     parser.add_argument("--seeds", type=int, nargs="+")
+    parser.add_argument("--split_seed", type=int, default=42, help="Fixed ISIC patient split seed used across model seeds.")
     parser.add_argument("--skip_isic", action="store_true")
     parser.add_argument("--skip_cifar", action="store_true")
     parser.add_argument("--skip_hardware", action="store_true")
@@ -195,7 +198,7 @@ def main() -> int:
     parser.add_argument("--keep_going", action="store_true", help="Continue after a failed command.")
     args = parser.parse_args()
     if args.seeds is None:
-        args.seeds = [42] if args.smoke else [42, 43, 44]
+        args.seeds = [42] if args.smoke else [42, 123, 456]
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     commands = build_commands(args)
