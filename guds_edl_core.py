@@ -1005,6 +1005,11 @@ class MDEPTrainer:
         num_batches = len(dataloader)
 
         disable_topology_cache = getattr(self.args, 'disable_topology_cache', False) if self.args else False
+        proxy_inputs_buf = []
+        proxy_targets_buf = []
+        proxy_has_run = False
+        max_proxy_batches = getattr(self.args, 'structural_proxy_batches', 4) if self.args else 4
+        max_proxy_batches = max(1, int(max_proxy_batches))
 
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             # Smooth per-batch LR Warmup
@@ -1031,9 +1036,33 @@ class MDEPTrainer:
 
             # Amortized uncertainty-gradient pass. The default caches one structural
             # pass per epoch; the no-cache ablation recomputes it for each batch.
-            structural_probe_batch = batch_idx == 0 or (disable_topology_cache and not is_warmup)
+            # For rare-event ISIC, avoid letting an all-negative first batch define
+            # the cached topology signal for a whole epoch.
+            structural_probe_batch = False
+            proxy_inputs = inputs
+            proxy_targets = targets
+            should_probe = not is_warmup or epoch < 2
+            if should_probe:
+                if disable_topology_cache and not is_warmup:
+                    structural_probe_batch = True
+                elif not proxy_has_run:
+                    proxy_inputs_buf.append(inputs.detach())
+                    proxy_targets_buf.append(targets.detach().view(-1))
+                    stacked_targets = torch.cat(proxy_targets_buf, dim=0)
+                    has_multiple_classes = torch.unique(stacked_targets).numel() > 1
+                    reached_proxy_budget = (
+                        len(proxy_targets_buf) >= max_proxy_batches
+                        or batch_idx == num_batches - 1
+                    )
+                    if has_multiple_classes or reached_proxy_budget:
+                        proxy_inputs = torch.cat(proxy_inputs_buf, dim=0)
+                        proxy_targets = stacked_targets
+                        structural_probe_batch = True
+                        proxy_has_run = True
+                        proxy_inputs_buf = []
+                        proxy_targets_buf = []
             if (not is_warmup or epoch < 2) and structural_probe_batch:
-                self.compute_amortized_gradients(inputs, targets)
+                self.compute_amortized_gradients(proxy_inputs, proxy_targets)
 
             self.model.zero_grad()
             self.reset_effective_weight_grads()
@@ -1182,6 +1211,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     explicit dry-runs with allow_dummy_data=True.
     """
     num_classes = 2
+    print(f"[SPLIT] split_seed={seed}")
 
     csv_path = None
     image_dir = None
@@ -1402,6 +1432,22 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
             print(f"📉 Subsampled training set: {num_train_malignant} malignant, {len(train_benign_sampled)} benign.")
 
     print(f"📊 Train: {len(train_df)} samples  |  Val: {len(val_df)} samples  |  Cal: {len(cal_df)} samples  |  Test: {len(test_df)} samples")
+    def _split_class_counts(frame):
+        counts = frame['target'].value_counts()
+        return int(counts.get(1, 0)), int(counts.get(0, 0))
+
+    train_pos, train_neg = _split_class_counts(train_df)
+    val_pos, val_neg = _split_class_counts(val_df)
+    cal_pos, cal_neg = _split_class_counts(cal_df)
+    test_pos, test_neg = _split_class_counts(test_df)
+    print(
+        "[SPLIT] class counts "
+        f"Train pos/neg={train_pos}/{train_neg} | "
+        f"Val pos/neg={val_pos}/{val_neg} | "
+        f"Cal pos/neg={cal_pos}/{cal_neg} | "
+        f"Test pos/neg={test_pos}/{test_neg}"
+    )
+
     train_ds = LongTailedDataset(train_df, image_dir, transform=train_tf, hdf5_path=hdf5_path)
     val_ds   = LongTailedDataset(val_df,   image_dir, transform=test_tf,  hdf5_path=hdf5_path)
     cal_ds   = LongTailedDataset(cal_df,   image_dir, transform=test_tf,  hdf5_path=hdf5_path)

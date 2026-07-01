@@ -1133,6 +1133,7 @@ def train_guds(
     lr: float,
     log_every: int = 5,
     verbose_structural_logs: bool = False,
+    structural_proxy_batches: int = 4,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
@@ -1151,6 +1152,7 @@ def train_guds(
         disable_topology_cache=spec.disable_topology_cache,
         pruning_strength=spec.pruning_strength,
         verbose_structural_logs=verbose_structural_logs,
+        structural_proxy_batches=structural_proxy_batches,
     )
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scheduler=scheduler)
     history = []
@@ -1212,7 +1214,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     print(
         f"\n[RUN] dataset=isic experiment={spec.name} family={spec.family} "
         f"evaluator={'softmax' if uses_softmax_evaluation(spec) else 'evidential'} "
-        f"seed={seed} epochs={args.epochs} device={device} output={run_dir}"
+        f"seed={seed} split_seed={args.split_seed} epochs={args.epochs} "
+        f"device={device} output={run_dir}"
     )
 
     loaders = get_imbalanced_dataloaders(
@@ -1220,7 +1223,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         test_ratio=args.test_ratio,
         subsample_ratio=args.subsample_ratio,
         subsample_scope=args.subsample_scope,
-        seed=seed,
+        seed=args.split_seed,
         allow_dummy_data=args.allow_dummy_data,
     )
     train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = loaders
@@ -1255,6 +1258,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             args.lr,
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
+            structural_proxy_batches=args.structural_proxy_batches,
         )
     else:
         history = train_standard(
@@ -1375,6 +1379,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     result = {
         "experiment": asdict(spec),
         "seed": seed,
+        "model_seed": seed,
+        "split_seed": args.split_seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "temperature": float(temperature),
@@ -1425,8 +1431,9 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=4e-5)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--seeds", type=int, nargs="+", help="Run all selected experiments for these seeds.")
+    parser.add_argument("--seed", type=int, help="Run one model seed when --seeds is not provided.")
+    parser.add_argument("--seeds", type=int, nargs="+", help="Run all selected experiments for these model seeds. Defaults to 42 123 456.")
+    parser.add_argument("--split_seed", type=int, default=42, help="Fixed seed for patient splits and majority subsampling; keep constant across repeated model seeds.")
     parser.add_argument("--test_ratio", type=float, default=0.20)
     parser.add_argument("--subsample_ratio", type=int, default=20)
     parser.add_argument("--subsample_scope", choices=["all", "train"], default="train", help="Apply ISIC majority-class subsampling before patient split or to train only.")
@@ -1436,14 +1443,15 @@ def main() -> int:
     parser.add_argument("--deployment_prevalence", type=float, default=0.0015, help="Prevalence used for PPV/NPV/NNB reporting.")
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
+    parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
     output_root().mkdir(parents=True, exist_ok=True)
     all_results = []
-    seeds = args.seeds if args.seeds else [args.seed]
-    for seed in seeds:
-        for spec in selected_experiments(args):
+    seeds = args.seeds if args.seeds else ([args.seed] if args.seed is not None else [42, 123, 456])
+    for spec in selected_experiments(args):
+        for seed in seeds:
             all_results.append(run_one(spec, args, seed))
 
     summary_path = output_root() / "isic_summary.json"
