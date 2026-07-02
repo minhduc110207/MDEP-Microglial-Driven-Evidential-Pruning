@@ -386,6 +386,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             verbose_structural_logs=args.verbose_structural_logs,
             structural_proxy_batches=args.structural_proxy_batches,
             structural_proxy_min_classes=args.structural_proxy_min_classes,
+            efl_gamma_final=args.efl_gamma_final,
         )
     else:
         history = train_standard(
@@ -518,6 +519,7 @@ def main() -> int:
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--structural_proxy_batches", type=int, default=8, help="Maximum mini-batches accumulated for one cached CIFAR GUDS structural proxy batch.")
     parser.add_argument("--structural_proxy_min_classes", type=int, default=20, help="Minimum distinct CIFAR classes requested before caching a structural proxy batch.")
+    parser.add_argument("--efl_gamma_final", type=float, default=0.0, help="Final EFL focal gamma after cosine decay for GUDS runs. Default 0.0 preserves the reported schedule.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

@@ -256,11 +256,234 @@ when `--experiment` is omitted:
 !python -u experiments/run_cifar_suite.py --ratio 10 --epochs 100 --batch_size 128 --seeds 42 123 456
 ```
 
+### CIFAR-100-LT Improvement Roadmap
+
+Goal: improve GUDS-EDL on CIFAR-100-LT without turning the paper into a list of
+many GUDS versions. Treat all commands below as selection diagnostics. Promote
+only one final GUDS configuration after it wins on model seeds `42`, `123`, and
+`456` under the fixed `--split_seed 42` protocol.
+
+Use these decision metrics in this order:
+
+1. `balanced_accuracy`
+2. `macro_auroc`
+3. `macro_pr_auc`
+4. `aurc` lower is better
+5. `ece_adaptive` lower is better
+
+#### Phase 0: one-seed sanity check
+
+Run this first to confirm the CIFAR path, result writing, and fixed split:
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 5 \
+    --batch_size 128 \
+    --seeds 42 \
+    --split_seed 42 \
+    --run_suffix _smoke
+```
+
+#### Phase 1: rebuild the current comparison on a fixed CIFAR split
+
+This is the minimum rerun before judging whether a new GUDS variant really
+improves over the reported result.
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment standard_ce \
+    --experiment dense_edl \
+    --experiment static_24_edl \
+    --experiment rigl_style_24 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --seeds 42 123 456 \
+    --split_seed 42
+
+!python experiments/summarize_results.py \
+    --root /kaggle/working/paper_experiment_outputs \
+    --output /kaggle/working/paper_experiment_outputs/cifar_ir100_current_summary.csv
+```
+
+#### Phase 2: high-probability GUDS structural tuning
+
+The first likely bottleneck is noisy topology selection on a 100-class
+long-tailed dataset. Increase the structural proxy batch and require more class
+diversity before each structural update.
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --seeds 42 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --run_suffix _proxy16_min40
+
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --seeds 42 \
+    --split_seed 42 \
+    --structural_proxy_batches 24 \
+    --structural_proxy_min_classes 50 \
+    --run_suffix _proxy24_min50
+```
+
+Summarize after the one-seed tuning pass:
+
+```python
+!python experiments/summarize_results.py \
+    --root /kaggle/working/paper_experiment_outputs \
+    --output /kaggle/working/paper_experiment_outputs/cifar_ir100_tuning_seed42_summary.csv
+```
+
+Keep only the better of `_proxy16_min40` and `_proxy24_min50` for the next phase.
+
+#### Phase 3: optimizer stability sweep for the best structural candidate
+
+If seed 42 improves but AURC/ECE is unstable, try smaller learning rates. Replace
+`_proxy16_min40` below with `_proxy24_min50` if Phase 2 picked that candidate.
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --lr 5e-4 \
+    --seeds 42 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --run_suffix _proxy16_min40_lr5e-4
+
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --lr 3e-4 \
+    --seeds 42 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --run_suffix _proxy16_min40_lr3e-4
+```
+
+#### Phase 4: three-seed confirmation
+
+Run the best candidate from Phases 2--3 on all three model seeds. This is the
+only result eligible to replace the CIFAR table in the paper.
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --lr 5e-4 \
+    --seeds 42 123 456 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --run_suffix _candidate_final
+
+!python experiments/summarize_results.py \
+    --root /kaggle/working/paper_experiment_outputs \
+    --output /kaggle/working/paper_experiment_outputs/cifar_ir100_candidate_final_summary.csv
+```
+
+Promotion rule: replace the paper's CIFAR GUDS row only if
+`full_guds_candidate_final` improves over the current `full_guds` on at least
+`balanced_accuracy` and `macro_auroc`, while preserving exact 2:4 structural
+validity. If it improves only ECE, keep CIFAR as a limitation/stress test.
+
+#### Phase 4b: late-phase focal floor diagnostic
+
+Use this only if the Phase 4 candidate improves Macro AUROC or ECE but loses
+balanced accuracy, few-shot accuracy, or AURC. CIFAR logs with loss increasing
+after the middle epochs indicate that the focal exponent may decay too close to
+zero late in training. The following diagnostic keeps rare-class pressure active
+near the end of training:
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 100 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --lr 5e-4 \
+    --seeds 42 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --efl_gamma_final 1.0 \
+    --run_suffix _proxy16_min40_lr5e-4_gamfinal1
+```
+
+Promote this to seeds `42 123 456` only if seed 42 improves balanced accuracy
+and Macro AUROC without worsening AURC. Keep the reported paper as one DST-EDL
+configuration. Do not list this diagnostic as a separate model.
+
+#### Phase 5: broaden only after IR100 improves
+
+Do not spend budget on IR50/IR10 until IR100 improves. Once the candidate is
+confirmed on IR100:
+
+```python
+!python -u experiments/run_cifar_suite.py \
+    --ratio 50 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --lr 5e-4 \
+    --seeds 42 123 456 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --run_suffix _candidate_final
+
+!python -u experiments/run_cifar_suite.py \
+    --ratio 10 \
+    --experiment full_guds \
+    --epochs 100 \
+    --batch_size 128 \
+    --lr 5e-4 \
+    --seeds 42 123 456 \
+    --split_seed 42 \
+    --structural_proxy_batches 16 \
+    --structural_proxy_min_classes 40 \
+    --run_suffix _candidate_final
+```
+
+#### Phase 6: next code task if tuning is not enough
+
+If the best candidate still trails Standard CE, the next real improvement path
+is a two-stage CIFAR recipe:
+
+1. train a dense long-tail teacher (`standard_ce` or `balanced_softmax`);
+2. initialize GUDS from that checkpoint;
+3. keep a longer dense warmup;
+4. activate 2:4 GUDS only for fine-tuning.
+
+Do not report this as the same GUDS configuration until the code path is added,
+rerun for all seeds, and compared against the same baselines.
+
 ## 7. Why ISIC Can Look Slow After Training
 
 ISIC training is not finished when the final epoch prints. After epoch 40, the
 runner still performs calibration, adaptive-mode evaluation, quality-gate
-reporting, extended metrics, and result writing. With the fixed
+reporting, extended metrics, held-out prediction CSV export, and result writing. With the fixed
 `--split_seed 42` protocol, model seeds `42`, `123`, and `456` use the same
 validation, calibration, and test loaders; runtime differences mostly come from
 training dynamics and sparse structural updates, not from different data splits.
@@ -268,6 +491,69 @@ Wait for the final `[DONE]` line before assuming the run is stuck.
 
 Use `--no_save_model` for broad ISIC sweeps. It avoids checkpoint writes and
 keeps Kaggle storage smaller.
+
+After the three-seed ISIC main-table runs finish, compute paired bootstrap
+diagnostics from the saved `test_predictions.csv` files:
+
+```python
+!python experiments/bootstrap_isic_predictions.py \
+    --root /kaggle/working/paper_experiment_outputs \
+    --target full_guds \
+    --baseline dense_edl static_24_edl rigl_style_24 \
+    --unit patient \
+    --n_bootstrap 1000
+```
+
+If patient-level bootstrap is too slow, use `--unit image` and report it only as
+an image-level diagnostic.
+
+### High-Yield GUDS Tuning Queue
+
+Do not mix these tuning outputs into the reported `full_guds` folder. Use
+`--run_suffix` so each candidate is isolated, then promote a candidate only if
+it wins consistently over seeds 42, 123, and 456.
+
+```python
+# Better structural signal estimate; higher cost, often the first thing to try.
+!python experiments/isic_paper_experiments.py \
+    --experiment full_guds \
+    --run_suffix _proxy8 \
+    --structural_proxy_batches 8 \
+    --epochs 40 \
+    --batch_size 32 \
+    --lr 4e-5 \
+    --subsample_scope train \
+    --seeds 42 123 456 \
+    --split_seed 42 \
+    --no_save_model
+
+# Slightly more conservative optimizer step; useful if pAUC varies by seed.
+!python experiments/isic_paper_experiments.py \
+    --experiment full_guds \
+    --run_suffix _proxy8_lr3e-5 \
+    --structural_proxy_batches 8 \
+    --epochs 40 \
+    --batch_size 32 \
+    --lr 3e-5 \
+    --subsample_scope train \
+    --seeds 42 123 456 \
+    --split_seed 42 \
+    --no_save_model
+```
+
+After a tuning run, compare it with the reported baselines:
+
+```python
+!python experiments/bootstrap_isic_predictions.py \
+    --target full_guds_proxy8 \
+    --baseline dense_edl static_24_edl rigl_style_24 \
+    --unit patient \
+    --n_bootstrap 1000
+```
+
+Keep the manuscript as one reported GUDS-EDL model. Treat tuning runs as
+selection diagnostics until a single replacement configuration is fully
+rerun for all reported baselines and ablations.
 
 ## 8. CIFAR Speed Notes
 
@@ -316,6 +602,16 @@ To run ISIC only:
     --split_seed 42 \
     --no_save_model
 ```
+
+For the minimum hardware/sparsity evidence used in the paper, run:
+
+```python
+!python experiments/hardware_profile.py --batch_size 32 --warmup 10 --iters 50
+!python experiments/summarize_results.py
+```
+
+The hardware profile reports structural compatibility and masked-PyTorch
+throughput only. Do not describe it as realized sparse Tensor Core speedup.
 
 ## 10. Speed And Storage Knobs
 

@@ -245,7 +245,20 @@ class EvidentialFocalLoss(nn.Module):
     The focal weight modulates the CE term — not the evidence space directly —
     so the Dirichlet structure stays valid even on highly imbalanced data.
     """
-    def __init__(self, gamma=5.0, num_classes=10, kl_lambda=0.1, class_weights=None, annealing_epochs=10, warmup_epochs=15, total_epochs=100, disable_efl=False, kl_scaling='symmetric', class_weight_cap=10.0):
+    def __init__(
+        self,
+        gamma=5.0,
+        num_classes=10,
+        kl_lambda=0.1,
+        class_weights=None,
+        annealing_epochs=10,
+        warmup_epochs=15,
+        total_epochs=100,
+        disable_efl=False,
+        kl_scaling='symmetric',
+        class_weight_cap=10.0,
+        gamma_final=0.0,
+    ):
         super(EvidentialFocalLoss, self).__init__()
         self.base_gamma = gamma
         self.gamma = gamma
@@ -257,6 +270,7 @@ class EvidentialFocalLoss(nn.Module):
         self.disable_efl = disable_efl
         self.kl_scaling = kl_scaling
         self.class_weight_cap = class_weight_cap
+        self.gamma_final = gamma_final
         # class_weights: tensor of shape (num_classes,) — higher weight for rare classes
         if class_weights is not None:
             self.register_buffer('class_weights', class_weights)
@@ -286,7 +300,8 @@ class EvidentialFocalLoss(nn.Module):
             else:
                 import math
                 progress = (epoch - self.warmup_epochs) / max(self.total_epochs - self.warmup_epochs, 1)
-                gamma_val = self.base_gamma * 0.5 * (1.0 + math.cos(math.pi * progress))
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                gamma_val = self.gamma_final + (self.base_gamma - self.gamma_final) * cosine_decay
         else:
             gamma_val = self.gamma if not self.disable_efl else 0.0
 

@@ -929,7 +929,14 @@ def quality_gate_report(decision_support: AdaptiveThresholdDecisionSupport, test
     return report
 
 
-def make_loss(spec: ExperimentSpec, num_classes: int, class_weights: torch.Tensor, total_epochs: int, device: torch.device) -> nn.Module:
+def make_loss(
+    spec: ExperimentSpec,
+    num_classes: int,
+    class_weights: torch.Tensor,
+    total_epochs: int,
+    device: torch.device,
+    efl_gamma_final: float = 0.0,
+) -> nn.Module:
     if spec.loss_name == "r_edl":
         return RelaxedEDLLoss(num_classes, class_weights.to(device), total_epochs)
 
@@ -942,6 +949,7 @@ def make_loss(spec: ExperimentSpec, num_classes: int, class_weights: torch.Tenso
         total_epochs=total_epochs,
         disable_efl=spec.disable_efl,
         kl_scaling=spec.kl_scaling,
+        gamma_final=efl_gamma_final,
     )
     if spec.loss_name == "fisher_edl":
         return FisherEDLLoss(base)
@@ -1194,9 +1202,17 @@ def train_guds(
     verbose_structural_logs: bool = False,
     structural_proxy_batches: int = 4,
     structural_proxy_min_classes: int = 2,
+    efl_gamma_final: float = 0.0,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
-    criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
+    criterion = make_loss(
+        spec,
+        model.fc[0].out_features,
+        class_weights,
+        total_epochs,
+        device,
+        efl_gamma_final=efl_gamma_final,
+    )
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
