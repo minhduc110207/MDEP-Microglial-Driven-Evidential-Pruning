@@ -287,6 +287,109 @@ def evaluate_multiclass(
     return metrics
 
 
+def checkpoint_score(metrics: dict[str, float]) -> tuple[float, float, float]:
+    """Validation selection score shared by all CIFAR methods."""
+    bal = metrics.get("balanced_accuracy", float("nan"))
+    auroc = metrics.get("macro_auroc", float("nan"))
+    aurc = metrics.get("aurc", float("nan"))
+    bal = bal if np.isfinite(bal) else -1.0
+    auroc = auroc if np.isfinite(auroc) else -1.0
+    aurc_term = -aurc if np.isfinite(aurc) else -1e9
+    return float(bal), float(auroc), float(aurc_term)
+
+
+class BestValidationCheckpoint:
+    """Keep one CPU copy of the best validation checkpoint to save GPU memory."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        val_loader,
+        device: torch.device,
+        num_classes: int,
+        eval_every: int,
+        selection_bias: torch.Tensor | None,
+        class_counts: list[int] | None,
+        probability_family: str,
+    ):
+        self.model = model
+        self.val_loader = val_loader
+        self.device = device
+        self.num_classes = num_classes
+        self.eval_every = max(1, int(eval_every))
+        self.selection_bias = selection_bias
+        self.class_counts = class_counts
+        self.probability_family = probability_family
+        self.best_score: tuple[float, float, float] | None = None
+        self.best_state: dict[str, torch.Tensor] | None = None
+        self.best_epoch: int | None = None
+        self.best_stage: str | None = None
+        self.best_metrics: dict[str, float] = {}
+
+    def __call__(self, epoch: int, stage: str = "train") -> dict[str, float | int | str]:
+        if epoch % self.eval_every != 0:
+            return {}
+        metrics = evaluate_multiclass(
+            self.model,
+            self.val_loader,
+            self.device,
+            num_classes=self.num_classes,
+            temperature=1.0,
+            bias=self.selection_bias,
+            class_counts=self.class_counts,
+            probability_family=self.probability_family,
+        )
+        score = checkpoint_score(metrics)
+        improved = self.best_score is None or score > self.best_score
+        if improved:
+            self.best_score = score
+            self.best_epoch = epoch
+            self.best_stage = stage
+            self.best_metrics = {
+                "balanced_accuracy": float(metrics.get("balanced_accuracy", float("nan"))),
+                "macro_auroc": float(metrics.get("macro_auroc", float("nan"))),
+                "aurc": float(metrics.get("aurc", float("nan"))),
+                "ece_adaptive": float(metrics.get("ece_adaptive", float("nan"))),
+            }
+            self.best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in self.model.state_dict().items()
+            }
+            print(
+                "[VAL] new_best "
+                f"epoch={epoch:03d} stage={stage} "
+                f"bal_acc={self.best_metrics['balanced_accuracy']:.4f} "
+                f"macro_auroc={self.best_metrics['macro_auroc']:.4f} "
+                f"aurc={self.best_metrics['aurc']:.4f}",
+                flush=True,
+            )
+        return {
+            "val_balanced_accuracy": float(metrics.get("balanced_accuracy", float("nan"))),
+            "val_macro_auroc": float(metrics.get("macro_auroc", float("nan"))),
+            "val_aurc": float(metrics.get("aurc", float("nan"))),
+            "val_ece_adaptive": float(metrics.get("ece_adaptive", float("nan"))),
+            "best_checkpoint_epoch": int(self.best_epoch or epoch),
+            "best_checkpoint_stage": self.best_stage or stage,
+        }
+
+    def restore(self) -> dict[str, float | int | str | dict[str, float]]:
+        if self.best_state is None:
+            return {"enabled": True, "restored": False}
+        self.model.load_state_dict(self.best_state)
+        del self.best_state
+        self.best_state = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {
+            "enabled": True,
+            "restored": True,
+            "epoch": self.best_epoch,
+            "stage": self.best_stage,
+            "selection_metrics": self.best_metrics,
+            "selection_order": ["balanced_accuracy", "macro_auroc", "aurc_low"],
+        }
+
+
 def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
     if benchmark == "cifar":
         split_seed = args.split_seed if args.split_seed is not None else seed
@@ -369,9 +472,62 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     if False:  # Forced to single GPU execution
         print(f"[INFO] Detected {torch.cuda.device_count()} GPUs, but using 1 GPU for CIFAR to avoid DataParallel overhead.")
 
+    is_full_guds = experiment_name == "full_guds"
     lr = args.lr
     if lr is None:
-        lr = 1e-3
+        lr = 5e-4 if is_full_guds else 1e-3
+    structural_proxy_batches = (
+        args.structural_proxy_batches
+        if args.structural_proxy_batches is not None
+        else (16 if is_full_guds else 8)
+    )
+    structural_proxy_min_classes = (
+        args.structural_proxy_min_classes
+        if args.structural_proxy_min_classes is not None
+        else (40 if is_full_guds else 20)
+    )
+    efl_gamma_final = (
+        args.efl_gamma_final
+        if args.efl_gamma_final is not None
+        else (1.0 if is_full_guds else 0.0)
+    )
+    if is_full_guds:
+        print(
+            "[INFO] CIFAR full_guds strong profile: "
+            f"lr={lr:g}, structural_proxy_batches={structural_proxy_batches}, "
+            f"structural_proxy_min_classes={structural_proxy_min_classes}, "
+            f"efl_gamma_final={efl_gamma_final:g}",
+            flush=True,
+        )
+
+    checkpoint_info: dict = {"enabled": False}
+    validation_callback = None
+    if not args.no_best_checkpoint:
+        selection_bias = prior_logit_delta(
+            p_true,
+            p_train,
+            num_classes,
+            device=device,
+            dtype=torch.float32,
+        )
+        if spec.calibration_mode == "none":
+            selection_bias = torch.zeros_like(selection_bias)
+        validation_callback = BestValidationCheckpoint(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            num_classes=num_classes,
+            eval_every=args.checkpoint_eval_every,
+            selection_bias=selection_bias,
+            class_counts=class_counts,
+            probability_family="softmax" if softmax_eval else "evidential",
+        )
+        print(
+            "[INFO] Best validation checkpoint enabled: "
+            "selection=balanced_accuracy,macro_auroc,aurc_low; "
+            f"eval_every={args.checkpoint_eval_every}",
+            flush=True,
+        )
 
     if spec.use_mdep_trainer:
         history = train_guds(
@@ -384,9 +540,10 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             lr,
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
-            structural_proxy_batches=args.structural_proxy_batches,
-            structural_proxy_min_classes=args.structural_proxy_min_classes,
-            efl_gamma_final=args.efl_gamma_final,
+            structural_proxy_batches=structural_proxy_batches,
+            structural_proxy_min_classes=structural_proxy_min_classes,
+            efl_gamma_final=efl_gamma_final,
+            validation_callback=validation_callback,
         )
     else:
         history = train_standard(
@@ -400,7 +557,23 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
             args.epochs,
             lr,
             log_every=args.log_every,
+            validation_callback=validation_callback,
         )
+
+    if validation_callback is not None:
+        checkpoint_info = validation_callback.restore()
+        if checkpoint_info.get("restored"):
+            metrics_for_log = checkpoint_info.get("selection_metrics", {})
+            print(
+                "[INFO] Restored best validation checkpoint "
+                f"epoch={checkpoint_info.get('epoch')} stage={checkpoint_info.get('stage')} "
+                f"bal_acc={metrics_for_log.get('balanced_accuracy', float('nan')):.4f} "
+                f"macro_auroc={metrics_for_log.get('macro_auroc', float('nan')):.4f} "
+                f"aurc={metrics_for_log.get('aurc', float('nan')):.4f}",
+                flush=True,
+            )
+        else:
+            print("[WARN] Best checkpoint selection enabled but no checkpoint was recorded; evaluating final weights.", flush=True)
 
     temperature, bias, thresholds = calibrate_multiclass(
         model,
@@ -463,6 +636,14 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         "split_seed": args.split_seed if args.split_seed is not None else seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
+        "effective_hyperparameters": {
+            "lr": lr,
+            "structural_proxy_batches": structural_proxy_batches,
+            "structural_proxy_min_classes": structural_proxy_min_classes,
+            "efl_gamma_final": efl_gamma_final,
+            "best_validation_checkpoint": not args.no_best_checkpoint,
+            "checkpoint_eval_every": args.checkpoint_eval_every,
+        },
         "temperature": float(temperature),
         "bias": bias.tolist() if bias is not None else None,
         "evaluation_bias": eval_bias.tolist() if isinstance(eval_bias, torch.Tensor) else None,
@@ -470,6 +651,7 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
         "thresholds": thresholds,
         "p_true": p_true,
         "p_train": p_train,
+        "best_checkpoint": checkpoint_info,
         "history": history,
         "metrics": metrics,
         "evaluator": "softmax" if softmax_eval else "evidential",
@@ -517,9 +699,11 @@ def main() -> int:
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
-    parser.add_argument("--structural_proxy_batches", type=int, default=8, help="Maximum mini-batches accumulated for one cached CIFAR GUDS structural proxy batch.")
-    parser.add_argument("--structural_proxy_min_classes", type=int, default=20, help="Minimum distinct CIFAR classes requested before caching a structural proxy batch.")
-    parser.add_argument("--efl_gamma_final", type=float, default=0.0, help="Final EFL focal gamma after cosine decay for GUDS runs. Default 0.0 preserves the reported schedule.")
+    parser.add_argument("--structural_proxy_batches", type=int, help="Maximum mini-batches accumulated for one cached CIFAR GUDS structural proxy batch. Defaults to 16 for full_guds and 8 otherwise.")
+    parser.add_argument("--structural_proxy_min_classes", type=int, help="Minimum distinct CIFAR classes requested before caching a structural proxy batch. Defaults to 40 for full_guds and 20 otherwise.")
+    parser.add_argument("--efl_gamma_final", type=float, help="Final EFL focal gamma after cosine decay for GUDS runs. Defaults to 1.0 for full_guds and 0.0 otherwise.")
+    parser.add_argument("--no_best_checkpoint", action="store_true", help="Disable CIFAR best validation checkpoint selection and evaluate final epoch weights.")
+    parser.add_argument("--checkpoint_eval_every", type=int, default=1, help="Validate every N epochs for best-checkpoint selection. Use the same value for all compared methods.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

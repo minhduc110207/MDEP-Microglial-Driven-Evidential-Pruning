@@ -271,6 +271,21 @@ Use these decision metrics in this order:
 4. `aurc` lower is better
 5. `ece_adaptive` lower is better
 
+The CIFAR runner enables best validation checkpoint selection by default for
+all methods. The shared selection rule is validation balanced accuracy, then
+validation Macro AUROC, then lower validation AURC. The selected checkpoint is
+restored before calibration and held-out test evaluation. This is fair only
+when applied to every compared CIFAR method. To save memory, the runner keeps
+only one CPU copy of the best `state_dict`; it does not write a checkpoint at
+every epoch. Use `--no_best_checkpoint` only for debugging final-epoch behavior.
+Use `--checkpoint_eval_every N` only if the same value is used for all compared
+methods.
+
+The default CIFAR `full_guds` profile is the strongest current diagnostic
+configuration: `lr=5e-4`, `structural_proxy_batches=16`,
+`structural_proxy_min_classes=40`, `efl_gamma_final=1.0`, and best validation
+checkpoint selection. Passing any of these flags manually overrides the default.
+
 #### Phase 0: one-seed sanity check
 
 Run this first to confirm the CIFAR path, result writing, and fixed split:
@@ -391,12 +406,8 @@ only result eligible to replace the CIFAR table in the paper.
     --experiment full_guds \
     --epochs 100 \
     --batch_size 128 \
-    --lr 5e-4 \
     --seeds 42 123 456 \
-    --split_seed 42 \
-    --structural_proxy_batches 16 \
-    --structural_proxy_min_classes 40 \
-    --run_suffix _candidate_final
+    --split_seed 42
 
 !python experiments/summarize_results.py \
     --root /kaggle/working/paper_experiment_outputs \
@@ -404,17 +415,15 @@ only result eligible to replace the CIFAR table in the paper.
 ```
 
 Promotion rule: replace the paper's CIFAR GUDS row only if
-`full_guds_candidate_final` improves over the current `full_guds` on at least
+the current `full_guds` improves over the previous reported `full_guds` on at least
 `balanced_accuracy` and `macro_auroc`, while preserving exact 2:4 structural
 validity. If it improves only ECE, keep CIFAR as a limitation/stress test.
 
-#### Phase 4b: late-phase focal floor diagnostic
+#### Phase 4b: focal-floor ablation only if needed
 
-Use this only if the Phase 4 candidate improves Macro AUROC or ECE but loses
-balanced accuracy, few-shot accuracy, or AURC. CIFAR logs with loss increasing
-after the middle epochs indicate that the focal exponent may decay too close to
-zero late in training. The following diagnostic keeps rare-class pressure active
-near the end of training:
+The late-phase focal floor is now part of the default CIFAR `full_guds` profile.
+Use this ablation only to verify that the floor is helping. It should not be
+reported as a separate model.
 
 ```python
 !python -u experiments/run_cifar_suite.py \
@@ -422,18 +431,14 @@ near the end of training:
     --experiment full_guds \
     --epochs 100 \
     --batch_size 128 \
-    --lr 5e-4 \
+    --efl_gamma_final 0.0 \
     --seeds 42 \
     --split_seed 42 \
-    --structural_proxy_batches 16 \
-    --structural_proxy_min_classes 40 \
-    --efl_gamma_final 1.0 \
-    --run_suffix _proxy16_min40_lr5e-4_gamfinal1
+    --run_suffix _no_gamma_floor
 ```
 
-Promote this to seeds `42 123 456` only if seed 42 improves balanced accuracy
-and Macro AUROC without worsening AURC. Keep the reported paper as one DST-EDL
-configuration. Do not list this diagnostic as a separate model.
+If this ablation performs better than the default strong profile, revisit the
+default. Otherwise keep the strong profile as the single `full_guds` setting.
 
 #### Phase 5: broaden only after IR100 improves
 

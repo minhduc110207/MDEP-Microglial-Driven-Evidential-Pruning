@@ -1087,6 +1087,7 @@ def retrain_classifier_crt(
     p_train: list[float],
     total_epochs: int,
     lr: float,
+    validation_callback=None,
 ) -> list[dict[str, float]]:
     """Classifier re-training baseline inspired by cRT/decoupled classifiers."""
     nn.init.normal_(model.fc[0].weight, mean=0.0, std=0.001)
@@ -1121,7 +1122,10 @@ def retrain_classifier_crt(
         avg_loss = float(np.mean(losses)) if losses else 0.0
         scheduler.step()
         elapsed = time.time() - start
-        history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed, "stage": "crt"})
+        row = {"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed, "stage": "crt"}
+        if validation_callback is not None:
+            row.update(validation_callback(epoch + 1, stage="crt") or {})
+        history.append(row)
         print(f"cRT [{epoch + 1:>2}/{epochs}] | loss={avg_loss:.4f} | {elapsed:.1f}s")
 
     for param in model.backbone.parameters():
@@ -1140,6 +1144,7 @@ def train_standard(
     total_epochs: int,
     lr: float,
     log_every: int = 5,
+    validation_callback=None,
 ) -> list[dict[str, float]]:
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
@@ -1182,11 +1187,25 @@ def train_standard(
         scheduler.step()
         avg_loss = float(np.mean(losses)) if losses else 0.0
         elapsed = time.time() - start
-        history.append({"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed})
+        row = {"epoch": epoch + 1, "loss": avg_loss, "seconds": elapsed}
+        if validation_callback is not None:
+            row.update(validation_callback(epoch + 1, stage="train") or {})
+        history.append(row)
         if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
             print(f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} loss={avg_loss:.4f} time={elapsed:.1f}s")
     if spec.classifier_retrain:
-        history.extend(retrain_classifier_crt(model, train_loader, device, spec, p_train, total_epochs, lr))
+        history.extend(
+            retrain_classifier_crt(
+                model,
+                train_loader,
+                device,
+                spec,
+                p_train,
+                total_epochs,
+                lr,
+                validation_callback=validation_callback,
+            )
+        )
     return history
 
 
@@ -1203,6 +1222,7 @@ def train_guds(
     structural_proxy_batches: int = 4,
     structural_proxy_min_classes: int = 2,
     efl_gamma_final: float = 0.0,
+    validation_callback=None,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(
@@ -1237,12 +1257,15 @@ def train_guds(
         loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
         topo_gamma = float(trainer.step_gamma(epoch))
         efl_gamma = float(getattr(criterion, "gamma", 0.0))
-        history.append({
+        row = {
             "epoch": epoch + 1,
             "objective_loss": float(loss),
             "topology_gamma": topo_gamma,
             "efl_gamma": efl_gamma,
-        })
+        }
+        if validation_callback is not None:
+            row.update(validation_callback(epoch + 1, stage="train") or {})
+        history.append(row)
         if epoch == 0 or (epoch + 1) % max(log_every, 1) == 0 or (epoch + 1) == total_epochs:
             print(
                 f"[TRAIN] epoch={epoch + 1:03d}/{total_epochs:03d} "
