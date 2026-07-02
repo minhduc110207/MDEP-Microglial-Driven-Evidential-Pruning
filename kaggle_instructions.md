@@ -608,15 +608,32 @@ To run ISIC only:
     --no_save_model
 ```
 
-For the minimum hardware/sparsity evidence used in the paper, run:
+For the minimum Level 1 and Level 2 hardware/sparsity evidence used in the
+paper, run:
 
 ```python
 !python experiments/hardware_profile.py --batch_size 32 --warmup 10 --iters 50
 !python experiments/summarize_results.py
 ```
 
+This records active density, valid 2:4 block fraction, theoretical wrapped-layer
+sparse reduction, masked-PyTorch throughput, latency, and peak CUDA memory for
+dense, static 2:4, and DST-EDL model constructors.
+
+For a stronger diagnostic, repeat with a larger batch size if the GPU memory is
+stable:
+
+```python
+!python experiments/hardware_profile.py --batch_size 64 --warmup 20 --iters 100
+!python experiments/summarize_results.py
+```
+
 The hardware profile reports structural compatibility and masked-PyTorch
 throughput only. Do not describe it as realized sparse Tensor Core speedup.
+Real speedup requires exporting frozen valid 2:4 weights to a sparse-kernel
+backend such as cuSPARSELt, TensorRT sparse execution, or a supported PyTorch
+semi-structured sparse path. If that export is not implemented, report the
+current profile as Level 1/2 evidence only.
 
 ## 10. Speed And Storage Knobs
 
