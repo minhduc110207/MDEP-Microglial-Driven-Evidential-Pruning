@@ -1,5 +1,5 @@
 """
-Train/evaluate ISIC 2024 experiments referenced by main_text.tex.
+Train/evaluate ISIC 2024 experiments referenced by the paper manuscript.
 
 This runner is designed for Kaggle after the repo has been copied to
 /kaggle/working. It reuses the dataset split, calibration, and metrics from
@@ -14,9 +14,10 @@ Examples:
 
 Outputs:
 
-    /kaggle/working/paper_experiment_outputs/isic/<experiment_name>/
+    /kaggle/working/paper_experiment_outputs/isic/<experiment_name>/seed_<seed>/
         run_config.json
         metrics.json
+        test_predictions.csv
         model_state.pth
 """
 
@@ -121,7 +122,7 @@ class ExperimentSpec:
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
-    # Main result rows in main_text.tex Tables 1--2.
+    # Main result rows in the paper's ISIC comparison tables.
     "standard_ce": ExperimentSpec(
         name="standard_ce",
         family="long_tailed_baseline",
@@ -356,9 +357,12 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
 SUITES: dict[str, list[str]] = {
     "main_tables": [
         "full_guds",
+        "dense_edl",
         "fisher_edl",
         "flexible_edl",
         "r_edl",
+        "static_24_edl",
+        "rigl_style_24",
     ],
     "baselines": [
         "standard_ce",
@@ -835,6 +839,61 @@ def evaluate_softmax_baseline(
     return metrics
 
 
+def save_test_predictions(
+    run_dir: Path,
+    spec: ExperimentSpec,
+    seed: int,
+    split_seed: int,
+    test_loader,
+    outputs: dict[str, np.ndarray],
+    thresholds: dict[str, float],
+    experiment_name: str | None = None,
+) -> Path:
+    """Write calibrated held-out test predictions for bootstrap CIs."""
+    probs = np.asarray(outputs["probs"])
+    y_true = np.asarray(outputs["y_true"]).astype(int)
+    n = len(y_true)
+    frame = test_frame_from_loader(test_loader).reset_index(drop=True)
+    if len(frame) != n:
+        frame = pd.DataFrame(index=np.arange(n))
+
+    pred = pd.DataFrame({
+        "row_id": np.arange(n, dtype=int),
+        "experiment": experiment_name or spec.name,
+        "seed": int(seed),
+        "split_seed": int(split_seed),
+        "y_true": y_true,
+        "prob_0": probs[:, 0],
+        "prob_1": probs[:, 1],
+        "y_pred_argmax": np.asarray(outputs["y_pred"]).astype(int),
+        "confidence": np.asarray(outputs["confidences"], dtype=float),
+    })
+    if "isic_id" in frame.columns:
+        pred.insert(0, "sample_id", frame["isic_id"].astype(str).to_numpy())
+    else:
+        pred.insert(0, "sample_id", pred["row_id"].astype(str))
+    if "patient_id" in frame.columns:
+        pred.insert(1, "patient_id", frame["patient_id"].astype(str).to_numpy())
+    else:
+        pred.insert(1, "patient_id", [f"patient_{i // 5}" for i in range(n)])
+
+    balanced_t = float(thresholds.get("balanced", 0.5))
+    high_recall_t = float(thresholds.get("high_recall", thresholds.get("rule_out", 0.5)))
+    pred["threshold_balanced"] = balanced_t
+    pred["threshold_high_recall"] = high_recall_t
+    pred["y_pred_balanced"] = (pred["prob_1"].to_numpy() >= balanced_t).astype(int)
+    pred["y_pred_high_recall"] = (pred["prob_1"].to_numpy() >= high_recall_t).astype(int)
+    if "u_e" in outputs:
+        pred["u_e"] = np.asarray(outputs["u_e"], dtype=float)
+    if "u_a" in outputs:
+        pred["u_a"] = np.asarray(outputs["u_a"], dtype=float)
+
+    path = run_dir / "test_predictions.csv"
+    pred.to_csv(path, index=False)
+    print(f"[DONE] Saved held-out test predictions to {path}")
+    return path
+
+
 @torch.no_grad()
 def quality_gate_report(decision_support: AdaptiveThresholdDecisionSupport, test_loader, device: torch.device) -> dict[str, float]:
     targets_all = []
@@ -1221,10 +1280,11 @@ def print_metrics_table(spec_name: str, metrics: dict[str, float]):
 def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
-    run_dir = output_root() / spec.name / f"seed_{seed}"
+    run_experiment_name = f"{spec.name}{args.run_suffix}" if args.run_suffix else spec.name
+    run_dir = output_root() / run_experiment_name / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
     print(
-        f"\n[RUN] dataset=isic experiment={spec.name} family={spec.family} "
+        f"\n[RUN] dataset=isic experiment={run_experiment_name} family={spec.family} "
         f"evaluator={'softmax' if uses_softmax_evaluation(spec) else 'evidential'} "
         f"seed={seed} split_seed={args.split_seed} epochs={args.epochs} "
         f"device={device} output={run_dir}"
@@ -1324,6 +1384,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             thresholds,
             args.deployment_prevalence,
         )
+        outputs = collect_softmax_outputs(model, test_loader, device, temperature, eval_bias)
     else:
         temperature, bias, thresholds = run_calibration(
             model,
@@ -1387,9 +1448,15 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         ))
     if spec.sparse:
         print_sparsity_report(model)
+    save_test_predictions(run_dir, spec, seed, args.split_seed, test_loader, outputs, thresholds, run_experiment_name)
+
+    experiment_record = asdict(spec)
+    experiment_record["name"] = run_experiment_name
+    experiment_record["base_name"] = spec.name
+    experiment_record["run_suffix"] = args.run_suffix
 
     result = {
-        "experiment": asdict(spec),
+        "experiment": experiment_record,
         "seed": seed,
         "model_seed": seed,
         "split_seed": args.split_seed,
@@ -1408,7 +1475,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "quality_gate": quality_metrics,
         "evaluator": "softmax" if uses_softmax_evaluation(spec) else "evidential",
     }
-    (run_dir / "run_config.json").write_text(json.dumps(json_safe(asdict(spec)), indent=2), encoding="utf-8")
+    (run_dir / "run_config.json").write_text(json.dumps(json_safe(experiment_record), indent=2), encoding="utf-8")
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
     if not args.no_save_model:
         torch.save(model.state_dict(), run_dir / "model_state.pth")
@@ -1456,6 +1523,7 @@ def main() -> int:
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
+    parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 

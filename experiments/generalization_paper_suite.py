@@ -289,7 +289,8 @@ def evaluate_multiclass(
 
 def make_loaders(benchmark: str, args: argparse.Namespace, seed: int):
     if benchmark == "cifar":
-        return get_cifar100_lt_dataloaders(args.ratio, args.batch_size, seed=seed)
+        split_seed = args.split_seed if args.split_seed is not None else seed
+        return get_cifar100_lt_dataloaders(args.ratio, args.batch_size, seed=split_seed)
     raise ValueError(f"Unsupported benchmark: {benchmark}")
 
 
@@ -342,10 +343,11 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     run_name = f"ir{args.ratio}"
-    run_dir = output_root(benchmark) / run_name / experiment_name / f"seed_{seed}"
+    run_experiment_name = f"{experiment_name}{args.run_suffix}" if args.run_suffix else experiment_name
+    run_dir = output_root(benchmark) / run_name / run_experiment_name / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
     print(
-        f"\n[RUN] benchmark={benchmark} case={run_name} experiment={experiment_name} "
+        f"\n[RUN] benchmark={benchmark} case={run_name} experiment={run_experiment_name} "
         f"seed={seed} epochs={args.epochs} output={run_dir}",
         flush=True,
     )
@@ -450,8 +452,14 @@ def run_one(benchmark: str, experiment_name: str, args: argparse.Namespace, seed
     result = {
         "benchmark": benchmark,
         "run_name": run_name,
-        "experiment": asdict(spec),
+        "experiment": {
+            **asdict(spec),
+            "name": run_experiment_name,
+            "base_name": experiment_name,
+            "run_suffix": args.run_suffix,
+        },
         "seed": seed,
+        "split_seed": args.split_seed if args.split_seed is not None else seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "temperature": float(temperature),
@@ -501,6 +509,8 @@ def main() -> int:
     parser.add_argument("--lr", type=float)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--seeds", type=int, nargs="+")
+    parser.add_argument("--split_seed", type=int, help="Fixed CIFAR-LT subset/split seed; use with multiple model seeds for comparable runs.")
+    parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--save_model", action="store_true")
     parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")

@@ -23,7 +23,7 @@ os.environ.setdefault("MDEP_PREFETCH_FACTOR", "4")
 4. CIFAR-100-LT ratio 100.
 5. CIFAR-100-LT ratio 50.
 6. CIFAR-100-LT ratio 10.
-7. Hardware profiling and result summarization.
+7. Hardware profiling, bootstrap diagnostics, and result summarization.
 8. Optional backbone generalization.
 
 ## Commands
@@ -36,6 +36,7 @@ os.environ.setdefault("MDEP_PREFETCH_FACTOR", "4")
 !python experiments/run_cifar_suite.py --ratio 50 --epochs 100 --batch_size 128 --seeds 42 123 456
 !python experiments/run_cifar_suite.py --ratio 10 --epochs 100 --batch_size 128 --seeds 42 123 456
 !python experiments/hardware_profile.py
+!python experiments/bootstrap_isic_predictions.py --target full_guds --baseline dense_edl static_24_edl rigl_style_24 --unit patient --n_bootstrap 1000
 !python experiments/summarize_results.py
 ```
 
@@ -46,6 +47,9 @@ os.environ.setdefault("MDEP_PREFETCH_FACTOR", "4")
 - Increase `MDEP_NUM_WORKERS` to `6` only if the notebook has spare CPU and RAM.
 - Use one seed first for a quick full-pipeline check, then launch multi-seed
   notebooks.
+- `bootstrap_isic_predictions.py` requires the ISIC runs to have produced
+  `test_predictions.csv`; rerun the ISIC commands after this update if those
+  files are missing.
 
 ## Output Handling
 
