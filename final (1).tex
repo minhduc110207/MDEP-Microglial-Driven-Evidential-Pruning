@@ -1481,7 +1481,7 @@ Hardware evaluation should separate three claims. The first claim is structural 
 \toprule
 \textbf{Level} & \textbf{Comparison} & \textbf{Measurements} & \textbf{Allowed claim} \\
 \midrule
-Structural & Dense EDL, Static 2:4, RigL style 2:4, DST-EDL & Active density, valid 2:4 blocks, wrapped layer parameter reduction, theoretical sparse MAC reduction & Sparse compatibility \\
+Structural & Dense EDL, Static 2:4, RigL style 2:4, DST-EDL & Active density, valid 2:4 blocks, wrapped layer parameter reduction, theoretical MAC and FLOP reduction & Sparse compatibility \\
 Masked PyTorch & Dense EDL, Static 2:4, DST-EDL & Images per second, milliseconds per batch, peak CUDA memory, batch size, image size, GPU name & Diagnostic cost only \\
 Sparse kernel & Dense exported model vs. exported 2:4 model & cuSPARSELt, TensorRT, or PyTorch semi structured latency; throughput; memory; layout conversion status & Real speedup only if backend uses sparse kernels \\
 \bottomrule
@@ -1489,7 +1489,7 @@ Sparse kernel & Dense exported model vs. exported 2:4 model & cuSPARSELt, Tensor
 \end{adjustbox}
 \end{table}
 
-The current implementation can report Levels 1 and 2 with \texttt{experiments/hardware\_profile.py}. These numbers should be presented as structural evidence and masked PyTorch diagnostics. If masked sparse inference is slower than dense inference, the result is still informative. Masked kernels multiply by dense tensors and do not expose the compressed 2:4 layout to Sparse Tensor Cores. Level 3 requires exporting frozen valid 2:4 weights to a compatible backend. If convolutional layers cannot be mapped to supported sparse kernels, the paper should report the failure mode rather than infer acceleration from the mask.
+The current implementation can report Levels 1 and 2 with \texttt{experiments/hardware\_profile.py}. The script records active density, valid 2:4 block fraction, dense execution MACs, theoretical active MACs, FLOPs under the two MACs per multiply add convention, masked PyTorch throughput, latency, and peak CUDA memory. These numbers should be presented as structural evidence and masked PyTorch diagnostics. If masked sparse inference is slower than dense inference, the result is still informative. Masked kernels multiply by dense tensors and do not expose the compressed 2:4 layout to Sparse Tensor Cores. Level 3 requires exporting frozen valid 2:4 weights to a compatible backend. If convolutional layers cannot be mapped to supported sparse kernels, the paper should report the failure mode rather than infer acceleration from the mask.
 
 \subsection{Quality Gated Failure Detection Protocol}
 A quality control filter based on the entropy based ambiguity proxy $u_a$ is planned for future evaluation. High $u_a$ scores will be tested for correlation with input artifacts such as camera glare, motion blur, and obscurations. Evaluating accepted vs. deferred subsets based on this uncertainty threshold will demonstrate selective prediction utility.

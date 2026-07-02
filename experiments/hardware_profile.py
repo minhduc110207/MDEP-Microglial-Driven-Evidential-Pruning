@@ -1,9 +1,10 @@
 """
 Hardware-oriented profiling for the planned efficiency protocol.
 
-This script measures structural sparsity, active parameters, peak CUDA memory,
-and forward throughput. It does not claim real 2:4 Tensor Core acceleration;
-that requires specialized sparse kernels such as cuSPARSELt or TensorRT.
+This script measures structural sparsity, active parameters, theoretical
+MAC/FLOP cost, peak CUDA memory, and forward throughput. It does not claim real
+2:4 Tensor Core acceleration; that requires specialized sparse kernels such as
+cuSPARSELt or TensorRT.
 """
 
 from __future__ import annotations
@@ -71,9 +72,11 @@ def structural_stats(model: nn.Module) -> dict[str, float]:
                 total_params += n
                 active_params += n
 
-    sparse_density = float(sparse_active / max(sparse_params, 1))
+    sparse_density = float(sparse_active / sparse_params) if sparse_params > 0 else 1.0
     active_density = float(active_params / max(total_params, 1))
     tensor_core_upper_bound = 1.0 / max(sparse_density, 1e-8) if sparse_params > 0 else 1.0
+    sparse_reduction = 1.0 - sparse_density if sparse_params > 0 else 0.0
+    valid_fraction = float(valid_24_blocks / total_24_blocks) if total_24_blocks > 0 else 0.0
     return {
         "total_params": float(total_params),
         "active_params": float(active_params),
@@ -81,9 +84,86 @@ def structural_stats(model: nn.Module) -> dict[str, float]:
         "sparse_wrapped_params": float(sparse_params),
         "sparse_wrapped_active_params": float(sparse_active),
         "sparse_wrapped_density": sparse_density,
-        "theoretical_sparse_wrapped_param_reduction": float(1.0 - sparse_density),
+        "theoretical_sparse_wrapped_param_reduction": float(sparse_reduction),
         "theoretical_2to4_tensor_core_speedup_upper_bound": float(min(tensor_core_upper_bound, 2.0)),
-        "valid_24_block_fraction": float(valid_24_blocks / max(total_24_blocks, 1)),
+        "valid_24_block_fraction": valid_fraction,
+    }
+
+
+@torch.no_grad()
+def macs_profile(model: nn.Module, device: torch.device, batch_size: int, image_size: int) -> dict[str, float]:
+    totals = {
+        "dense_execution_macs": 0.0,
+        "theoretical_active_macs": 0.0,
+        "wrapped_dense_execution_macs": 0.0,
+        "wrapped_theoretical_active_macs": 0.0,
+    }
+
+    def conv_hook(module: nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        if not isinstance(output, torch.Tensor) or not inputs:
+            return
+        x = inputs[0]
+        if x.ndim != 4 or output.ndim != 4:
+            return
+        out_h, out_w = int(output.shape[-2]), int(output.shape[-1])
+        batch = int(output.shape[0])
+        dense_weight_macs = float(module.weight.numel() * out_h * out_w * batch)
+        totals["dense_execution_macs"] += dense_weight_macs
+        if isinstance(module, MDEPConv2d):
+            active_weight_macs = float(module.mask.detach().sum().item() * out_h * out_w * batch)
+            totals["wrapped_dense_execution_macs"] += dense_weight_macs
+            totals["wrapped_theoretical_active_macs"] += active_weight_macs
+            totals["theoretical_active_macs"] += active_weight_macs
+        else:
+            totals["theoretical_active_macs"] += dense_weight_macs
+
+    def linear_hook(module: nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        if not isinstance(output, torch.Tensor) or not inputs:
+            return
+        x = inputs[0]
+        if x.shape[-1] != module.in_features:
+            return
+        positions = int(x.numel() // max(module.in_features, 1))
+        dense_weight_macs = float(positions * module.weight.numel())
+        totals["dense_execution_macs"] += dense_weight_macs
+        if isinstance(module, MDEPLinear):
+            active_weight_macs = float(positions * module.mask.detach().sum().item())
+            totals["wrapped_dense_execution_macs"] += dense_weight_macs
+            totals["wrapped_theoretical_active_macs"] += active_weight_macs
+            totals["theoretical_active_macs"] += active_weight_macs
+        else:
+            totals["theoretical_active_macs"] += dense_weight_macs
+
+    handles = []
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            handles.append(module.register_forward_hook(conv_hook))
+        elif isinstance(module, nn.Linear):
+            handles.append(module.register_forward_hook(linear_hook))
+
+    model.eval().to(device)
+    x = torch.randn(batch_size, 3, image_size, image_size, device=device)
+    _ = model(x)
+    for handle in handles:
+        handle.remove()
+
+    dense_macs = totals["dense_execution_macs"]
+    active_macs = totals["theoretical_active_macs"]
+    wrapped_dense_macs = totals["wrapped_dense_execution_macs"]
+    wrapped_active_macs = totals["wrapped_theoretical_active_macs"]
+    per_image = float(max(batch_size, 1))
+    return {
+        **totals,
+        "dense_execution_gmacs": float(dense_macs / 1e9),
+        "theoretical_active_gmacs": float(active_macs / 1e9),
+        "dense_execution_gflops": float(2.0 * dense_macs / 1e9),
+        "theoretical_active_gflops": float(2.0 * active_macs / 1e9),
+        "dense_execution_gmacs_per_image": float(dense_macs / per_image / 1e9),
+        "theoretical_active_gmacs_per_image": float(active_macs / per_image / 1e9),
+        "dense_execution_gflops_per_image": float(2.0 * dense_macs / per_image / 1e9),
+        "theoretical_active_gflops_per_image": float(2.0 * active_macs / per_image / 1e9),
+        "theoretical_total_mac_reduction": float(1.0 - active_macs / max(dense_macs, 1.0)),
+        "theoretical_wrapped_mac_reduction": float(1.0 - wrapped_active_macs / max(wrapped_dense_macs, 1.0)) if wrapped_dense_macs > 0 else 0.0,
     }
 
 
@@ -145,6 +225,7 @@ def main() -> int:
     for mode in args.modes:
         model = build_model(mode, args.num_classes, pretrained=not args.no_pretrained)
         stats = structural_stats(model)
+        macs = macs_profile(model, device, args.batch_size, args.image_size)
         timing = profile_forward(model, device, args.batch_size, args.image_size, args.warmup, args.iters)
         result = {
             "benchmark": "hardware",
@@ -153,20 +234,32 @@ def main() -> int:
             "mode": mode,
             "device": str(device),
             "structural_stats": stats,
+            "macs_profile": macs,
             "forward_profile": timing,
             "metrics": {
                 "active_density": stats["active_density"],
                 "sparse_wrapped_density": stats["sparse_wrapped_density"],
                 "valid_24_block_fraction": stats["valid_24_block_fraction"],
                 "theoretical_2to4_tensor_core_speedup_upper_bound": stats["theoretical_2to4_tensor_core_speedup_upper_bound"],
+                "dense_execution_gmacs": macs["dense_execution_gmacs"],
+                "theoretical_active_gmacs": macs["theoretical_active_gmacs"],
+                "dense_execution_gflops": macs["dense_execution_gflops"],
+                "theoretical_active_gflops": macs["theoretical_active_gflops"],
+                "dense_execution_gmacs_per_image": macs["dense_execution_gmacs_per_image"],
+                "theoretical_active_gmacs_per_image": macs["theoretical_active_gmacs_per_image"],
+                "dense_execution_gflops_per_image": macs["dense_execution_gflops_per_image"],
+                "theoretical_active_gflops_per_image": macs["theoretical_active_gflops_per_image"],
+                "theoretical_total_mac_reduction": macs["theoretical_total_mac_reduction"],
+                "theoretical_wrapped_mac_reduction": macs["theoretical_wrapped_mac_reduction"],
                 "images_per_second": timing["images_per_second"],
                 "milliseconds_per_batch": timing["milliseconds_per_batch"],
                 "peak_cuda_memory_mb": timing.get("peak_cuda_memory_mb", float("nan")),
             },
             "kernel_note": "Standard PyTorch masked execution; not a cuSPARSELt/TensorRT sparse Tensor Core benchmark.",
             "reporting_scope": (
-                "Use active density, valid_24_block_fraction, and theoretical upper bound as structural-feasibility metrics. "
-                "Use images_per_second only as masked-PyTorch throughput unless the model is exported to a real 2:4 sparse kernel."
+                "Use active density, valid_24_block_fraction, theoretical MAC/FLOP reductions, and theoretical upper bound "
+                "as structural-feasibility metrics. Use images_per_second only as masked-PyTorch throughput unless the model "
+                "is exported to a real 2:4 sparse kernel."
             ),
         }
         results.append(result)

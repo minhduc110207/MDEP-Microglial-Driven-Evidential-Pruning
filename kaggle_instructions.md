@@ -617,8 +617,10 @@ paper, run:
 ```
 
 This records active density, valid 2:4 block fraction, theoretical wrapped-layer
-sparse reduction, masked-PyTorch throughput, latency, and peak CUDA memory for
-dense, static 2:4, and DST-EDL model constructors.
+sparse reduction, dense-execution GMACs/GFLOPs, theoretical active GMACs/GFLOPs,
+per-image GMACs/GFLOPs, masked-PyTorch throughput, latency, and peak CUDA memory
+for dense, static 2:4, and DST-EDL model constructors. Use the per-image fields
+for paper tables because they are independent of batch size.
 
 For a stronger diagnostic, repeat with a larger batch size if the GPU memory is
 stable:
@@ -628,12 +630,12 @@ stable:
 !python experiments/summarize_results.py
 ```
 
-The hardware profile reports structural compatibility and masked-PyTorch
-throughput only. Do not describe it as realized sparse Tensor Core speedup.
-Real speedup requires exporting frozen valid 2:4 weights to a sparse-kernel
-backend such as cuSPARSELt, TensorRT sparse execution, or a supported PyTorch
-semi-structured sparse path. If that export is not implemented, report the
-current profile as Level 1/2 evidence only.
+The hardware profile reports structural compatibility, theoretical MAC/FLOP
+reduction, and masked-PyTorch throughput only. Do not describe it as realized
+sparse Tensor Core speedup. Real speedup requires exporting frozen valid 2:4
+weights to a sparse-kernel backend such as cuSPARSELt, TensorRT sparse
+execution, or a supported PyTorch semi-structured sparse path. If that export is
+not implemented, report the current profile as Level 1/2 evidence only.
 
 ## 10. Speed And Storage Knobs
 
