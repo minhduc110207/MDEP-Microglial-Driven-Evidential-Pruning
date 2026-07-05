@@ -8,7 +8,7 @@
 % ============================================================================
 
 \documentclass[letterpaper]{article} % DO NOT CHANGE THIS
-\usepackage{aaai}  % DO NOT CHANGE THIS
+\usepackage{aaai2026}  % DO NOT CHANGE THIS
 \usepackage{times}  % DO NOT CHANGE THIS
 \usepackage{helvet}  % DO NOT CHANGE THIS
 \usepackage{courier}  % DO NOT CHANGE THIS
@@ -31,22 +31,17 @@
 
 % --- Additional Packages ---
 \usepackage[utf8]{inputenc}
-\usepackage[english]{babel}
 \usepackage{amsmath, amssymb, amsthm, bm}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{array}
 \usepackage{adjustbox}
 \usepackage{placeins}
-\usepackage{stfloats}
-\usepackage{float}
 \usepackage{enumitem}
 \usepackage[final]{microtype}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta, positioning, calc}
-\usepackage[table]{xcolor}
-\usepackage{colortbl}
-\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{natbib}
 
 \newcolumntype{C}{>{\centering\arraybackslash}c}
 
@@ -75,30 +70,8 @@
 \hfuzz=10pt
 \vfuzz=4pt
 \raggedbottom
-\setlength{\textfloatsep}{7pt plus 2pt minus 2pt}
-\setlength{\dbltextfloatsep}{7pt plus 2pt minus 2pt}
-\setlength{\floatsep}{6pt plus 2pt minus 2pt}
-\setlength{\dblfloatsep}{6pt plus 2pt minus 2pt}
-\setlength{\intextsep}{7pt plus 2pt minus 2pt}
 
 \newtheorem{remark}{Remark}
-
-% Compatibility patch for manual \bibitem entries with aaai.sty
-\makeatletter
-\renewenvironment{thebibliography}[1]{%
-  \section*{References\@mkboth{REFERENCES}{REFERENCES}}%
-  \list{[\arabic{enumiv}]}{%
-    \settowidth\labelwidth{[#1]}%
-    \leftmargin\labelwidth
-    \advance\leftmargin\labelsep
-    \usecounter{enumiv}%
-    \let\p@enumiv\@empty
-    \renewcommand\theenumiv{\arabic{enumiv}}%
-    \itemsep .01in
-  }%
-  \sloppy\clubpenalty4000\widowpenalty4000\sfcode`\.\@m
-}{\def\@noitemerr{\@latex@warning{Empty `thebibliography' environment}}\endlist}
-\makeatother
 
 
 % ============================================================================
@@ -194,7 +167,7 @@ DST-EDL separates training into two coupled loops. The prediction loop updates a
 
 The reported model employs topology caching, softened signed first order pruning with pruning strength $0.5$, pruning warmup, KL uniform regrowth, symmetric KL regularization, and evidential focal learning. This conservative configuration favors stable high sensitivity ranking over aggressive sensitivity maximization.
 
-\subsection{2:4 Mask Constrained Sparse Topology}
+\subsection{2:4 Mask-Constrained Sparse Topology}
 DST-EDL wraps convolutional kernels and linear projections with binary masks. Prediction weights $\bm{W}^{(l)}$ are optimized by the ordinary training loss. Latent scores $\bm{V}^{(l)}$ determine the mask $\bm{M}^{(l)}$:
 \begin{equation}\label{eq:wrapped_weights}
     \bm{W}_{\text{eff}}^{(l)}=\bm{W}^{(l)}\odot\bm{M}^{(l)} .
@@ -222,7 +195,7 @@ Convolutional tensors are reshaped into a 2D matrix where the 2:4 constraint is 
 \end{equation}
 This is equivalent to $\bm{M}^{(t+1)}=\Pi_{\mathcal{C}_{2:4}}(\bm{V}^{(t)})$. The projection maximizes $\langle \bm{M},\bm{V}\rangle$ over each complete 4-block. Every refreshed eligible block remains exactly 2:4 feasible by construction, the formal mathematical verification is detailed in appendix~\ref{app:24_feasibility} .
 
-\subsection{Uncertainty Guided Pruning and KL uniform Structural Regrowth}
+\subsection{Uncertainty-Guided Pruning and KL Uniform Structural Regrowth}
 At each structural refresh, DST-EDL evaluates a proxy batch and computes two saliency signals. The pruning signal uses the ambiguity over vacuity ratio. The regrowth signal uses KL to uniform evidential influence. Ordinary prediction uses $\bm{W}\odot\bm{M}$. Structural scoring uses an auxiliary dense effective weight probe $\widetilde{\bm{W}}_{\text{eff}}$ initialized at the current masked values:
 \begin{equation}\label{eq:virtual_probe}
 \begin{aligned}
@@ -318,7 +291,7 @@ The checks above (Dirichlet signal validity, exact 2:4 feasibility, and first or
 
 \section{Optimization Framework}\label{sec:optimization}
 
-To address extreme class imbalance, we build on Evidential Focal Loss (EFL) from Zhou et al.~\cite{zhou2023domain}, which combines evidential Dirichlet classification with focal modulation. The reported DST-EDL configuration uses square root class frequency dampening, stop gradient focal modulation, KL annealing, and symmetric KL regularization.
+To address extreme class imbalance, we build on Evidential Focal Loss (EFL) from Zhou et al.~\shortcite{zhou2023domain}, which combines evidential Dirichlet classification with focal modulation. The reported DST-EDL configuration uses square root class frequency dampening, stop gradient focal modulation, KL annealing, and symmetric KL regularization.
 
 In the reported symmetric setting, the KL multiplier is exactly uniform across samples and classes. The asymmetric KL multiplier is retained only for the diagnostic ablation named ``asymmetric KL''. The reported DST-EDL row uses the symmetric objective:
 \begin{equation}\label{eq:efl}
@@ -399,7 +372,7 @@ For each sample $n$, the stop gradient focal factor $\mathcal{F}_n(t)$ reweights
 We use a short learning rate and loss scale warmup for numerical stability. Its schedule is an implementation detail and is given with the full training algorithm in Appendix~\ref{app:algorithm}.
 
 
-\subsection{Post hoc Calibration and Decision Thresholding}
+\subsection{Post-Hoc Calibration and Decision Thresholding}
 Post hoc calibration is applied to logits before the Softplus evidence map. This changes predictive probabilities and Dirichlet strength. We therefore treat it as evidential post hoc calibration rather than ordinary softmax temperature scaling. Calibration is applied after training and leaves the learned sparse topology fixed. The reported runs use bias temperature calibration with prior shift correction fitted on the calibration partition. Appendix~\ref{app:algorithm} gives the formula.
 
 Operating thresholds are selected by sweeping validation probabilities $\hat p_c=\alpha_c/S$. Threshold selection changes the decision rule for Sensitivity and Specificity. It leaves the evidence values unchanged. The completed repeated seed ablations show different responses for sensitivity, specificity, ranking, and calibration. We therefore report calibration and ranking metrics separately. No single post hoc operating point is treated as uniformly beneficial under extreme prevalence.
@@ -512,7 +485,7 @@ The ablations further narrow the claim. They probe components around the reporte
 We introduced DST-EDL, a conservative uncertainty to topology sparse evidential framework for extremely imbalanced classification. The reported model combines topology caching, softened signed first order pruning, KL uniform regrowth, symmetric KL regularization, and evidential focal learning. It operates under exact valid block 2:4 sparsity. Its structural controller is supported by checks for Dirichlet signal validity, proxy batch risk ratio concentration, local first order saliency, gradient isolation, bounded latent scores, and exact valid block projection. On ISIC 2024, DST-EDL achieves the highest mean pAUC$_{0.80}=0.1168$ and Macro AUROC$=0.8891$ among the compared dense evidential and sparse 2:4 baselines. The same runs preserve exact structured sparsity and show no detected representational collapse. The supported conclusion is narrow: DST-EDL improves high sensitivity ranking in this comparison under exact 2:4 structured sparsity. Calibration and PR AUC remain tradeoffs. Completed three seed component diagnostics identify KL uniform regrowth as the most critical structural component. They position EFL and anti crystallization as tradeoff components. Broader validity requires additional datasets, backbones, ablations, and hardware aware sparse kernels.
 
 
-\\begin{thebibliography}{10}
+\begin{thebibliography}{10}
 \bibitem[\protect\citeauthoryear{Guo \bgroup et al.\egroup }{2017}]{guo2017calibration}
 Guo, C.; Pleiss, G.; Sun, Y.; and Weinberger, K. Q.. 2017. 
 \newblock On calibration of modern neural networks. In {\em International Conference on Machine Learning (ICML)}.
@@ -565,11 +538,11 @@ Cui, J.; Zhong, Z.; Liu, S.; Yu, B.; and Jia, J.. 2021.
 Deng, D.; Chen, G.; Yu, Y.; Liu, F.; and Heng, P.-A.. 2023. 
 \newblock Uncertainty estimation by Fisher information based evidential deep learning. In {\em International Conference on Machine Learning (ICML)}, PMLR.
 
-\bibitem[\protect\citeauthoryear{Chen \bgroup et al.\egroup }{2024}]{chen2023redl}
+\bibitem[\protect\citeauthoryear{Chen \bgroup et al.\egroup }{2024a}]{chen2023redl}
 Chen, M.; Gao, J.; and Xu, C.. 2024. 
 \newblock R-EDL: Relaxing nonessential settings of evidential deep learning. In {\em International Conference on Learning Representations (ICLR)}.
 
-\bibitem[\protect\citeauthoryear{Chen \bgroup et al.\egroup }{2024}]{chen2024reedl}
+\bibitem[\protect\citeauthoryear{Chen \bgroup et al.\egroup }{2024b}]{chen2024reedl}
 Chen, M.; Gao, J.; and Xu, C.. 2024. 
 \newblock Revisiting essential and nonessential settings of evidential deep learning. {\em arXiv preprint arXiv:2410.00393}.
 
@@ -680,7 +653,7 @@ Kingma, D. P.; and Ba, J.. 2015.
 \bibitem[\protect\citeauthoryear{Charpentier \bgroup et al.\egroup }{2020}]{charpentier2020posterior}
 Charpentier, B.; Z{\"u}gner, D.; and G{\"u}nnemann, S.. 2020. 
 \newblock Posterior Network: Uncertainty estimation without OOD samples via density based pseudo counts. In {\em Advances in Neural Information Processing Systems (NeurIPS)}.
-\\end{thebibliography}
+\end{thebibliography}
 
 \appendix
 
@@ -1212,7 +1185,7 @@ Stacking this entry wise identity over the tensor gives Eq.~\ref{eq:masked_gradi
 \label{app:virtual_probe_note}
 Regrowth uses a dormant link saliency distinct from the ordinary parameter gradient $\partial L/\partial W_{ij}$ under a fixed mask. The structural refresh introduces an auxiliary dense effective tensor $\widetilde{\bm{W}}_{\text{eff}}$ initialized at $\bm{W}\odot\bm{M}$ and computes proxy gradients with respect to that tensor. For a dormant coordinate, $\widetilde{W}_{\text{eff},ij}=0$, yet $\partial L_{\text{grow}}/\partial \widetilde{W}_{\text{eff},ij}$ can still be nonzero. The coordinate is treated as a virtual effective input to the proxy computation. These gradients are discarded after ranking and are never applied as ordinary updates to dormant parameters. Masked gradient isolation for training and virtual probe saliency for topology scoring are compatible.
 
-\subsection{Signed First Order Pruning Criterion}
+\subsection{Signed First-Order Pruning Criterion}
 \label{app:signed_pruning}
 Let the mask be fixed during the structural proxy pass and consider an active effective coordinate $w_{\text{eff},ij}$. Define the removal perturbation $\delta_{ij}=-w_{\text{eff},ij}$. Taylor's theorem gives
 \begin{equation}
@@ -1322,7 +1295,7 @@ additional scope evidence. Broader validation on additional imbalance
 profiles, backbones, sparse Tensor Core compatible kernels, and quality gated
 failure detection remains outside the central ISIC claim.
 
-\subsection{ISIC Softmax Long Tailed Diagnostic}
+\subsection{ISIC Softmax Long-Tailed Diagnostic}
 Table~\ref{tab:isic_softmax_lt_diagnostic} reports the completed three seed
 softmax long tailed baselines on the same ISIC split. These runs provide
 context for ordinary probability based classifiers. The main comparison
@@ -1607,7 +1580,7 @@ Dense FP16 (Baseline) & 78.32 & 5,012.31 & 12.77 & 0.00 & 1.00$\times$ \\
 \end{table}
 
 
-\subsection{Quality Gated Failure Detection Protocol}
+\subsection{Quality-Gated Failure Detection Protocol}
 A quality control filter based on the entropy based ambiguity proxy $u_a$ is planned for future evaluation. High $u_a$ scores will be tested for correlation with input artifacts such as camera glare, motion blur, and obscurations. Evaluating accepted vs. deferred subsets based on this uncertainty threshold will demonstrate selective prediction utility.
 
 For controlled long tailed recognition, CIFAR-100-LT should be used to separate general imbalance behavior from the ISIC screening setting. Hardware profiling should distinguish structural 2:4 feasibility from realized acceleration. Actual speedup requires sparse Tensor Core compatible kernels and layouts such as cuSPARSELt or TensorRT sparse execution. Quality gated failure detection based on $u_a$ or related ambiguity scores is left as future work. It should be evaluated as selective prediction rather than as a clinical deployment claim.
