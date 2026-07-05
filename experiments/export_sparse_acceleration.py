@@ -145,14 +145,22 @@ def convert_to_standard_dense_masked(model: nn.Module) -> nn.Module:
     return new_model
 
 
-def export_to_onnx(model: nn.Module, save_path: str, img_size: int = 224):
+def export_to_onnx(model: nn.Module, save_path: str, img_size: int = 224, fp16: bool = False):
     """
     Exports a clean standard PyTorch model (no MDEP layers) to ONNX.
-    This ONNX file can be fed to TensorRT's trtexec with --sparsity=force
-    to accelerate both Conv2d and Linear layers.
+    Supports FP16 model casting so that TensorRT 10/11 strongly-typed engines can execute in FP16.
     """
     model.eval()
-    dummy_input = torch.randn(1, 3, img_size, img_size)
+    if fp16:
+        model = model.half()
+        dummy_input = torch.randn(1, 3, img_size, img_size).half()
+    else:
+        dummy_input = torch.randn(1, 3, img_size, img_size)
+        
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    dummy_input = dummy_input.to(device)
+    
     torch.onnx.export(
         model, 
         dummy_input, 
@@ -165,8 +173,8 @@ def export_to_onnx(model: nn.Module, save_path: str, img_size: int = 224):
         dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
     )
     print(f"Exported to ONNX: {save_path}")
-    print("To benchmark with TensorRT, run:")
-    print(f"trtexec --onnx={save_path} --fp16 --sparsity=force --shapes=input:128x3x{img_size}x{img_size}")
+    print("To benchmark with TensorRT 11, run:")
+    print(f"trtexec --onnx={save_path} --sparsity=enable --shapes=input:64x3x{img_size}x{img_size}")
 
 
 def benchmark_throughput(model: nn.Module, device: torch.device, batch_size: int, img_size: int, warmup: int = 20, iters: int = 50) -> dict[str, float]:
@@ -200,6 +208,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--onnx_path", type=str, default="dst_edl_resnet18_sparse.onnx", help="Path to save the ONNX model")
+    parser.add_argument("--fp16", action="store_true", help="Export ONNX model in FP16 precision for TensorRT 10/11")
     args = parser.parse_args()
     
     print("=== Level 3 Hardware Evidence: Realized Sparse Acceleration ===")
@@ -215,7 +224,7 @@ def main():
     model_clean = convert_to_standard_dense_masked(model_mdep)
     
     # 3. ONNX Export for TensorRT
-    export_to_onnx(model_clean, args.onnx_path, args.image_size)
+    export_to_onnx(model_clean, args.onnx_path, args.image_size, args.fp16)
     
     # 4. Check for PyTorch Native Support
     if not verify_ampere_gpu():
