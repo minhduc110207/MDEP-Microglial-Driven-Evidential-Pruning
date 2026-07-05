@@ -56,7 +56,9 @@ def get_group_kfold_loaders(df, image_dir, hdf5_path, train_tf, test_tf, train_i
     # Calculate true prior
     class_counts_true = train_df['target'].value_counts().sort_index()
     total_true = len(train_df)
-    p_true = [class_counts_true.get(c, 0) / total_true for c in range(2)]
+    p_true = [max(class_counts_true.get(c, 0), 1e-4) for c in range(2)]
+    sum_true = sum(p_true)
+    p_true = [p / sum_true for p in p_true]
     
     # Subsample benign class in train to match malignant * subsample_ratio
     if subsample_ratio is not None and subsample_ratio > 0:
@@ -71,7 +73,9 @@ def get_group_kfold_loaders(df, image_dir, hdf5_path, train_tf, test_tf, train_i
             
     class_counts = train_df['target'].value_counts().sort_index()
     total = len(train_df)
-    p_train = [class_counts.get(c, 0) / total for c in range(2)]
+    p_train = [max(class_counts.get(c, 0), 1e-4) for c in range(2)]
+    sum_train = sum(p_train)
+    p_train = [p / sum_train for p in p_train]
     
     train_ds = LongTailedDataset(train_df, image_dir, transform=train_tf, hdf5_path=hdf5_path)
     val_ds = LongTailedDataset(val_df, image_dir, transform=test_tf, hdf5_path=hdf5_path)

@@ -68,15 +68,18 @@ def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
         yt = y_true[mask]
         yp = y_pred[mask]
         
-        tp = ((yt == 1) & (yp == 1)).sum()
-        fn = ((yt == 1) & (yp == 0)).sum()
-        fp = ((yt == 0) & (yp == 1)).sum()
-        tn = ((yt == 0) & (yp == 0)).sum()
+        num_pos = (yt == 1).sum()
+        num_neg = (yt == 0).sum()
         
-        tprs[g] = float(tp / (tp + fn + 1e-8))
-        fprs[g] = float(fp / (fp + tn + 1e-8))
-        
-    if len(tprs) < 2:
+        if num_pos > 0:
+            tp = ((yt == 1) & (yp == 1)).sum()
+            tprs[g] = float(tp / num_pos)
+            
+        if num_neg > 0:
+            fp = ((yt == 0) & (yp == 1)).sum()
+            fprs[g] = float(fp / num_neg)
+            
+    if len(tprs) < 2 or len(fprs) < 2:
         return 0.0
         
     tpr_vals = list(tprs.values())
