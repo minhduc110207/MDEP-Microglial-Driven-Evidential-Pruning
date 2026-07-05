@@ -102,6 +102,8 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
         ]
         if args.no_save_model:
             isic_command.append("--no_save_model")
+        if args.allow_dummy_data:
+            isic_command.append("--allow_dummy_data")
         commands.append(
             CommandSpec(
                 name=f"isic_{args.isic_suite}",
@@ -148,19 +150,22 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
             )
         )
     if args.include_backbones:
+        backbone_command = [
+            sys.executable,
+            str(REPO_ROOT / "experiments" / "backbone_generalization_runner.py"),
+            "--epochs",
+            str(1 if args.smoke else args.backbone_epochs),
+            "--batch_size",
+            str(min(batch_size, 8)),
+            "--seeds",
+            *[str(seed) for seed in args.seeds],
+        ]
+        if args.allow_dummy_data:
+            backbone_command.append("--allow_dummy_data")
         commands.append(
             CommandSpec(
                 name="backbone_generalization",
-                command=[
-                    sys.executable,
-                    str(REPO_ROOT / "experiments" / "backbone_generalization_runner.py"),
-                    "--epochs",
-                    str(1 if args.smoke else args.backbone_epochs),
-                    "--batch_size",
-                    str(min(batch_size, 8)),
-                    "--seeds",
-                    *[str(seed) for seed in args.seeds],
-                ],
+                command=backbone_command,
             )
         )
     if not args.skip_summary:
@@ -194,6 +199,7 @@ def main() -> int:
     parser.add_argument("--skip_summary", action="store_true")
     parser.add_argument("--include_backbones", action="store_true", help="Also run the heavyweight ConvNeXt/Swin backbone protocol.")
     parser.add_argument("--no_save_model", action="store_true", help="Avoid saving every model checkpoint in large multi-seed sweeps.")
+    parser.add_argument("--allow_dummy_data", action="store_true", help="Permit synthetic dummy data for dry-runs only.")
     parser.add_argument("--smoke", action="store_true", help="Run a 1-epoch smoke test with small batches.")
     parser.add_argument("--keep_going", action="store_true", help="Continue after a failed command.")
     args = parser.parse_args()
