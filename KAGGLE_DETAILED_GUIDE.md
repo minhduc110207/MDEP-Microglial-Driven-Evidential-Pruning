@@ -125,43 +125,43 @@ Sau khi Cell 1 in ra dòng `THIẾT LẬP THÀNH CÔNG`, hãy chọn 1 trong cá
 
 #### 🔹 Thí nghiệm 2.1: Chạy mô hình đề xuất chính GUDS-EDL (ISIC)
 ```python
-# Chạy mô hình đề xuất chính
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python experiments/isic_paper_experiments.py --experiment full_guds --epochs 40 --batch_size 32 --seeds 42 --split_seed 42 --no_save_model
 ```
 
 #### 🔹 Thí nghiệm 2.2: Chạy GroupKFold chéo theo nhóm bệnh nhân (ISIC)
 ```python
-# Chạy GroupKFold 5-Fold
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python experiments/run_group_kfold.py --folds 5 --epochs 15 --batch_size 32
 ```
 
 #### 🔹 Thí nghiệm 2.3: Chạy đa kiến trúc mạng Backbones (ISIC)
 ```python
-# Chạy đánh giá mở rộng trên ResNet-18, ConvNeXt-T, Swin-T
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python experiments/backbone_generalization_runner.py --backbones resnet18 convnext_tiny swin_t --epochs 15 --batch_size 16
 ```
 
 #### 🔹 Thí nghiệm 2.4: Chạy Nghiên cứu Calibration & Các Regrowth Ablations (ISIC)
 ```python
-# Chạy so sánh hiệu chuẩn của các chế độ Regrowth (KL, Vacuity, Ambiguity, Ratio)
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python experiments/run_calibration_study.py --modes kl_uniform vacuity ambiguity ratio --epochs 15 --batch_size 32
 ```
 
 #### 🔹 Thí nghiệm 2.5: Chạy xuất file ONNX thưa và đo đạc phần cứng
 ```python
-# Chạy xuất file ONNX thưa
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python experiments/export_sparse_acceleration.py --batch_size 64 --image_size 224
 ```
 
 #### 🔹 Thí nghiệm 2.6: Chạy kiểm định ngoại quan (Domain Shift & Fairness)
 ```python
-# Chạy đánh giá ngoại quan trên các loại da Fitzpatrick
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python experiments/run_external_validation.py
 ```
 
 #### 🔹 Thí nghiệm 2.7: Chạy thực nghiệm trên tập dữ liệu CIFAR-100-LT (Long-tail)
 ```python
-# Chạy thực nghiệm CIFAR-100-LT với tỉ lệ mất cân bằng 100
+%cd /kaggle/working/MDEP-Microglial-Driven-Evidential-Pruning
 !python -u experiments/run_cifar_suite.py --ratio 100 --experiment full_guds --experiment standard_ce --experiment dense_edl --epochs 100 --batch_size 128 --seeds 42
 ```
 
