@@ -1,0 +1,159 @@
+% ============================================================================
+%   Kernel-Level Acceleration: From Valid 2:4 Masks to Sparse Tensor Core Dispatch
+%   Standalone draft — to be inserted into final (1).tex
+%   Location: Appendix G, after Hardware Profiling Protocol (line ~1415),
+%             before Quality Gated Failure Detection Protocol (line ~1417)
+% ============================================================================
+
+\subsection{Kernel-Level Acceleration: From Valid 2:4 Masks to Sparse Tensor Core Dispatch}
+\label{app:kernel_acceleration}
+
+DST-EDL establishes exact valid block 2:4 feasibility by construction
+(Appendix~\ref{app:24_feasibility}). This subsection formalizes the
+additional conditions required to translate that structural guarantee into
+realized inference acceleration through Sparse Tensor Core dispatch via
+cuSPARSELt~\cite{nvidiacusparselt}, TensorRT sparse execution, or PyTorch
+semi-structured kernels~\cite{pytorchsemistructured}.
+
+\paragraph{Compressed storage format and metadata encoding.}
+Sparse Tensor Cores on Ampere and later architectures operate on a compressed
+representation~\cite{mishra2021accelerating}. For each contiguous 4-block
+$(w_{4k},w_{4k+1},w_{4k+2},w_{4k+3})$ in a weight row that satisfies the 2:4
+constraint, the hardware stores only the two nonzero values and a 2-bit index
+that encodes their original positions within the block. Formally, let
+$M\in\mathcal{C}_{2:4}$ be the mask produced by Eq.~\ref{eq:mask}. For each
+row $i$ and block $k$, define the index set
+$I_{i,k}=\{j\in\{0,1,2,3\}:M_{i,4k+j}=1\}$ with $|I_{i,k}|=2$. The
+compressed representation consists of:
+\begin{equation}\label{eq:compressed_format}
+\begin{aligned}
+    W_{\mathrm{comp},i,2k+t} &= W_{i,4k+j_t},\quad t\in\{0,1\},\\
+    \eta_{i,k} &= \mathrm{encode}(I_{i,k})\in\{0,\ldots,5\},
+\end{aligned}
+\end{equation}
+where $j_0<j_1$ are the two active indices within the block, and
+$\eta_{i,k}$ is a $\lceil\log_2\binom{4}{2}\rceil=3$-bit metadata selector
+(in practice packed as 2-bit per element by the hardware). The resulting
+compressed weight occupies $|W_{\mathrm{comp}}|=|W|/2$ storage, plus a
+metadata overhead of $|\eta|=\lceil 3B/(4\times\text{element bits})\rceil$
+where $B$ is the number of 4-blocks.
+
+\paragraph{Sparse GEMM dispatch conditions.}
+A layer with weight $W^{(l)}\in\mathbb{R}^{d_{\mathrm{out}}\times
+d_{\mathrm{in}}}$ and mask $M^{(l)}\in\mathcal{C}_{2:4}$ is eligible for
+Sparse Tensor Core dispatch when the following conditions are jointly
+satisfied:
+\begin{enumerate}[leftmargin=*,itemsep=1pt,parsep=0pt]
+    \item \textbf{Mask validity.} $M^{(l)}\in\mathcal{C}_{2:4}$, i.e., every
+          complete contiguous 4-block contains exactly two active entries.
+          DST-EDL satisfies this by the top-two projection in
+          Eq.~\ref{eq:mask}.
+    \item \textbf{Dtype compatibility.} The weight tensor must be stored in a
+          data type supported by the Sparse Tensor Core instruction set:
+          $W^{(l)}\in\{\texttt{FP16},\texttt{BF16},\texttt{INT8},\texttt{FP8}\}$.
+          The reported DST-EDL runs use 16-bit mixed
+          precision~\cite{micikevicius2018mixed}, satisfying this requirement.
+    \item \textbf{Shape alignment.} $d_{\mathrm{in}}$ must be divisible by 4
+          for 2:4 block alignment. Both $d_{\mathrm{in}}$ and
+          $d_{\mathrm{out}}$ should be multiples of 16 (Ampere) or 8 (Hopper)
+          to fill the Tensor Core tile without padding overhead.
+    \item \textbf{Layout conversion.} The dense weight $W^{(l)}$ must be
+          converted to the compressed format
+          $(W_{\mathrm{comp}}^{(l)},\eta^{(l)})$ before kernel dispatch. This
+          is a deterministic post-training operation that preserves the
+          numerical values of active weights exactly.
+\end{enumerate}
+
+\paragraph{Deployment pipeline.}
+Translating a trained DST-EDL model into a hardware-accelerated inference
+engine follows a three-stage pipeline:
+\begin{enumerate}[leftmargin=*,itemsep=1pt,parsep=0pt]
+    \item \textbf{Freeze.} After the final training epoch $T$, freeze the
+          mask $M^{(T)}$ and compute the deployment weights
+          $W_{\mathrm{deploy}}^{(l)}=W^{(T,l)}\odot M^{(T,l)}$ for each
+          eligible layer $l$.
+    \item \textbf{Compress.} Convert each
+          $W_{\mathrm{deploy}}^{(l)}$ to the compressed format using either:
+          \begin{itemize}[leftmargin=*,itemsep=0pt]
+              \item cuSPARSELt:
+                    \texttt{cusparseLtSpMMAPrune} followed by
+                    \texttt{cusparseLtSpMMACompress}~\cite{nvidiacusparselt}, or
+              \item PyTorch:
+                    \texttt{to\_sparse\_semi\_structured($W_{\mathrm{deploy}}^{(l)}$)}~\cite{pytorchsemistructured}.
+          \end{itemize}
+    \item \textbf{Dispatch.} During inference, each eligible layer's
+          dense GEMM $y=W_{\mathrm{deploy}}^{(l)}x+b$ is replaced by a
+          sparse-dense GEMM
+          $y=\mathrm{SpMM}(W_{\mathrm{comp}}^{(l)},\eta^{(l)},x)+b$
+          that reads the compressed operand and uses the metadata to select
+          corresponding activation elements from $x$.
+\end{enumerate}
+For TensorRT deployment, the frozen model is exported to ONNX and the
+TensorRT engine is built with the \texttt{--sparsity=force} flag, which
+instructs the builder to use Sparse Tensor Core kernels for layers with
+conforming 2:4 masks.
+
+\paragraph{Theoretical throughput bound.}
+Under ideal conditions (compute-bound regime, amortized metadata overhead,
+and no memory bandwidth bottleneck for the compressed operand), the Sparse
+Tensor Core throughput relationship is:
+\begin{equation}\label{eq:sparse_throughput}
+    \mathrm{Throughput}_{\mathrm{sparse}}
+    \leq
+    2\times\mathrm{Throughput}_{\mathrm{dense}}.
+\end{equation}
+This 2$\times$ upper bound follows from the hardware design: each Sparse
+Tensor Core cycle processes a compressed tile that encodes twice as many
+logical elements as a dense tile of the same physical
+size~\cite{mishra2021accelerating}. In practice, achievable speedup depends
+on the tile fill efficiency, which varies with matrix dimensions and the
+specific GPU microarchitecture~\cite{hu2024accelerating}.
+
+\paragraph{Convolutional layer mapping.}
+The cuSPARSELt library and PyTorch semi-structured kernels natively target
+\texttt{nn.Linear} (GEMM) operations. For convolutional layers in the
+reported ResNet-18 backbone, two mapping strategies exist:
+\begin{enumerate}[leftmargin=*,itemsep=1pt,parsep=0pt]
+    \item \textbf{Explicit im2col lowering.} Unfold the input feature map
+          into a Toeplitz matrix and reshape the convolutional kernel
+          $W\in\mathbb{R}^{C_{\mathrm{out}}\times C_{\mathrm{in}}\times
+          k_h\times k_w}$ into a 2D matrix
+          $\hat{W}\in\mathbb{R}^{C_{\mathrm{out}}\times
+          (C_{\mathrm{in}}\cdot k_h\cdot k_w)}$. The 2:4 constraint is
+          enforced along the flattened input dimension of $\hat{W}$. DST-EDL
+          already applies this reshape for mask generation (Sec.~4.1).
+    \item \textbf{Implicit GEMM via cuDNN.} Modern cuDNN backends can fuse
+          the im2col step into the GEMM kernel. Sparse dispatch requires the
+          fused kernel to accept the compressed format, which is
+          backend-version dependent.
+\end{enumerate}
+Not all convolution configurations map efficiently to supported sparse
+kernels. Small spatial dimensions ($H,W<7$), non-standard dilation, or group
+convolutions may fall back to dense execution. DST-EDL keeps the first input
+convolution dense, mitigating the most common failure mode (single-channel or
+three-channel input layers with non-standard spatial size).
+
+\paragraph{Scope of acceleration claims.}
+The relationship between DST-EDL's structural guarantee and realized
+inference speedup is summarized as follows:
+\begin{itemize}[leftmargin=*,itemsep=1pt,parsep=0pt]
+    \item DST-EDL guarantees $M\in\mathcal{C}_{2:4}$ by construction
+          (Appendix~\ref{app:24_feasibility}), satisfying dispatch
+          condition~1.
+    \item The reported 16-bit mixed precision training satisfies dispatch
+          condition~2.
+    \item Shape alignment (condition~3) depends on the backbone architecture
+          and must be verified per layer. The ResNet-18 wrapped layers use
+          channel dimensions that are multiples of 64.
+    \item Compressed format conversion (condition~4) is a deterministic
+          post-training step that does not alter model weights or predictions.
+    \item Realized speedup requires a compatible sparse kernel path and
+          is not guaranteed by mask validity alone. The theoretical
+          2$\times$ bound in Eq.~\ref{eq:sparse_throughput} is an upper limit
+          that assumes ideal compute-bound conditions.
+\end{itemize}
+Table~\ref{tab:hardware_protocol_ladder} formalizes this separation into
+structural (Level~1), masked diagnostic (Level~2), and realized kernel
+(Level~3) evidence. The current implementation reports Levels~1 and~2.
+Level~3 requires exporting frozen valid 2:4 weights to cuSPARSELt, TensorRT,
+or PyTorch semi-structured backends with per-layer dispatch verification.
