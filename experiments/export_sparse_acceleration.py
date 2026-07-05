@@ -103,26 +103,58 @@ def export_to_semi_structured(model: nn.Module, device: torch.device) -> tuple[n
     return new_model, stats
 
 
+def convert_to_standard_dense_masked(model: nn.Module) -> nn.Module:
+    """
+    Converts MDEP layers to standard PyTorch nn.Linear and nn.Conv2d layers,
+    freezing the 2:4 masks and applying them mathematically to the weights.
+    This creates a standard, clean PyTorch model (no control flow, no custom layers)
+    that can be exported to ONNX on any machine (even CPU).
+    """
+    new_model = copy.deepcopy(model).cpu()
+    
+    def replace_module(parent: nn.Module):
+        for name, child in parent.named_children():
+            if isinstance(child, MDEPLinear):
+                # Ensure mask is updated
+                child.mask.copy_(generate_2_4_mask(child.scores.data))
+                dense_weight = (child.weight * child.mask).detach().clone()
+                
+                new_layer = nn.Linear(child.in_features, child.out_features, bias=child.bias is not None)
+                new_layer.weight.data.copy_(dense_weight)
+                if child.bias is not None:
+                    new_layer.bias.data.copy_(child.bias.data.detach().clone())
+                setattr(parent, name, new_layer)
+                
+            elif isinstance(child, MDEPConv2d):
+                child.mask.copy_(generate_2_4_mask(child.scores.data))
+                dense_weight = (child.weight * child.mask).detach().clone()
+                
+                new_layer = nn.Conv2d(
+                    child.in_channels, child.out_channels, child.kernel_size,
+                    stride=child.stride, padding=child.padding, dilation=child.dilation,
+                    groups=child.groups, bias=child.bias is not None
+                )
+                new_layer.weight.data.copy_(dense_weight)
+                if child.bias is not None:
+                    new_layer.bias.data.copy_(child.bias.data.detach().clone())
+                setattr(parent, name, new_layer)
+            else:
+                replace_module(child)
+
+    replace_module(new_model)
+    return new_model
+
+
 def export_to_onnx(model: nn.Module, save_path: str, img_size: int = 224):
     """
-    Exports the MDEP model to ONNX with frozen 2:4 masks.
+    Exports a clean standard PyTorch model (no MDEP layers) to ONNX.
     This ONNX file can be fed to TensorRT's trtexec with --sparsity=force
     to accelerate both Conv2d and Linear layers.
     """
     model.eval()
-    
-    # Freeze the masks
-    for module in model.modules():
-        if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            module.warmup = False
-            module.mask.copy_(generate_2_4_mask(module.scores.data))
-            # Mathematically apply the mask so the exported graph sees a static sparse tensor
-            # We don't overwrite the Parameter here to avoid breaking the original model,
-            # but ONNX tracing will record the element-wise multiplication with the constant mask.
-
     dummy_input = torch.randn(1, 3, img_size, img_size)
     torch.onnx.export(
-        model.cpu(), 
+        model, 
         dummy_input, 
         save_path, 
         export_params=True,
@@ -178,10 +210,14 @@ def main():
     model_mdep = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False)
     replace_conv2d_with_mdep(model_mdep)
     
-    # 2. ONNX Export for TensorRT
-    export_to_onnx(model_mdep, args.onnx_path, args.image_size)
+    # 2. Convert to standard dense masked model for clean ONNX export (no custom modules/control flow)
+    print("Converting MDEP model to clean standard model for ONNX export...")
+    model_clean = convert_to_standard_dense_masked(model_mdep)
     
-    # 3. Check for PyTorch Native Support
+    # 3. ONNX Export for TensorRT
+    export_to_onnx(model_clean, args.onnx_path, args.image_size)
+    
+    # 4. Check for PyTorch Native Support
     if not verify_ampere_gpu():
         print("\n[WARNING] No Ampere+ GPU detected. Skipping PyTorch semi-structured dispatch.")
         print("To test realized PyTorch speedup, please run this script on an RTX 3090, A100, H100, or similar.")
@@ -193,11 +229,11 @@ def main():
     
     model_mdep = model_mdep.to(device)
     
-    # 4. Build Dense Baseline
+    # 5. Build Dense Baseline
     print("Building standard dense baseline...")
     model_dense = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False).to(device).half()
     
-    # 5. Export to PyTorch Semi-Structured
+    # 6. Export to PyTorch Semi-Structured
     print("Converting MDEP model to PyTorch Semi-Structured format (nn.Linear only)...")
     try:
         model_sparse, stats = export_to_semi_structured(model_mdep, device)
@@ -206,7 +242,7 @@ def main():
         print(f"Export failed: {e}")
         return
 
-    # 6. Benchmark
+    # 7. Benchmark
     print(f"\nBenchmarking Dense Baseline (batch_size={args.batch_size})...")
     dense_metrics = benchmark_throughput(model_dense, device, args.batch_size, args.image_size)
     print(f"Dense Baseline: {dense_metrics['ms_per_batch']:.2f} ms/batch | {dense_metrics['images_per_sec']:.2f} img/s")
@@ -220,6 +256,8 @@ def main():
     if speedup < 1.05:
         print("\nNote: ResNet-18 is heavily Convolution-bound. PyTorch native semi-structured sparsity only accelerates the final Linear layer.")
         print("To observe whole-model acceleration (including Conv2d), use the generated ONNX file with TensorRT's trtexec --sparsity=force.")
+        
+    return 0
 
 
 if __name__ == "__main__":
