@@ -946,6 +946,12 @@ class MDEPTrainer:
             class_weight_cap = getattr(self.criterion, 'class_weight_cap', 10.0)
             sample_gate = torch.clamp(sample_gate, max=class_weight_cap)
             loss_astrocyte = torch.mean(sample_gate * uncertainties['epistemic'] * kl_divergence(alpha_base, num_classes))
+        elif regrower_type == 'vacuity':
+            loss_astrocyte = torch.mean(uncertainties['epistemic'])
+        elif regrower_type == 'ambiguity':
+            loss_astrocyte = torch.mean(uncertainties['aleatoric'])
+        elif regrower_type == 'ratio':
+            loss_astrocyte = torch.mean(uncertainties['aleatoric'] / (uncertainties['epistemic'] + 1e-6))
         else:
             loss_astrocyte = torch.mean(kl_divergence(alpha_base, num_classes))
             
