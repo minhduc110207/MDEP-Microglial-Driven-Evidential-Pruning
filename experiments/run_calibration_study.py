@@ -127,6 +127,31 @@ def main():
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(json_safe(results), indent=2), encoding="utf-8")
     print(f"\nCompleted calibration ablation study. Summary: {summary_path}")
+    
+    try:
+        import matplotlib.pyplot as plt
+        modes = list(results.keys())
+        eces = [results[m]["ece_default"] for m in modes]
+        eaurcs = [results[m]["e_aurc"] for m in modes]
+        
+        x = np.arange(len(modes))
+        width = 0.35
+        
+        plt.figure(figsize=(10, 5))
+        plt.bar(x - width/2, eces, width, label="ECE (Calibration Error)", color="teal")
+        plt.bar(x + width/2, eaurcs, width, label="e-AURC (Selective Classification)", color="orange")
+        
+        plt.ylabel("Score")
+        plt.title("Ablation Study: Regrowth Components Comparison")
+        plt.xticks(x, [m.replace("_", " ").title() for m in modes])
+        plt.legend()
+        plt.grid(True, linestyle=":", axis="y")
+        
+        fig_path = out_dir / "paper_experiment_outputs" / "calibration_ablation_summary.png"
+        plt.savefig(fig_path, dpi=300)
+        print(f"[INFO] Saved ablation comparison chart to: {fig_path}")
+    except ImportError:
+        print("[INFO] matplotlib is not installed. Skipping plot generation.")
 
 
 if __name__ == "__main__":

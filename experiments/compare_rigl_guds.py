@@ -93,6 +93,44 @@ def main():
         print("\nConvergence Rate (Train Loss over epochs):")
         for epoch in range(min(len(g_loss), len(r_loss))):
             print(f"  Epoch {epoch+1:02d}: RigL Loss = {r_loss[epoch]:.4f} | GUDS Loss = {g_loss[epoch]:.4f}")
+            
+        try:
+            import matplotlib.pyplot as plt
+            epochs_g = range(1, len(g_loss) + 1)
+            epochs_r = range(1, len(r_loss) + 1)
+            
+            plt.figure(figsize=(12, 5))
+            
+            # Loss plot
+            plt.subplot(1, 2, 1)
+            plt.plot(epochs_r, r_loss, label="RigL-style 2:4 (Baseline)", color="red", linestyle="--", marker="o")
+            plt.plot(epochs_g, g_loss, label="DST-EDL (Proposed)", color="blue", linestyle="-", marker="s")
+            plt.xlabel("Epoch")
+            plt.ylabel("Training Loss")
+            plt.title("Training Loss Convergence")
+            plt.legend()
+            plt.grid(True, linestyle=":")
+            
+            # AUROC plot
+            g_auc = g_history.get("val_auroc", [])
+            r_auc = r_history.get("val_auroc", [])
+            if g_auc and r_auc:
+                plt.subplot(1, 2, 2)
+                plt.plot(range(1, len(r_auc) + 1), r_auc, label="RigL-style 2:4", color="red", linestyle="--", marker="o")
+                plt.plot(range(1, len(g_auc) + 1), g_auc, label="DST-EDL", color="blue", linestyle="-", marker="s")
+                plt.xlabel("Epoch")
+                plt.ylabel("Validation AUROC")
+                plt.title("Validation AUROC over Epochs")
+                plt.legend()
+                plt.grid(True, linestyle=":")
+                
+            plt.tight_layout()
+            plot_path = output_dir.parent / "rigl_vs_guds_convergence.png"
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(plot_path, dpi=300)
+            print(f"\n[INFO] Saved convergence comparison plot to: {plot_path}")
+        except ImportError:
+            print("\n[INFO] matplotlib is not installed. Skipping plot generation.")
 
 
 if __name__ == "__main__":
