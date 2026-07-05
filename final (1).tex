@@ -83,7 +83,22 @@
 
 \newtheorem{remark}{Remark}
 
-
+% Compatibility patch for manual \bibitem entries with aaai.sty
+\makeatletter
+\renewenvironment{thebibliography}[1]{%
+  \section*{References\@mkboth{REFERENCES}{REFERENCES}}%
+  \list{[\arabic{enumiv}]}{%
+    \settowidth\labelwidth{[#1]}%
+    \leftmargin\labelwidth
+    \advance\leftmargin\labelsep
+    \usecounter{enumiv}%
+    \let\p@enumiv\@empty
+    \renewcommand\theenumiv{\arabic{enumiv}}%
+    \itemsep .01in
+  }%
+  \sloppy\clubpenalty4000\widowpenalty4000\sfcode`\.\@m
+}{\def\@noitemerr{\@latex@warning{Empty `thebibliography' environment}}\endlist}
+\makeatother
 
 
 % ============================================================================
@@ -95,7 +110,7 @@
 \maketitle
 
 \begin{abstract}
-Extreme imbalance data can appear in various domains such as medical diagnostics, fraud detection or cybersecurity. To tackle this issue, previous works usually relied on resampling techniques, cost-sensitive loss modifications or post-hoc logit and decision threshold adjustments without leveraging uncertainty signals or structural modifications. In recent years, Evidential Deep Learning (EDL) has been an emerging subfield in trustworthy AI. EDL brings the ability to quantify uncertainty and decouple vacuity from ambiguity through forward pass of the backbone model. However, standard EDL frameworks usually stay as a static model, this wastes the chance of leveraging uncertainty signals for topological adaptation. Concurrently, conventional Dynamic Sparse Training (DST) methods modify network structure mostly based on weight magnitudes or gradients, risking the premature pruning of critical but highly uncertain minority features. To bridge this gap, we propose \textbf{DST-EDL}, a novel framework that uses EDL's vacuity and ambiguity signals to guide DST's pruning and growing mechanism, preventing important minority features from being removed prematurely. On ISIC 2024, a highly imbalanced medical benchmark ($0.15\%$ malignant prevalence), DST-EDL achieves a mean $\text{pAUC}_{0.80} = 0.1168$ and a $\text{Macro AUROC} = 0.8891$, improving both metrics compared to dense evidential and standard sparse 2:4 baselines. These results position DST-EDL as a practical and hardware-aware approach to rare-event detection under strict topological constraints.  
+Extreme class imbalance data can appear in various domains such as medical diagnostics, fraud detection or cybersecurity. To tackle this issue, previous works usually relied on resampling techniques, cost-sensitive loss modifications or post-hoc logit and decision threshold adjustments without leveraging uncertainty signals or structural modifications. In recent years, Evidential Deep Learning (EDL) has been an emerging subfield in trustworthy AI. EDL brings the ability to quantify uncertainty and decouple vacuity from ambiguity through a single forward pass of the backbone model. However, standard EDL frameworks usually stay as a static model, this misses the chance of leveraging uncertainty signals for topological adaptation. Concurrently, conventional Dynamic Sparse Training (DST) methods modify network structure mostly based on weight magnitudes or gradients, risking the premature pruning of critical but highly uncertain minority features. To bridge this gap, we propose \textbf{DST-EDL}, a novel framework that uses EDL's vacuity and ambiguity signals to guide DST's pruning and growing mechanism, preventing important minority features from being removed prematurely. On ISIC 2024, a highly imbalanced medical benchmark ($0.15\%$ malignant prevalence), DST-EDL achieves a mean $\text{pAUC}_{0.80} = 0.1168$ and a $\text{Macro AUROC} = 0.8891$, improving both metrics compared to dense evidential and standard sparse 2:4 baselines. These results suggest that, DST-EDL is a competitive framework for extreme imbalance data, proving evidential uncertainty signals' ability to effectively guide topology search, rather than just prediction-time confidence.
 \end{abstract}
 
 \section{Introduction}\label{sec:intro}
@@ -1568,11 +1583,28 @@ inference speedup is summarized as follows:
           2$\times$ bound in Eq.~\ref{eq:sparse_throughput} is an upper limit
           that assumes ideal compute-bound conditions.
 \end{itemize}
-Table~\ref{tab:hardware_protocol_ladder} formalizes this separation into
-structural (Level~1), masked diagnostic (Level~2), and realized kernel
-(Level~3) evidence. The current implementation reports Levels~1 and~2.
-Level~3 requires exporting frozen valid 2:4 weights to cuSPARSELt, TensorRT,
-or PyTorch semi-structured backends with per-layer dispatch verification.
+Table~\ref{tab:hardware_protocol_ladder} formalizes this separation into structural (Level~1), masked diagnostic (Level~2), and realized kernel (Level~3) evidence. We report Level~3 evidence on a physical NVIDIA RTX A2000 Laptop GPU (GA106 architecture, Compute Capability 8.6, 20 SMs, 8GB memory) utilizing TensorRT 11.1.0 under Strongly Typed execution with FP16 precision. When the exported ONNX model is formatted in Float16, the TensorRT builder selects specialized sparse SpMM kernels that exploit the physical 2:4 Sparse Tensor Cores.
+
+As summarized in Table~\ref{tab:hardware_realized_speedup}, enabling/forcing 2:4 structured sparsity yields a throughput speedup of \textbf{1.16$\times$} (increasing from 78.32 QPS to 90.93 QPS, representing an absolute improvement of 807 FPS from 5,012 to 5,819 FPS). The mean batch latency is reduced by \textbf{13.87\%} (from 12.77 ms to 11.00 ms per batch of 64). Activations memory remains strictly invariant at 147.00 MiB, while the sparse compilation introduces a static metadata memory overhead of \textbf{23.26 MiB} allocated as Device Persistent Memory for the sparse 2-bit indexing tables. We conservatively note that these speedups are achieved under clean shape alignment (channel dimensions being multiples of 64) and that realized hardware gains are highly dependent on compiler versions and hardware compute bounds.
+
+\begin{table}[tbp]
+\centering
+\scriptsize
+\caption{Realized Level 3 sparse execution benchmark of DST-EDL on NVIDIA RTX A2000 Laptop GPU. All tests are compiled with TensorRT 11.1.0 at FP16 precision with batch size 64 and input shape $64\times3\times224\times224$.}
+\label{tab:hardware_realized_speedup}
+\setlength{\tabcolsep}{2pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{adjustbox}{max width=\columnwidth}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{Configuration} & \textbf{Throughput (QPS)} & \textbf{Throughput (FPS)} & \textbf{Mean Latency (ms)} & \textbf{Persistent Mem. (MiB)} & \textbf{Speedup} \\
+\midrule
+Dense FP16 (Baseline) & 78.32 & 5,012.31 & 12.77 & 0.00 & 1.00$\times$ \\
+\textbf{DST-EDL Sparse FP16} & \textbf{90.93} & \textbf{5,819.38} & \textbf{11.00} & \textbf{23.26} & \textbf{1.16$\times$} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
 
 
 \subsection{Quality Gated Failure Detection Protocol}
