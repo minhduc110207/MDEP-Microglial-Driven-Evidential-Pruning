@@ -48,10 +48,14 @@ def get_cifar100_lt_dataloaders(imbalance_ratio=100, batch_size=128, seed=42):
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ])
     
-    print("[CIFAR] Downloading/validating train split...", flush=True)
-    train_ds = torchvision.datasets.CIFAR100(root=data_root, train=True, download=True, transform=transform_train)
-    print("[CIFAR] Downloading/validating test split...", flush=True)
-    test_ds = torchvision.datasets.CIFAR100(root=data_root, train=False, download=True, transform=transform_test)
+    cifar_folder = Path(data_root) / "cifar-100-python"
+    has_local_dataset = cifar_folder.exists() and (cifar_folder / "train").exists() and (cifar_folder / "test").exists()
+    should_download = not has_local_dataset
+
+    print(f"[CIFAR] Loading train split (download={should_download})...", flush=True)
+    train_ds = torchvision.datasets.CIFAR100(root=data_root, train=True, download=should_download, transform=transform_train)
+    print(f"[CIFAR] Loading test split (download={should_download})...", flush=True)
+    test_ds = torchvision.datasets.CIFAR100(root=data_root, train=False, download=should_download, transform=transform_test)
     print(f"[CIFAR] Loaded train={len(train_ds)} test={len(test_ds)}", flush=True)
     
     num_classes = 100

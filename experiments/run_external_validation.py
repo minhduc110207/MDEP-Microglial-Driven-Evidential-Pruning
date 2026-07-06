@@ -124,9 +124,16 @@ def main():
     # 1. Load Model
     model = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False)
     replace_conv2d_with_mdep(model)
+    
+    out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
+    default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds" / f"seed_{args.seed}" / "model_state.pth"
+    
     if args.model_path and os.path.exists(args.model_path):
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         print(f"Loaded trained checkpoint from: {args.model_path}")
+    elif default_ckpt.exists():
+        model.load_state_dict(torch.load(default_ckpt, map_location=device))
+        print(f"Loaded trained checkpoint from default path: {default_ckpt}")
     else:
         print("[WARNING] No checkpoint loaded. Running validation on random/untrained MDEP model.")
     model = model.to(device)

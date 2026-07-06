@@ -169,7 +169,8 @@ def main():
     
     # Locate dataset
     csv_path = None
-    search_dirs = [r'E:\Testing\mdep\isic-2024-challenge', './data/isic-2024-challenge', '/kaggle/input']
+    search_dirs = [os.environ.get("ISIC_ROOT"), r'E:\Testing\mdep\isic-2024-challenge', './data/isic-2024-challenge', '/kaggle/input/competitions/isic-2024-challenge', '/kaggle/input/isic-2024-challenge', '/kaggle/input']
+    search_dirs = [s for s in search_dirs if s is not None]
     for sdir in search_dirs:
         cand = Path(sdir) / 'train-metadata.csv'
         if cand.exists():
