@@ -299,12 +299,13 @@ def main():
             # If partitions exist (specifically for mahdavi1202/skin-cancer),
             # we restrict OOD test evaluation to imgs_part_3 only.
             test_partition = "imgs_part_3"
-            test_idx = base_ds.class_to_idx.get(test_partition, None)
+            test_indices = [idx for name, idx in base_ds.class_to_idx.items() if name.lower() == test_partition]
             
             # Create subset index list
-            if test_idx is not None:
-                indices = [i for i, (_, label) in enumerate(base_ds.samples) if label == test_idx]
-                print(f"[INFO] Detected partitions. Restricting OOD test set to partition: '{test_partition}' ({len(indices)} samples).")
+            if test_indices:
+                indices = [i for i, (_, label) in enumerate(base_ds.samples) if label in test_indices]
+                actual_name = [name for name, idx in base_ds.class_to_idx.items() if idx in test_indices][0]
+                print(f"[INFO] Detected partitions. Restricting OOD test set to partition: '{actual_name}' ({len(indices)} samples).")
             else:
                 indices = list(range(len(base_ds)))
             

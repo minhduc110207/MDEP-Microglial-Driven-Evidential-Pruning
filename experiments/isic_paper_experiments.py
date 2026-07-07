@@ -1389,12 +1389,12 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                 # Auto-partitioning: If it has classes like imgs_part_1, imgs_part_2, imgs_part_3,
                 # we only use imgs_part_1 and imgs_part_2 for Outlier Exposure to prevent leakage with imgs_part_3
                 allowed_classes = ["imgs_part_1", "imgs_part_2"]
-                allowed_indices = [base_ds.class_to_idx[c] for c in allowed_classes if c in base_ds.class_to_idx]
+                allowed_indices = [idx for name, idx in base_ds.class_to_idx.items() if name.lower() in allowed_classes]
                 
                 if allowed_indices:
                     indices = [i for i, (_, label) in enumerate(base_ds.samples) if label in allowed_indices]
                     ood_ds = Subset(base_ds, indices)
-                    print(f"[INFO] Detected partitions. Using {allowed_classes} for Outlier Exposure. Filtered samples: {len(ood_ds)} / {len(base_ds)}")
+                    print(f"[INFO] Detected partitions. Using {[name for name, idx in base_ds.class_to_idx.items() if idx in allowed_indices]} for Outlier Exposure. Filtered samples: {len(ood_ds)} / {len(base_ds)}")
                 else:
                     ood_ds = base_ds
                     print(f"[INFO] Using entire custom folder for Outlier Exposure. Total samples: {len(ood_ds)}")
