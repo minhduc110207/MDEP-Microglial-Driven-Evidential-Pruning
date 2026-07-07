@@ -449,8 +449,6 @@ class MDEPLinear(nn.Linear):
         if self.warmup:
             effective_weight = self.weight
         else:
-            raw_mask = generate_2_4_mask(self.scores)
-            self.mask.copy_(raw_mask)
             effective_weight = self.weight * self.mask
             
         if effective_weight.requires_grad and not effective_weight.is_leaf:
@@ -522,8 +520,6 @@ class MDEPConv2d(nn.Conv2d):
         if self.warmup:
             effective_weight = self.weight
         else:
-            raw_mask = generate_2_4_mask(self.scores)
-            self.mask.copy_(raw_mask)
             effective_weight = self.weight * self.mask
             
         if effective_weight.requires_grad and not effective_weight.is_leaf:
@@ -680,6 +676,7 @@ def update_scores_agents(
             
             # Compute new mask and count flops
             new_mask = generate_2_4_mask(module.scores.data)
+            module.mask.copy_(new_mask)
             flops = (old_mask != new_mask).sum().item()
             total_flops += flops
             total_elements += old_mask.numel()
@@ -881,6 +878,8 @@ class MDEPTrainer:
             if isinstance(module, (MDEPLinear, MDEPConv2d)):
                 module.scores.data.copy_(torch.abs(module.weight.data))
                 module.scores_momentum.zero_()
+                raw_mask = generate_2_4_mask(module.scores.data)
+                module.mask.copy_(raw_mask)
 
     def reset_effective_weight_grads(self):
         for m in self.model.modules():
