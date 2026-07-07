@@ -90,8 +90,88 @@ def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
     return tpr_gap + fpr_gap
 
 
+def fit_feature_space_ood(model, loader, device, num_components=128):
+    """Extract ID calibration features and fit Mahalanobis and ViM parameters."""
+    model.eval()
+    print("\n[INFO] Fitting Mahalanobis and ViM feature-space parameters on calibration set...")
+    
+    features_all = []
+    logits_all = []
+    
+    with torch.no_grad():
+        for batch in loader:
+            if len(batch) == 3:
+                inputs, _, _ = batch
+            else:
+                inputs, _ = batch
+            inputs = inputs.to(device)
+            features = model.backbone(inputs)
+            logits = model.fc[0](features)
+            
+            features_all.append(features.cpu().numpy())
+            logits_all.append(logits.cpu().numpy())
+            
+    X = np.concatenate(features_all, axis=0) # Shape: (N, 512)
+    F = np.concatenate(logits_all, axis=0) # Shape: (N, K)
+    
+    # 1. Fit Mahalanobis parameters
+    mean = np.mean(X, axis=0)
+    cov = np.cov(X, rowvar=False)
+    # Shrinkage for numerical stability
+    inv_cov = np.linalg.pinv(cov + 1e-4 * np.eye(cov.shape[0]))
+    
+    # 2. Fit ViM parameters
+    # Center the features
+    X_centered = X - mean
+    # Singular Value Decomposition (SVD) for principal components
+    U, S_vals, Vt = np.linalg.svd(X_centered, full_matrices=False)
+    # Get principal components (first num_components rows of Vt)
+    V = Vt[:num_components].T # Shape: (D, D_P)
+    
+    # Compute residual vectors and norms for all calibration samples
+    proj = X_centered @ V
+    residuals = X_centered - proj @ V.T
+    residual_norms = np.linalg.norm(residuals, axis=1)
+    
+    max_logits = np.max(F, axis=1)
+    gamma = float(np.sum(max_logits) / (np.sum(residual_norms) + 1e-8))
+    
+    print(f"[INFO] Feature-space fit complete. gamma={gamma:.4f}")
+    
+    return {
+        "mean": mean,
+        "inv_cov": inv_cov,
+        "V": V,
+        "gamma": gamma
+    }
+
+
+def compute_feature_space_scores(features, logits, params):
+    """Compute Mahalanobis and ViM scores for a batch of features and logits."""
+    mean = params["mean"]
+    inv_cov = params["inv_cov"]
+    V = params["V"]
+    gamma = params["gamma"]
+    
+    # 1. Mahalanobis distance
+    diff = features - mean
+    mahalanobis = np.sum(diff @ inv_cov * diff, axis=1)
+    
+    # 2. ViM score
+    proj = diff @ V
+    residuals = diff - proj @ V.T
+    residual_norms = np.linalg.norm(residuals, axis=1)
+    
+    # Logsumexp in numpy safely
+    max_logits = np.max(logits, axis=1, keepdims=True)
+    logsumexp = max_logits.reshape(-1) + np.log(np.sum(np.exp(logits - max_logits), axis=1))
+    vim = gamma * residual_norms - logsumexp
+    
+    return mahalanobis, vim
+
+
 @torch.no_grad()
-def collect_ood_metrics(model, loader, device) -> dict[str, np.ndarray]:
+def collect_ood_metrics(model, loader, device, feature_params=None) -> dict[str, np.ndarray]:
     """Collect multiple uncertainty/anomaly scores for OOD analysis."""
     model.eval()
     
@@ -102,6 +182,9 @@ def collect_ood_metrics(model, loader, device) -> dict[str, np.ndarray]:
         "max_conf": [],
         "energy": []
     }
+    if feature_params is not None:
+        metrics_list["mahalanobis"] = []
+        metrics_list["vim"] = []
     
     for batch in loader:
         if len(batch) == 3:
@@ -142,6 +225,13 @@ def collect_ood_metrics(model, loader, device) -> dict[str, np.ndarray]:
         metrics_list["entropy"].append(entropy)
         metrics_list["max_conf"].append(max_conf)
         metrics_list["energy"].append(energy)
+        
+        if feature_params is not None:
+            feat_np = features.cpu().numpy()
+            log_np = logits.cpu().numpy()
+            mahal, vim_score = compute_feature_space_scores(feat_np, log_np, feature_params)
+            metrics_list["mahalanobis"].append(mahal)
+            metrics_list["vim"].append(vim_score)
         
     return {k: np.concatenate(v) for k, v in metrics_list.items()}
 
@@ -186,7 +276,10 @@ def main():
     # We will use dummy or real depending on what is available
     print("\nLoading In-Distribution (ISIC) validation set...")
     loaders = get_imbalanced_dataloaders(batch_size=32, seed=args.split_seed, allow_dummy_data=True)
-    _, _, _, test_loader_ind, _, _, _, _ = loaders
+    train_loader, val_loader, cal_loader, test_loader_ind, _, _, _, _ = loaders
+    
+    # Fit feature-space OOD parameters on calibration set
+    feature_params = fit_feature_space_ood(model, cal_loader, device)
     
     # 3. Load External / Domain-Shifted Dataset
     print("\nLoading External Domain-Shifted Dataset (smartphone-style/diverse skin tones)...")
@@ -284,8 +377,8 @@ def main():
     # We treat In-Distribution ISIC test samples as IN (label 0)
     # and External Domain-shifted samples as OOD (label 1)
     print("\nEvaluating Out-of-Distribution (OOD) Detection using various uncertainty scores...")
-    ind_metrics = collect_ood_metrics(model, test_loader_ind, device)
-    ood_metrics = collect_ood_metrics(model, external_loader, device)
+    ind_metrics = collect_ood_metrics(model, test_loader_ind, device, feature_params)
+    ood_metrics = collect_ood_metrics(model, external_loader, device, feature_params)
     
     # Compute Z-score parameters from In-Distribution (ID) metrics to avoid test-leakage
     z_params = {}
@@ -294,24 +387,36 @@ def main():
         std = np.std(ind_metrics[key])
         z_params[key] = (mean, std)
         
-    # Apply Z-score normalization and compute Fusion score (S_OOD = z(vac) + z(amb) + z(ent) + z(energy))
-    def compute_fusion(metrics):
+    # Apply Z-score normalization and compute Fusions
+    def compute_fusion_output(metrics):
         v_z = (metrics["vacuity"] - z_params["vacuity"][0]) / (z_params["vacuity"][1] + 1e-8)
         a_z = (metrics["ambiguity"] - z_params["ambiguity"][0]) / (z_params["ambiguity"][1] + 1e-8)
         e_z = (metrics["entropy"] - z_params["entropy"][0]) / (z_params["entropy"][1] + 1e-8)
         en_z = (metrics["energy"] - z_params["energy"][0]) / (z_params["energy"][1] + 1e-8)
         return v_z + a_z + e_z + en_z
         
-    ind_metrics["fusion"] = compute_fusion(ind_metrics)
-    ood_metrics["fusion"] = compute_fusion(ood_metrics)
+    def compute_fusion_feature(metrics):
+        v_z = (metrics["vacuity"] - z_params["vacuity"][0]) / (z_params["vacuity"][1] + 1e-8)
+        en_z = (metrics["energy"] - z_params["energy"][0]) / (z_params["energy"][1] + 1e-8)
+        vim_z = (metrics["vim"] - z_params["vim"][0]) / (z_params["vim"][1] + 1e-8)
+        return v_z + en_z + vim_z
+        
+    ind_metrics["fusion_output"] = compute_fusion_output(ind_metrics)
+    ood_metrics["fusion_output"] = compute_fusion_output(ood_metrics)
+    
+    ind_metrics["fusion_feature"] = compute_fusion_feature(ind_metrics)
+    ood_metrics["fusion_feature"] = compute_fusion_feature(ood_metrics)
     
     from sklearn.metrics import roc_auc_score, average_precision_score
     
     ood_results = {}
+    np.random.seed(42) # Fixed seed for balanced sampling reproducibility
+    
     for key in ind_metrics.keys():
         scores_ind = ind_metrics[key]
         scores_ood = ood_metrics[key]
         
+        # 1. Full Dataset Evaluation
         ood_labels = np.zeros(len(scores_ind) + len(scores_ood))
         ood_labels[len(scores_ind):] = 1.0
         ood_scores = np.concatenate([scores_ind, scores_ood])
@@ -319,14 +424,34 @@ def main():
         auroc = roc_auc_score(ood_labels, ood_scores)
         aupr = average_precision_score(ood_labels, ood_scores)
         
+        # 2. Balanced Subset Evaluation (mean +- std over 10 repeats)
+        bal_aurocs = []
+        bal_auprs = []
+        n_balanced = min(len(scores_ind), len(scores_ood))
+        
+        for _ in range(10):
+            idx_ind = np.random.choice(len(scores_ind), n_balanced, replace=False)
+            idx_ood = np.random.choice(len(scores_ood), n_balanced, replace=False)
+            
+            bal_scores = np.concatenate([scores_ind[idx_ind], scores_ood[idx_ood]])
+            bal_labels = np.zeros(2 * n_balanced)
+            bal_labels[n_balanced:] = 1.0
+            
+            bal_aurocs.append(roc_auc_score(bal_labels, bal_scores))
+            bal_auprs.append(average_precision_score(bal_labels, bal_scores))
+            
         ood_results[key] = {
-            "auroc": float(auroc),
-            "aupr": float(aupr)
+            "full_auroc": float(auroc),
+            "full_aupr": float(aupr),
+            "bal_auroc_mean": float(np.mean(bal_aurocs)),
+            "bal_auroc_std": float(np.std(bal_aurocs)),
+            "bal_aupr_mean": float(np.mean(bal_auprs)),
+            "bal_aupr_std": float(np.std(bal_auprs))
         }
     
-    print("\n" + "="*60)
+    print("\n" + "="*80)
     print("Domain Shift / External Validation Summary")
-    print("="*60)
+    print("="*80)
     print(f"Classification Performance under Domain Shift:")
     if is_binary_skin:
         print(f"  - AUROC:                  {metrics['image_auroc']:.4f}")
@@ -341,10 +466,13 @@ def main():
     else:
         print(f"  - Equalized Odds (EOM) Gap: N/A (Skipped - non-binary/partition external dataset)")
         
-    print(f"OOD Detection Performance (In-dist vs OOD):")
+    print(f"\nOOD Detection Performance (Full vs Balanced):")
+    print(f"{'Method':<16} | {'Full AUROC':<10} | {'Full AUPR':<10} | {'Balanced AUROC (mean±std)':<26} | {'Balanced AUPR (mean±std)'}")
+    print("-"*100)
     for key in sorted(ood_results.keys()):
-        print(f"  - [{key:<10}] AUROC: {ood_results[key]['auroc']:.4f} | AUPR: {ood_results[key]['aupr']:.4f}")
-    print("="*60)
+        res = ood_results[key]
+        print(f"{key:<16} | {res['full_auroc']:.4f}     | {res['full_aupr']:.4f}     | {res['bal_auroc_mean']:.4f} ± {res['bal_auroc_std']:.4f}      | {res['bal_aupr_mean']:.4f} ± {res['bal_aupr_std']:.4f}")
+    print("="*80)
     
     # Save results
     results = {
