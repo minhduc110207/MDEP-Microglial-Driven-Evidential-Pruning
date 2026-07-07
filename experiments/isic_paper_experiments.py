@@ -1371,6 +1371,23 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
+        if args.outlier_exposure.lower() == "auto":
+            possible_paths = [
+                "/kaggle/input/datasets/mahdavi1202/skin-cancer",
+                "/kaggle/input/skin-cancer",
+            ]
+            detected_path = None
+            for p in possible_paths:
+                if os.path.exists(p):
+                    detected_path = p
+                    break
+            if detected_path:
+                args.outlier_exposure = detected_path
+                print(f"[INFO] Auto-detected skin-cancer dataset for Outlier Exposure at: {detected_path}")
+            else:
+                args.outlier_exposure = "cifar10"
+                print("[INFO] Skin-cancer dataset not found. Falling back to CIFAR-10 for Outlier Exposure.")
+
         if args.outlier_exposure.lower() == "cifar10":
             print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization)...")
             try:
@@ -1614,7 +1631,7 @@ def main() -> int:
     parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--outlier_exposure", type=str, nargs="?", const="cifar10", default=None, help="Enable Outlier Exposure. Pass path to custom folder, or leave blank/use 'cifar10' for CIFAR-10.")
+    parser.add_argument("--outlier_exposure", type=str, nargs="?", const="auto", default=None, help="Enable Outlier Exposure. Pass path to custom folder, or leave blank/'auto' to auto-detect skin-cancer folder.")
     parser.add_argument("--lambda_ood", type=float, default=0.05, help="OOD loss scaling weight.")
     parser.add_argument("--ood_batch_ratio", type=float, default=0.5, help="OOD batch size ratio relative to ID batch size.")
     args = parser.parse_args()

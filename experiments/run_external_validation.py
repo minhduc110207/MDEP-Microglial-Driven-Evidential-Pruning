@@ -247,6 +247,17 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
     
+    if not args.custom_image_folder:
+        possible_paths = [
+            "/kaggle/input/datasets/mahdavi1202/skin-cancer",
+            "/kaggle/input/skin-cancer",
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                args.custom_image_folder = p
+                print(f"[INFO] Auto-detected OOD skin-cancer dataset at: {p}")
+                break
+    
     configure_training_runtime()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
