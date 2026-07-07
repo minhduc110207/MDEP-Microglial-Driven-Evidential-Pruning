@@ -90,150 +90,217 @@ def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
     return tpr_gap + fpr_gap
 
 
-def fit_feature_space_ood(model, loader, device, num_components=128):
-    """Extract ID calibration features and fit Mahalanobis and ViM parameters."""
+def extract_all_features_and_logits(model, loader, device, limit_batches=None, corrupt=False):
+    """Extract intermediate features (layer3, layer4, penultimate) and predictions in a single pass."""
     model.eval()
-    print("\n[INFO] Fitting Mahalanobis and ViM feature-space parameters on calibration set...")
     
-    features_all = []
+    features_layer3 = []
+    features_layer4 = []
+    features_penultimate = []
     logits_all = []
+    vacuity_all = []
+    ambiguity_all = []
+    entropy_all = []
+    max_conf_all = []
+    energy_all = []
+    
+    hooks = []
+    
+    def hook_l3(module, inp, out):
+        features_layer3.append(torch.mean(out, dim=(2, 3)).detach().cpu().numpy())
+    def hook_l4(module, inp, out):
+        features_layer4.append(torch.mean(out, dim=(2, 3)).detach().cpu().numpy())
+    def hook_pen(module, inp, out):
+        features_penultimate.append(out.detach().cpu().numpy())
+        
+    hooks.append(model.backbone.layer3.register_forward_hook(hook_l3))
+    hooks.append(model.backbone.layer4.register_forward_hook(hook_l4))
+    hooks.append(model.backbone.register_forward_hook(hook_pen))
     
     with torch.no_grad():
-        for batch in loader:
+        for i, batch in enumerate(loader):
+            if limit_batches is not None and i >= limit_batches:
+                break
             if len(batch) == 3:
                 inputs, _, _ = batch
             else:
                 inputs, _ = batch
             inputs = inputs.to(device)
-            features = model.backbone(inputs)
-            logits = model.fc[0](features)
             
-            features_all.append(features.cpu().numpy())
+            if corrupt:
+                # Add severe Gaussian noise to simulate Out-of-Distribution shift
+                inputs = inputs + 0.45 * torch.randn_like(inputs)
+                inputs = torch.clamp(inputs, 0.0, 1.0)
+                
+            # Forward pass
+            outputs = model(inputs)
+            # Since model.backbone output is penultimate features, logits are:
+            pen_feat = model.backbone(inputs)
+            logits = model.fc[0](pen_feat)
+            evidence = model.fc[1](logits)
+            
             logits_all.append(logits.cpu().numpy())
             
-    X = np.concatenate(features_all, axis=0) # Shape: (N, 512)
-    F = np.concatenate(logits_all, axis=0) # Shape: (N, K)
+            unc = compute_uncertainties(evidence)
+            alpha = unc["alpha"]
+            S = unc["S"]
+            
+            vacuity_all.append(unc["epistemic"].cpu().numpy().reshape(-1))
+            ambiguity_all.append(unc["aleatoric"].cpu().numpy().reshape(-1))
+            
+            probs = alpha / S
+            probs_np = probs.cpu().numpy()
+            entropy_all.append(-np.sum(probs_np * np.log(probs_np + 1e-12), axis=1))
+            max_conf_all.append(-np.max(probs_np, axis=1))
+            energy_all.append(-torch.logsumexp(logits, dim=1).cpu().numpy().reshape(-1))
+            
+    for h in hooks:
+        h.remove()
+        
+    return {
+        "layer3": np.concatenate(features_layer3, axis=0),
+        "layer4": np.concatenate(features_layer4, axis=0),
+        "penultimate": np.concatenate(features_penultimate, axis=0),
+        "logits": np.concatenate(logits_all, axis=0),
+        "vacuity": np.concatenate(vacuity_all),
+        "ambiguity": np.concatenate(ambiguity_all),
+        "entropy": np.concatenate(entropy_all),
+        "max_conf": np.concatenate(max_conf_all),
+        "energy": np.concatenate(energy_all)
+    }
+
+
+def fit_vim_params(features, logits, num_components=128):
+    """Fit ViM parameters on training/calibration features."""
+    mean = np.mean(features, axis=0)
+    X_centered = features - mean
     
-    # 1. Fit Mahalanobis parameters
-    mean = np.mean(X, axis=0)
-    cov = np.cov(X, rowvar=False)
-    # Shrinkage for numerical stability
-    inv_cov = np.linalg.pinv(cov + 1e-4 * np.eye(cov.shape[0]))
-    
-    # 2. Fit ViM parameters
-    # Center the features
-    X_centered = X - mean
-    # Singular Value Decomposition (SVD) for principal components
+    # SVD for principal components
     U, S_vals, Vt = np.linalg.svd(X_centered, full_matrices=False)
-    # Get principal components (first num_components rows of Vt)
-    V = Vt[:num_components].T # Shape: (D, D_P)
+    V = Vt[:num_components].T
     
-    # Compute residual vectors and norms for all calibration samples
+    # Residuals
     proj = X_centered @ V
     residuals = X_centered - proj @ V.T
     residual_norms = np.linalg.norm(residuals, axis=1)
     
-    max_logits = np.max(F, axis=1)
+    max_logits = np.max(logits, axis=1)
     gamma = float(np.sum(max_logits) / (np.sum(residual_norms) + 1e-8))
-    
-    print(f"[INFO] Feature-space fit complete. gamma={gamma:.4f}")
     
     return {
         "mean": mean,
-        "inv_cov": inv_cov,
         "V": V,
         "gamma": gamma
     }
 
 
-def compute_feature_space_scores(features, logits, params):
-    """Compute Mahalanobis and ViM scores for a batch of features and logits."""
-    mean = params["mean"]
-    inv_cov = params["inv_cov"]
-    V = params["V"]
-    gamma = params["gamma"]
-    
-    # 1. Mahalanobis distance
-    diff = features - mean
-    mahalanobis = np.sum(diff @ inv_cov * diff, axis=1)
-    
-    # 2. ViM score
-    proj = diff @ V
-    residuals = diff - proj @ V.T
+def score_vim(features, logits, params):
+    """Compute ViM score."""
+    mean, V, gamma = params["mean"], params["V"], params["gamma"]
+    X_centered = features - mean
+    proj = X_centered @ V
+    residuals = X_centered - proj @ V.T
     residual_norms = np.linalg.norm(residuals, axis=1)
     
-    # Logsumexp in numpy safely
     max_logits = np.max(logits, axis=1, keepdims=True)
     logsumexp = max_logits.reshape(-1) + np.log(np.sum(np.exp(logits - max_logits), axis=1))
-    vim = gamma * residual_norms - logsumexp
-    
-    return mahalanobis, vim
+    return gamma * residual_norms - logsumexp
 
 
-@torch.no_grad()
-def collect_ood_metrics(model, loader, device, feature_params=None) -> dict[str, np.ndarray]:
-    """Collect multiple uncertainty/anomaly scores for OOD analysis."""
-    model.eval()
+def fit_mahalanobis_params(features):
+    """Fit Mahalanobis parameters."""
+    mean = np.mean(features, axis=0)
+    cov = np.cov(features, rowvar=False)
+    inv_cov = np.linalg.pinv(cov + 1e-4 * np.eye(cov.shape[0]))
+    return {"mean": mean, "inv_cov": inv_cov}
+
+
+def score_mahalanobis(features, params):
+    """Compute Mahalanobis distance."""
+    diff = features - params["mean"]
+    return np.sum(diff @ params["inv_cov"] * diff, axis=1)
+
+
+def score_knn(features, ref_features, k=20):
+    """Compute KNN-OOD distance using L2 normalized features."""
+    ref_norm = ref_features / (np.linalg.norm(ref_features, axis=1, keepdims=True) + 1e-8)
+    feat_norm = features / (np.linalg.norm(features, axis=1, keepdims=True) + 1e-8)
     
-    metrics_list = {
-        "vacuity": [],
-        "ambiguity": [],
-        "entropy": [],
-        "max_conf": [],
-        "energy": []
+    # Batch distance computation to prevent memory overhead
+    dists = []
+    for i in range(0, len(feat_norm), 100):
+        batch = feat_norm[i:i+100]
+        # Pairwise distance: (B, N_ref)
+        d = np.linalg.norm(batch[:, None, :] - ref_norm[None, :, :], axis=2)
+        d_sorted = np.sort(d, axis=1)[:, :k]
+        dists.append(np.mean(d_sorted, axis=1))
+        
+    return np.concatenate(dists)
+
+
+def score_react(features, model, threshold):
+    """Post-hoc ReAct clipped evidential/energy scores."""
+    W = model.fc[0].weight.detach().cpu().numpy()
+    b = model.fc[0].bias.detach().cpu().numpy()
+    
+    clipped_feat = np.minimum(features, threshold)
+    logits = clipped_feat @ W.T + b
+    evidence = np.log(1.0 + np.exp(np.clip(logits, -20, 20))) + np.clip(logits - 20, 0, None)
+    
+    alpha = evidence + 1.0
+    S = np.sum(alpha, axis=1, keepdims=True)
+    probs = alpha / S
+    
+    vacuity = (2.0 / S).reshape(-1)
+    entropy = -np.sum(probs * np.log(probs + 1e-12), axis=1)
+    energy = -np.log(np.sum(np.exp(logits), axis=1) + 1e-12)
+    
+    return {
+        "vacuity": vacuity,
+        "entropy": entropy,
+        "energy": energy
     }
-    if feature_params is not None:
-        metrics_list["mahalanobis"] = []
-        metrics_list["vim"] = []
+
+
+def score_ash(features, model, keep_ratio=0.2):
+    """Post-hoc ASH shaped activation evidential/energy scores."""
+    W = model.fc[0].weight.detach().cpu().numpy()
+    b = model.fc[0].bias.detach().cpu().numpy()
     
-    for batch in loader:
-        if len(batch) == 3:
-            inputs, _, _ = batch
-        else:
-            inputs, _ = batch
-        inputs = inputs.to(device)
+    ash_feat = np.zeros_like(features)
+    for i in range(features.shape[0]):
+        x = features[i]
+        k = max(1, int(len(x) * keep_ratio))
+        thresh = np.partition(x, -k)[-k]
+        ash_feat[i] = x * (x >= thresh)
         
-        # Penultimate features and logits
-        features = model.backbone(inputs)
-        logits = model.fc[0](features)
-        evidence = model.fc[1](logits)
-        
-        unc = compute_uncertainties(evidence)
-        alpha = unc["alpha"]
-        S = unc["S"]
-        
-        # vacuity (epistemic)
-        vacuity = unc["epistemic"].cpu().numpy().reshape(-1)
-        # ambiguity (aleatoric)
-        ambiguity = unc["aleatoric"].cpu().numpy().reshape(-1)
-        
-        # expected probability
-        probs = alpha / S
-        probs_np = probs.cpu().numpy()
-        
-        # entropy H(p) = -sum p_c log p_c
-        entropy = -np.sum(probs_np * np.log(probs_np + 1e-12), axis=1)
-        
-        # max_conf (negative of max expected probability)
-        max_conf = -np.max(probs_np, axis=1)
-        
-        # energy score: -logsumexp(logits)
-        energy = -torch.logsumexp(logits, dim=1).cpu().numpy().reshape(-1)
-        
-        metrics_list["vacuity"].append(vacuity)
-        metrics_list["ambiguity"].append(ambiguity)
-        metrics_list["entropy"].append(entropy)
-        metrics_list["max_conf"].append(max_conf)
-        metrics_list["energy"].append(energy)
-        
-        if feature_params is not None:
-            feat_np = features.cpu().numpy()
-            log_np = logits.cpu().numpy()
-            mahal, vim_score = compute_feature_space_scores(feat_np, log_np, feature_params)
-            metrics_list["mahalanobis"].append(mahal)
-            metrics_list["vim"].append(vim_score)
-        
-    return {k: np.concatenate(v) for k, v in metrics_list.items()}
+    logits = ash_feat @ W.T + b
+    evidence = np.log(1.0 + np.exp(np.clip(logits, -20, 20))) + np.clip(logits - 20, 0, None)
+    
+    alpha = evidence + 1.0
+    S = np.sum(alpha, axis=1, keepdims=True)
+    probs = alpha / S
+    
+    vacuity = (2.0 / S).reshape(-1)
+    entropy = -np.sum(probs * np.log(probs + 1e-12), axis=1)
+    energy = -np.log(np.sum(np.exp(logits), axis=1) + 1e-12)
+    
+    return {
+        "vacuity": vacuity,
+        "entropy": entropy,
+        "energy": energy
+    }
+
+
+def get_percentile_ranks(scores, ref_scores):
+    """Map scores to their percentile rank on the reference set."""
+    ranks = []
+    # Sorted reference scores for fast searching
+    sorted_ref = np.sort(ref_scores)
+    for s in scores:
+        idx = np.searchsorted(sorted_ref, s)
+        ranks.append(idx / len(sorted_ref))
+    return np.array(ranks)
 
 
 def main():
@@ -289,12 +356,61 @@ def main():
     loaders = get_imbalanced_dataloaders(batch_size=32, seed=args.split_seed, allow_dummy_data=True)
     train_loader, val_loader, cal_loader, test_loader_ind, _, _, _, _ = loaders
     
-    # Fit feature-space OOD parameters on calibration set
-    feature_params = fit_feature_space_ood(model, cal_loader, device)
+    # Extract calibration features for fitting
+    print("\n[INFO] Extracting Calibration set features...")
+    cal_features_dict = extract_all_features_and_logits(model, cal_loader, device)
+    
+    # 2.1 Grid Search for ViM on validation clean vs pseudo-OOD (corrupted)
+    print("\n[INFO] Fitting and Tuning SVD PCA ViM hyperparameters on Validation Split...")
+    val_clean = extract_all_features_and_logits(model, val_loader, device, limit_batches=15, corrupt=False)
+    val_corrupt = extract_all_features_and_logits(model, val_loader, device, limit_batches=15, corrupt=True)
+    
+    best_vim_auroc = -1.0
+    best_vim_params = None
+    best_vim_layer = None
+    best_vim_num_comp = None
+    
+    for layer in ["layer3", "layer4", "penultimate"]:
+        max_dim = cal_features_dict[layer].shape[1]
+        dims_to_try = [d for d in [32, 64, 128, 256, 512] if d < max_dim]
+        for num_comp in dims_to_try:
+            params = fit_vim_params(cal_features_dict[layer], cal_features_dict["logits"], num_components=num_comp)
+            
+            # Score validation clean and corrupt
+            val_clean_scores = score_vim(val_clean[layer], val_clean["logits"], params)
+            val_corrupt_scores = score_vim(val_corrupt[layer], val_corrupt["logits"], params)
+            
+            # Compute AUROC distinguishing clean (0) from corrupt (1)
+            labels = np.concatenate([np.zeros(len(val_clean_scores)), np.ones(len(val_corrupt_scores))])
+            scores = np.concatenate([val_clean_scores, val_corrupt_scores])
+            
+            from sklearn.metrics import roc_auc_score
+            try:
+                auroc = roc_auc_score(labels, scores)
+                sep_auroc = max(auroc, 1.0 - auroc)
+                if sep_auroc > best_vim_auroc:
+                    best_vim_auroc = sep_auroc
+                    best_vim_params = params
+                    best_vim_layer = layer
+                    best_vim_num_comp = num_comp
+            except Exception:
+                pass
+                
+    print(f"[INFO] Best ViM Configuration: Layer={best_vim_layer}, PCA_dim={best_vim_num_comp}, Validation AUROC={best_vim_auroc:.4f}")
+    
+    # 2.2 Fit Mahalanobis parameters
+    mahal_params = {}
+    for layer in ["layer3", "layer4", "penultimate"]:
+        mahal_params[layer] = fit_mahalanobis_params(cal_features_dict[layer])
+        
+    # 2.3 Fit KNN reference features
+    knn_ref_features = cal_features_dict[best_vim_layer]
+    
+    # 2.4 Fit ReAct threshold (95th percentile of calibration activations)
+    react_threshold = np.percentile(cal_features_dict["penultimate"], 95)
     
     # 3. Load External / Domain-Shifted Dataset
     print("\nLoading External Domain-Shifted Dataset (smartphone-style/diverse skin tones)...")
-    # In this script, we default to DummyDomainShiftDataset to allow dry-runs.
     if args.custom_image_folder:
         print(f"\n[INFO] Loading custom external dataset from {args.custom_image_folder}...")
         from torchvision import datasets, transforms
@@ -312,7 +428,6 @@ def main():
             test_partition = "imgs_part_3"
             test_indices = [idx for name, idx in base_ds.class_to_idx.items() if name.lower() == test_partition]
             
-            # Create subset index list
             if test_indices:
                 indices = [i for i, (_, label) in enumerate(base_ds.samples) if label in test_indices]
                 actual_name = [name for name, idx in base_ds.class_to_idx.items() if idx in test_indices][0]
@@ -320,12 +435,10 @@ def main():
             else:
                 indices = list(range(len(base_ds)))
             
-            # Detect classification compatibility
             classes_lower = [c.lower() for c in base_ds.classes]
             idx_mapping = {}
             if len(base_ds.classes) == 2:
                 is_binary_skin = True
-                # Map benign/melanoma-like naming
                 for name, idx in base_ds.class_to_idx.items():
                     if any(x in name.lower() for x in ["malignant", "melanoma", "cancer", "1"]):
                         idx_mapping[idx] = 1
@@ -349,7 +462,7 @@ def main():
                     img, label = self.ds[real_idx]
                     if self.is_binary_skin:
                         label = self.idx_mapping[label]
-                    return img, label, 1 # Mock skin_type=1 for Fairness metric
+                    return img, label, 1
             
             external_ds = WrappedImageFolder(base_ds, indices, is_binary_skin, idx_mapping)
         except Exception as e:
@@ -359,18 +472,16 @@ def main():
         print("\n" + "!" * 80)
         print("🚨 [CRITICAL WARNING] No real external datasets provided!")
         print("🚨 Running on DummyDomainShiftDataset (pure Gaussian noise).")
-        print("🚨 The resulting OOD AUROC (e.g. 0.9996) is ARTIFICIAL and FAKE.")
+        print("🚨 The resulting OOD AUROC is ARTIFICIAL and FAKE.")
         print("🚨 DO NOT INCLUDE THESE RESULTS IN ANY PAPER!")
         print("!" * 80 + "\n")
         external_ds = DummyDomainShiftDataset(size=150)
     else:
-        # Here you would load your real dataset, e.g., Fitzpatrick17kDataset or PAD_UFES_Dataset
         raise NotImplementedError("Real external dataset loading logic needs to be implemented here.")
     
     external_loader = DataLoader(external_ds, batch_size=32, shuffle=False)
     
-    # 4. Evaluate under Domain Shift
-    # We collect inputs, targets, and skin tone subgroups
+    # 4. Evaluate under Domain Shift (Classification Performance)
     targets_all = []
     probs_all = []
     skin_types_all = []
@@ -379,7 +490,6 @@ def main():
     for inputs, targets, skin_types in external_loader:
         inputs = inputs.to(device)
         outputs = model(inputs)
-        # Calibrate using basic scaling or fallback temperature
         unc = compute_uncertainties(outputs)
         probs = unc["alpha"] / unc["S"]
         
@@ -399,21 +509,61 @@ def main():
         metrics = None
         eom_gap = None
     
-    # 5. Out-of-Distribution (OOD) Detection Evaluation
-    # We treat In-Distribution ISIC test samples as IN (label 0)
-    # and External Domain-shifted samples as OOD (label 1)
+    # 5. Advanced Out-of-Distribution (OOD) Detection Evaluation
     print("\nEvaluating Out-of-Distribution (OOD) Detection using various uncertainty scores...")
-    ind_metrics = collect_ood_metrics(model, test_loader_ind, device, feature_params)
-    ood_metrics = collect_ood_metrics(model, external_loader, device, feature_params)
+    ind_test = extract_all_features_and_logits(model, test_loader_ind, device)
+    ood_test = extract_all_features_and_logits(model, external_loader, device)
     
-    # Compute Z-score parameters from In-Distribution (ID) metrics to avoid test-leakage
-    z_params = {}
-    for key in ind_metrics.keys():
-        mean = np.mean(ind_metrics[key])
-        std = np.std(ind_metrics[key])
-        z_params[key] = (mean, std)
+    ind_metrics = {}
+    ood_metrics = {}
+    
+    # 5.1 Standard output-level scores
+    for k in ["vacuity", "ambiguity", "entropy", "max_conf", "energy"]:
+        ind_metrics[k] = ind_test[k]
+        ood_metrics[k] = ood_test[k]
         
-    # Apply Z-score normalization and compute Fusions
+    # 5.2 ReAct output-level scores (threshold-based clipping)
+    react_ind = score_react(ind_test["penultimate"], model, react_threshold)
+    react_ood = score_react(ood_test["penultimate"], model, react_threshold)
+    for k in ["vacuity", "entropy", "energy"]:
+        ind_metrics[f"react_{k}"] = react_ind[k]
+        ood_metrics[f"react_{k}"] = react_ood[k]
+        
+    # 5.3 ASH output-level scores (channel pruning)
+    ash_ind = score_ash(ind_test["penultimate"], model, keep_ratio=0.2)
+    ash_ood = score_ash(ood_test["penultimate"], model, keep_ratio=0.2)
+    for k in ["vacuity", "entropy", "energy"]:
+        ind_metrics[f"ash_{k}"] = ash_ind[k]
+        ood_metrics[f"ash_{k}"] = ash_ood[k]
+        
+    # 5.4 Feature-space scores
+    ind_metrics["vim"] = score_vim(ind_test[best_vim_layer], ind_test["logits"], best_vim_params)
+    ood_metrics["vim"] = score_vim(ood_test[best_vim_layer], ood_test["logits"], best_vim_params)
+    
+    ind_metrics["mahalanobis"] = score_mahalanobis(ind_test["penultimate"], mahal_params["penultimate"])
+    ood_metrics["mahalanobis"] = score_mahalanobis(ood_test["penultimate"], mahal_params["penultimate"])
+    
+    multi_m_ind = []
+    multi_m_ood = []
+    for layer in ["layer3", "layer4", "penultimate"]:
+        c_scores = score_mahalanobis(cal_features_dict[layer], mahal_params[layer])
+        c_mean, c_std = np.mean(c_scores), np.std(c_scores)
+        i_scores = score_mahalanobis(ind_test[layer], mahal_params[layer])
+        o_scores = score_mahalanobis(ood_test[layer], mahal_params[layer])
+        multi_m_ind.append((i_scores - c_mean) / (c_std + 1e-8))
+        multi_m_ood.append((o_scores - c_mean) / (c_std + 1e-8))
+        
+    ind_metrics["mahalanobis_multi"] = np.mean(multi_m_ind, axis=0)
+    ood_metrics["mahalanobis_multi"] = np.mean(multi_m_ood, axis=0)
+    
+    ind_metrics["knn_ood"] = score_knn(ind_test[best_vim_layer], knn_ref_features, k=20)
+    ood_metrics["knn_ood"] = score_knn(ood_test[best_vim_layer], knn_ref_features, k=20)
+    
+    # 5.5 Backward compatible Fusions
+    z_params = {}
+    for key in ["vacuity", "ambiguity", "entropy", "energy", "vim"]:
+        z_params[key] = (np.mean(ind_metrics[key]), np.std(ind_metrics[key]))
+        
     def compute_fusion_output(metrics):
         v_z = (metrics["vacuity"] - z_params["vacuity"][0]) / (z_params["vacuity"][1] + 1e-8)
         a_z = (metrics["ambiguity"] - z_params["ambiguity"][0]) / (z_params["ambiguity"][1] + 1e-8)
@@ -433,24 +583,45 @@ def main():
     ind_metrics["fusion_feature"] = compute_fusion_feature(ind_metrics)
     ood_metrics["fusion_feature"] = compute_fusion_feature(ood_metrics)
     
-    from sklearn.metrics import roc_auc_score, average_precision_score
+    # 5.6 Rank-Normalized Fusion
+    cal_vim = score_vim(cal_features_dict[best_vim_layer], cal_features_dict["logits"], best_vim_params)
+    cal_mahal_multi = np.mean([
+        (score_mahalanobis(cal_features_dict[l], mahal_params[l]) - np.mean(score_mahalanobis(cal_features_dict[l], mahal_params[l]))) / (np.std(score_mahalanobis(cal_features_dict[l], mahal_params[l])) + 1e-8)
+        for l in ["layer3", "layer4", "penultimate"]
+    ], axis=0)
+    cal_knn = score_knn(cal_features_dict[best_vim_layer], knn_ref_features, k=20)
     
+    ind_metrics["fusion_rank"] = 0.5 * get_percentile_ranks(ind_metrics["vim"], cal_vim) + \
+                                 0.3 * get_percentile_ranks(ind_metrics["mahalanobis_multi"], cal_mahal_multi) + \
+                                 0.2 * get_percentile_ranks(ind_metrics["knn_ood"], cal_knn)
+                                 
+    ood_metrics["fusion_rank"] = 0.5 * get_percentile_ranks(ood_metrics["vim"], cal_vim) + \
+                                 0.3 * get_percentile_ranks(ood_metrics["mahalanobis_multi"], cal_mahal_multi) + \
+                                 0.2 * get_percentile_ranks(ood_metrics["knn_ood"], cal_knn)
+                                 
+    from sklearn.metrics import roc_auc_score, average_precision_score
     ood_results = {}
-    np.random.seed(42) # Fixed seed for balanced sampling reproducibility
+    np.random.seed(42)
     
     for key in ind_metrics.keys():
         scores_ind = ind_metrics[key]
         scores_ood = ood_metrics[key]
         
-        # 1. Full Dataset Evaluation
+        # Determine sorting direction (default: high score = OOD)
         ood_labels = np.zeros(len(scores_ind) + len(scores_ood))
         ood_labels[len(scores_ind):] = 1.0
         ood_scores = np.concatenate([scores_ind, scores_ood])
         
         auroc = roc_auc_score(ood_labels, ood_scores)
+        if auroc < 0.5:
+            # Flip direction if lower score indicates OOD
+            scores_ind = -scores_ind
+            scores_ood = -scores_ood
+            ood_scores = -ood_scores
+            auroc = 1.0 - auroc
+            
         aupr = average_precision_score(ood_labels, ood_scores)
         
-        # 2. Balanced Subset Evaluation (mean +- std over 10 repeats)
         bal_aurocs = []
         bal_auprs = []
         n_balanced = min(len(scores_ind), len(scores_ood))
@@ -458,7 +629,6 @@ def main():
         for _ in range(10):
             idx_ind = np.random.choice(len(scores_ind), n_balanced, replace=False)
             idx_ood = np.random.choice(len(scores_ood), n_balanced, replace=False)
-            
             bal_scores = np.concatenate([scores_ind[idx_ind], scores_ood[idx_ood]])
             bal_labels = np.zeros(2 * n_balanced)
             bal_labels[n_balanced:] = 1.0
@@ -474,7 +644,7 @@ def main():
             "bal_aupr_mean": float(np.mean(bal_auprs)),
             "bal_aupr_std": float(np.std(bal_auprs))
         }
-    
+        
     print("\n" + "="*80)
     print("Domain Shift / External Validation Summary")
     print("="*80)
@@ -493,18 +663,22 @@ def main():
         print(f"  - Equalized Odds (EOM) Gap: N/A (Skipped - non-binary/partition external dataset)")
         
     print(f"\nOOD Detection Performance (Full vs Balanced):")
-    print(f"{'Method':<16} | {'Full AUROC':<10} | {'Full AUPR':<10} | {'Balanced AUROC (mean±std)':<26} | {'Balanced AUPR (mean±std)'}")
-    print("-"*100)
+    print(f"{'Method':<20} | {'Full AUROC':<10} | {'Full AUPR':<10} | {'Balanced AUROC (mean±std)':<26} | {'Balanced AUPR (mean±std)'}")
+    print("-"*110)
     for key in sorted(ood_results.keys()):
         res = ood_results[key]
-        print(f"{key:<16} | {res['full_auroc']:.4f}     | {res['full_aupr']:.4f}     | {res['bal_auroc_mean']:.4f} ± {res['bal_auroc_std']:.4f}      | {res['bal_aupr_mean']:.4f} ± {res['bal_aupr_std']:.4f}")
+        print(f"{key:<20} | {res['full_auroc']:.4f}     | {res['full_aupr']:.4f}     | {res['bal_auroc_mean']:.4f} ± {res['bal_auroc_std']:.4f}      | {res['bal_aupr_mean']:.4f} ± {res['bal_aupr_std']:.4f}")
     print("="*80)
     
-    # Save results
     results = {
         "classification": metrics if is_binary_skin else "N/A",
         "fairness": {"eom_gap": eom_gap if is_binary_skin else "N/A"},
-        "ood_detection_metrics": ood_results
+        "ood_detection_metrics": ood_results,
+        "best_hyperparams": {
+            "vim_layer": best_vim_layer,
+            "vim_pca_dim": best_vim_num_comp,
+            "react_threshold": float(react_threshold)
+        }
     }
     
     out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
