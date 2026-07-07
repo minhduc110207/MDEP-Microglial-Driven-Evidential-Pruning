@@ -124,7 +124,7 @@ def main():
     
     # 1. Load Model
     model = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False)
-    replace_conv2d_with_mdep(model)
+    replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     
     out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
     default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds" / f"seed_{args.seed}" / "model_state.pth"

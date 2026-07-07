@@ -59,7 +59,7 @@ def run_ablation(mode_name, args, device):
     print(f"\n================ Running Regrowth Ablation: {mode_name} ================")
     model = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False)
     if modified_spec.sparse:
-        replace_conv2d_with_mdep(model)
+        replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     model = model.to(device)
     
     # Train

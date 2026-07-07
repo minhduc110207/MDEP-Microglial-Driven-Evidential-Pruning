@@ -110,7 +110,7 @@ def run_one(backbone: str, args: argparse.Namespace, seed: int) -> dict:
     train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = loaders
     spec = EXPERIMENTS["full_guds"]
     model = EvidenceTorchvisionBackbone(backbone, num_classes=num_classes, pretrained=not args.no_pretrained)
-    replace_conv2d_with_mdep(model)
+    replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     model = model.to(device)
 
     run_dir = output_root() / backbone / f"seed_{seed}"

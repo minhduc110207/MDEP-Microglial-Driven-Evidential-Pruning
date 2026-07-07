@@ -100,7 +100,7 @@ def run_fold(fold_idx, loaders_data, args, seed, device):
     
     model = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False)
     if spec.sparse:
-        replace_conv2d_with_mdep(model)
+        replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     model = model.to(device)
     
     # Train
