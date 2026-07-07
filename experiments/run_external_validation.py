@@ -296,6 +296,18 @@ def main():
         try:
             base_ds = datasets.ImageFolder(root=args.custom_image_folder, transform=transform)
             
+            # If partitions exist (specifically for mahdavi1202/skin-cancer),
+            # we restrict OOD test evaluation to imgs_part_3 only.
+            test_partition = "imgs_part_3"
+            test_idx = base_ds.class_to_idx.get(test_partition, None)
+            
+            # Create subset index list
+            if test_idx is not None:
+                indices = [i for i, (_, label) in enumerate(base_ds.samples) if label == test_idx]
+                print(f"[INFO] Detected partitions. Restricting OOD test set to partition: '{test_partition}' ({len(indices)} samples).")
+            else:
+                indices = list(range(len(base_ds)))
+            
             # Detect classification compatibility
             classes_lower = [c.lower() for c in base_ds.classes]
             idx_mapping = {}
@@ -313,19 +325,21 @@ def main():
                 print(f"[INFO] Multi-class/partition folder classes found: {base_ds.class_to_idx}. Classification metrics will be skipped.")
                 
             class WrappedImageFolder(Dataset):
-                def __init__(self, ds, is_binary_skin, idx_mapping):
+                def __init__(self, ds, indices, is_binary_skin, idx_mapping):
                     self.ds = ds
+                    self.indices = indices
                     self.is_binary_skin = is_binary_skin
                     self.idx_mapping = idx_mapping
                 def __len__(self):
-                    return len(self.ds)
+                    return len(self.indices)
                 def __getitem__(self, idx):
-                    img, label = self.ds[idx]
+                    real_idx = self.indices[idx]
+                    img, label = self.ds[real_idx]
                     if self.is_binary_skin:
                         label = self.idx_mapping[label]
                     return img, label, 1 # Mock skin_type=1 for Fairness metric
             
-            external_ds = WrappedImageFolder(base_ds, is_binary_skin, idx_mapping)
+            external_ds = WrappedImageFolder(base_ds, indices, is_binary_skin, idx_mapping)
         except Exception as e:
             raise RuntimeError(f"Failed to load ImageFolder from {args.custom_image_folder}. Error: {e}")
             

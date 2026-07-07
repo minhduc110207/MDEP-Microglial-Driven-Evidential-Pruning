@@ -1362,9 +1362,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
 
     ood_loader = None
     if args.outlier_exposure:
-        print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization)...")
         from torchvision import datasets, transforms
-        from torch.utils.data import DataLoader
+        from torch.utils.data import DataLoader, Subset
         
         transform_ood = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -1372,14 +1371,40 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        try:
-            ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
-            ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
-            ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
-            print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
-        except Exception as e:
-            print(f"[WARNING] Failed to load CIFAR-10: {e}. Outlier Exposure is disabled.")
-            ood_loader = None
+        if args.outlier_exposure.lower() == "cifar10":
+            print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization)...")
+            try:
+                ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
+                ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
+                ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
+            except Exception as e:
+                print(f"[WARNING] Failed to load CIFAR-10: {e}. Outlier Exposure is disabled.")
+                ood_loader = None
+        else:
+            # Custom folder path passed
+            print(f"\n[INFO] Loading custom folder for Outlier Exposure: {args.outlier_exposure}")
+            try:
+                base_ds = datasets.ImageFolder(root=args.outlier_exposure, transform=transform_ood)
+                # Auto-partitioning: If it has classes like imgs_part_1, imgs_part_2, imgs_part_3,
+                # we only use imgs_part_1 and imgs_part_2 for Outlier Exposure to prevent leakage with imgs_part_3
+                allowed_classes = ["imgs_part_1", "imgs_part_2"]
+                allowed_indices = [base_ds.class_to_idx[c] for c in allowed_classes if c in base_ds.class_to_idx]
+                
+                if allowed_indices:
+                    indices = [i for i, (_, label) in enumerate(base_ds.samples) if label in allowed_indices]
+                    ood_ds = Subset(base_ds, indices)
+                    print(f"[INFO] Detected partitions. Using {allowed_classes} for Outlier Exposure. Filtered samples: {len(ood_ds)} / {len(base_ds)}")
+                else:
+                    ood_ds = base_ds
+                    print(f"[INFO] Using entire custom folder for Outlier Exposure. Total samples: {len(ood_ds)}")
+                
+                ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
+                ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}")
+            except Exception as e:
+                print(f"[WARNING] Failed to load custom OE folder: {e}. Outlier Exposure is disabled.")
+                ood_loader = None
 
     if spec.use_mdep_trainer:
         history = train_guds(
@@ -1589,7 +1614,7 @@ def main() -> int:
     parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--outlier_exposure", action="store_true", help="Enable Outlier Exposure using CIFAR-10.")
+    parser.add_argument("--outlier_exposure", type=str, nargs="?", const="cifar10", default=None, help="Enable Outlier Exposure. Pass path to custom folder, or leave blank/use 'cifar10' for CIFAR-10.")
     parser.add_argument("--lambda_ood", type=float, default=0.05, help="OOD loss scaling weight.")
     parser.add_argument("--ood_batch_ratio", type=float, default=0.5, help="OOD batch size ratio relative to ID batch size.")
     args = parser.parse_args()
