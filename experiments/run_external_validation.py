@@ -135,7 +135,10 @@ def main():
         model.load_state_dict(torch.load(default_ckpt, map_location=device))
         print(f"Loaded trained checkpoint from default path: {default_ckpt}")
     else:
-        print("[WARNING] No checkpoint loaded. Running validation on random/untrained MDEP model.")
+        raise FileNotFoundError(
+            f"No trained checkpoint found! Expected at '{default_ckpt}' or via --model_path. "
+            "Refusing to run external validation on a random/untrained MDEP model to prevent misleading results."
+        )
     model = model.to(device)
     
     # 2. Build In-Distribution (ISIC) loader for baseline comparison
@@ -147,8 +150,18 @@ def main():
     # 3. Load External / Domain-Shifted Dataset
     print("\nLoading External Domain-Shifted Dataset (smartphone-style/diverse skin tones)...")
     # In this script, we default to DummyDomainShiftDataset to allow dry-runs.
-    # If the user provides real CSVs, they can easily modify this path.
-    external_ds = DummyDomainShiftDataset(size=150)
+    if not args.fitzpatrick_csv and not args.pad_ufes_csv:
+        print("\n" + "!" * 80)
+        print("🚨 [CRITICAL WARNING] No real external datasets provided!")
+        print("🚨 Running on DummyDomainShiftDataset (pure Gaussian noise).")
+        print("🚨 The resulting OOD AUROC (e.g. 0.9996) is ARTIFICIAL and FAKE.")
+        print("🚨 DO NOT INCLUDE THESE RESULTS IN ANY PAPER!")
+        print("!" * 80 + "\n")
+        external_ds = DummyDomainShiftDataset(size=150)
+    else:
+        # Here you would load your real dataset, e.g., Fitzpatrick17kDataset or PAD_UFES_Dataset
+        raise NotImplementedError("Real external dataset loading logic needs to be implemented here.")
+    
     external_loader = DataLoader(external_ds, batch_size=32, shuffle=False)
     
     # 4. Evaluate under Domain Shift
