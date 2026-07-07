@@ -152,7 +152,8 @@ def main():
     parser.add_argument("--fitzpatrick_csv", type=str, help="Path to Fitzpatrick17k metadata (optional)")
     parser.add_argument("--pad_ufes_csv", type=str, help="Path to PAD-UFES-20 metadata (optional)")
     parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42, help="Model checkpoint seed folder")
+    parser.add_argument("--split_seed", type=int, default=42, help="Fixed split seed for patient splits (must match training)")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
     
@@ -184,7 +185,7 @@ def main():
     # 2. Build In-Distribution (ISIC) loader for baseline comparison
     # We will use dummy or real depending on what is available
     print("\nLoading In-Distribution (ISIC) validation set...")
-    loaders = get_imbalanced_dataloaders(batch_size=32, seed=args.seed, allow_dummy_data=True)
+    loaders = get_imbalanced_dataloaders(batch_size=32, seed=args.split_seed, allow_dummy_data=True)
     _, _, _, test_loader_ind, _, _, _, _ = loaders
     
     # 3. Load External / Domain-Shifted Dataset
