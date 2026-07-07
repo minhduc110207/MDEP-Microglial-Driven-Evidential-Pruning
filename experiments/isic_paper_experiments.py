@@ -1389,15 +1389,39 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                 print("[INFO] Skin-cancer dataset not found. Falling back to CIFAR-10 for Outlier Exposure.")
 
         if args.outlier_exposure.lower() == "cifar10":
-            print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization)...")
-            try:
-                ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
-                ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
-                ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
-                print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
-            except Exception as e:
-                print(f"[WARNING] Failed to load CIFAR-10: {e}. Outlier Exposure is disabled.")
-                ood_loader = None
+            local_paths = [
+                "/kaggle/input/cifar10-pngs-in-folders/cifar10/train",
+                "/kaggle/input/cifar10-pngs-in-folders/cifar10/cifar10/train",
+                "/kaggle/input/cifar10/train",
+                "/kaggle/input/cifar-10/train",
+            ]
+            local_cifar_path = None
+            for p in local_paths:
+                if os.path.exists(p):
+                    local_cifar_path = p
+                    break
+            
+            if local_cifar_path:
+                print(f"\n[INFO] Auto-detected local CIFAR-10 dataset at: {local_cifar_path}. Loading without download.")
+                try:
+                    ood_ds = datasets.ImageFolder(root=local_cifar_path, transform=transform_ood)
+                    ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
+                    ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                    print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to load local CIFAR-10: {e}. Falling back to PyTorch download.")
+                    local_cifar_path = None
+            
+            if not local_cifar_path:
+                print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization) via PyTorch download...")
+                try:
+                    ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
+                    ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
+                    ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                    print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to load CIFAR-10: {e}. Outlier Exposure is disabled.")
+                    ood_loader = None
         else:
             # Custom folder path passed
             print(f"\n[INFO] Loading custom folder for Outlier Exposure: {args.outlier_exposure}")
