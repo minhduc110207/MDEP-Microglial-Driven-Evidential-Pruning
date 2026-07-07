@@ -997,8 +997,11 @@ class MDEPTrainer:
         self.model.zero_grad()
         self.reset_effective_weight_grads()
 
-    def train_epoch(self, epoch, dataloader, device, print_interval=200):
+    def train_epoch(self, epoch, dataloader, device, print_interval=200, ood_loader=None, lambda_ood=0.05):
         self.model.train()
+        
+        if ood_loader is not None and epoch >= self.warmup_epochs:
+            ood_iter = iter(ood_loader)
 
         # Freeze optional channel permutations when the sparse phase starts.
         if epoch == self.warmup_epochs:
@@ -1096,9 +1099,26 @@ class MDEPTrainer:
             with torch.amp.autocast('cuda', enabled=amp_enabled):
                 evidence = self.model(inputs)
                 
+            loss_ood = 0.0
+            if ood_loader is not None and epoch >= self.warmup_epochs:
+                try:
+                    ood_inputs, _ = next(ood_iter)
+                except StopIteration:
+                    ood_iter = iter(ood_loader)
+                    ood_inputs, _ = next(ood_iter)
+                
+                ood_inputs = ood_inputs.to(device)
+                with torch.amp.autocast('cuda', enabled=amp_enabled):
+                    ood_evidence = self.model(ood_inputs)
+                with torch.amp.autocast('cuda', enabled=False):
+                    ood_alpha = ood_evidence.float() + 1.0
+                    loss_ood = torch.mean(kl_divergence(ood_alpha, ood_evidence.shape[1]))
+                
             # Ensure Evidential Loss runs strictly in FP32 to avoid digamma/log underflow
             with torch.amp.autocast('cuda', enabled=False):
                 loss = self.criterion(evidence.float(), targets, epoch)
+                if ood_loader is not None and epoch >= self.warmup_epochs:
+                    loss = loss + lambda_ood * loss_ood
                 if is_warmup:
                     perm_loss = get_permutation_loss(self.model, penalty_weight=0.01)
                     loss = loss + perm_loss

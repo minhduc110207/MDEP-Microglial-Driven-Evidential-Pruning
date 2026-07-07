@@ -1223,6 +1223,8 @@ def train_guds(
     structural_proxy_min_classes: int = 2,
     efl_gamma_final: float = 0.0,
     validation_callback=None,
+    ood_loader=None,
+    lambda_ood=0.05,
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(
@@ -1254,7 +1256,7 @@ def train_guds(
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scheduler=scheduler)
     history = []
     for epoch in range(total_epochs):
-        loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200)
+        loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200, ood_loader=ood_loader, lambda_ood=lambda_ood)
         topo_gamma = float(trainer.step_gamma(epoch))
         efl_gamma = float(getattr(criterion, "gamma", 0.0))
         row = {
@@ -1358,6 +1360,27 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             print(f"[INFO] Using {torch.cuda.device_count()} GPUs via DataParallel.")
             model = TransparentDataParallel(model)
 
+    ood_loader = None
+    if args.outlier_exposure:
+        print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization)...")
+        from torchvision import datasets, transforms
+        from torch.utils.data import DataLoader
+        
+        transform_ood = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        try:
+            ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
+            ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
+            ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+            print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
+        except Exception as e:
+            print(f"[WARNING] Failed to load CIFAR-10: {e}. Outlier Exposure is disabled.")
+            ood_loader = None
+
     if spec.use_mdep_trainer:
         history = train_guds(
             model,
@@ -1370,6 +1393,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
             structural_proxy_batches=args.structural_proxy_batches,
+            ood_loader=ood_loader,
+            lambda_ood=args.lambda_ood,
         )
     else:
         history = train_standard(
@@ -1564,6 +1589,9 @@ def main() -> int:
     parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--outlier_exposure", action="store_true", help="Enable Outlier Exposure using CIFAR-10.")
+    parser.add_argument("--lambda_ood", type=float, default=0.05, help="OOD loss scaling weight.")
+    parser.add_argument("--ood_batch_ratio", type=float, default=0.5, help="OOD batch size ratio relative to ID batch size.")
     args = parser.parse_args()
 
     output_root().mkdir(parents=True, exist_ok=True)
