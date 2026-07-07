@@ -113,6 +113,7 @@ def main():
     parser.add_argument("--model_path", type=str, help="Path to trained model model_state.pth (optional)")
     parser.add_argument("--fitzpatrick_csv", type=str, help="Path to Fitzpatrick17k metadata (optional)")
     parser.add_argument("--pad_ufes_csv", type=str, help="Path to PAD-UFES-20 metadata (optional)")
+    parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
@@ -150,7 +151,32 @@ def main():
     # 3. Load External / Domain-Shifted Dataset
     print("\nLoading External Domain-Shifted Dataset (smartphone-style/diverse skin tones)...")
     # In this script, we default to DummyDomainShiftDataset to allow dry-runs.
-    if not args.fitzpatrick_csv and not args.pad_ufes_csv:
+    if args.custom_image_folder:
+        print(f"\n[INFO] Loading custom external dataset from {args.custom_image_folder}...")
+        from torchvision import datasets, transforms
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        
+        try:
+            base_ds = datasets.ImageFolder(root=args.custom_image_folder, transform=transform)
+            class WrappedImageFolder(Dataset):
+                def __init__(self, ds):
+                    self.ds = ds
+                    print("External Dataset Classes Found:", self.ds.class_to_idx)
+                def __len__(self):
+                    return len(self.ds)
+                def __getitem__(self, idx):
+                    img, label = self.ds[idx]
+                    return img, label, 1 # Mock skin_type=1 for Fairness metric
+            
+            external_ds = WrappedImageFolder(base_ds)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load ImageFolder from {args.custom_image_folder}. Error: {e}")
+            
+    elif not args.fitzpatrick_csv and not args.pad_ufes_csv:
         print("\n" + "!" * 80)
         print("🚨 [CRITICAL WARNING] No real external datasets provided!")
         print("🚨 Running on DummyDomainShiftDataset (pure Gaussian noise).")
