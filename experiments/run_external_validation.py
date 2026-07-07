@@ -121,6 +121,7 @@ def main():
     configure_training_runtime()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    is_binary_skin = True
     
     # 1. Load Model
     model = EvidenceResNet(num_classes=2, dataset="isic", pretrained=False)
@@ -162,17 +163,37 @@ def main():
         
         try:
             base_ds = datasets.ImageFolder(root=args.custom_image_folder, transform=transform)
+            
+            # Detect classification compatibility
+            classes_lower = [c.lower() for c in base_ds.classes]
+            idx_mapping = {}
+            if len(base_ds.classes) == 2:
+                is_binary_skin = True
+                # Map benign/melanoma-like naming
+                for name, idx in base_ds.class_to_idx.items():
+                    if any(x in name.lower() for x in ["malignant", "melanoma", "cancer", "1"]):
+                        idx_mapping[idx] = 1
+                    else:
+                        idx_mapping[idx] = 0
+                print(f"[INFO] Detected binary skin classes: {base_ds.class_to_idx}. Mapping to: {idx_mapping}")
+            else:
+                is_binary_skin = False
+                print(f"[INFO] Multi-class/partition folder classes found: {base_ds.class_to_idx}. Classification metrics will be skipped.")
+                
             class WrappedImageFolder(Dataset):
-                def __init__(self, ds):
+                def __init__(self, ds, is_binary_skin, idx_mapping):
                     self.ds = ds
-                    print("External Dataset Classes Found:", self.ds.class_to_idx)
+                    self.is_binary_skin = is_binary_skin
+                    self.idx_mapping = idx_mapping
                 def __len__(self):
                     return len(self.ds)
                 def __getitem__(self, idx):
                     img, label = self.ds[idx]
+                    if self.is_binary_skin:
+                        label = self.idx_mapping[label]
                     return img, label, 1 # Mock skin_type=1 for Fairness metric
             
-            external_ds = WrappedImageFolder(base_ds)
+            external_ds = WrappedImageFolder(base_ds, is_binary_skin, idx_mapping)
         except Exception as e:
             raise RuntimeError(f"Failed to load ImageFolder from {args.custom_image_folder}. Error: {e}")
             
@@ -213,8 +234,12 @@ def main():
     y_pred = probs.argmax(axis=1)
     subgroups = np.concatenate(skin_types_all)
     
-    metrics = binary_image_anomaly_metrics(y_true, probs)
-    eom_gap = compute_equalized_odds_gap(y_true, y_pred, subgroups)
+    if is_binary_skin:
+        metrics = binary_image_anomaly_metrics(y_true, probs)
+        eom_gap = compute_equalized_odds_gap(y_true, y_pred, subgroups)
+    else:
+        metrics = None
+        eom_gap = None
     
     # 5. Out-of-Distribution (OOD) Detection Evaluation
     # We treat In-Distribution ISIC test samples as IN (label 0)
@@ -235,10 +260,19 @@ def main():
     print("Domain Shift / External Validation Summary")
     print("="*60)
     print(f"Classification Performance under Domain Shift:")
-    print(f"  - AUROC:                  {metrics['image_auroc']:.4f}")
-    print(f"  - Average Precision (AP): {metrics['image_ap']:.4f}")
+    if is_binary_skin:
+        print(f"  - AUROC:                  {metrics['image_auroc']:.4f}")
+        print(f"  - Average Precision (AP): {metrics['image_ap']:.4f}")
+    else:
+        print(f"  - AUROC:                  N/A (Skipped - non-binary/partition external dataset)")
+        print(f"  - Average Precision (AP): N/A (Skipped - non-binary/partition external dataset)")
+        
     print(f"Fairness Evaluation (Fitzpatrick skin subgroups):")
-    print(f"  - Equalized Odds (EOM) Gap: {eom_gap:.4f}")
+    if is_binary_skin:
+        print(f"  - Equalized Odds (EOM) Gap: {eom_gap:.4f}")
+    else:
+        print(f"  - Equalized Odds (EOM) Gap: N/A (Skipped - non-binary/partition external dataset)")
+        
     print(f"OOD Detection Performance (In-dist vs OOD):")
     print(f"  - OOD Detection AUROC:     {ood_auroc:.4f}")
     print(f"  - OOD Detection AUPR:      {ood_aupr:.4f}")
@@ -246,8 +280,8 @@ def main():
     
     # Save results
     results = {
-        "classification": metrics,
-        "fairness": {"eom_gap": eom_gap},
+        "classification": metrics if is_binary_skin else "N/A",
+        "fairness": {"eom_gap": eom_gap if is_binary_skin else "N/A"},
         "ood_detection": {
             "auroc": ood_auroc,
             "aupr": ood_aupr
