@@ -91,21 +91,59 @@ def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
 
 
 @torch.no_grad()
-def collect_ood_evidence(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
-    """Collect epistemic uncertainty for OOD analysis."""
+def collect_ood_metrics(model, loader, device) -> dict[str, np.ndarray]:
+    """Collect multiple uncertainty/anomaly scores for OOD analysis."""
     model.eval()
-    ue_list = []
+    
+    metrics_list = {
+        "vacuity": [],
+        "ambiguity": [],
+        "entropy": [],
+        "max_conf": [],
+        "energy": []
+    }
+    
     for batch in loader:
-        # Check if loader yields subgroups too
         if len(batch) == 3:
             inputs, _, _ = batch
         else:
             inputs, _ = batch
         inputs = inputs.to(device)
-        outputs = model(inputs)
-        unc = compute_uncertainties(outputs)
-        ue_list.append(unc["epistemic"].cpu().numpy().reshape(-1))
-    return np.concatenate(ue_list)
+        
+        # Penultimate features and logits
+        features = model.backbone(inputs)
+        logits = model.fc[0](features)
+        evidence = model.fc[1](logits)
+        
+        unc = compute_uncertainties(evidence)
+        alpha = unc["alpha"]
+        S = unc["S"]
+        
+        # vacuity (epistemic)
+        vacuity = unc["epistemic"].cpu().numpy().reshape(-1)
+        # ambiguity (aleatoric)
+        ambiguity = unc["aleatoric"].cpu().numpy().reshape(-1)
+        
+        # expected probability
+        probs = alpha / S
+        probs_np = probs.cpu().numpy()
+        
+        # entropy H(p) = -sum p_c log p_c
+        entropy = -np.sum(probs_np * np.log(probs_np + 1e-12), axis=1)
+        
+        # max_conf (negative of max expected probability)
+        max_conf = -np.max(probs_np, axis=1)
+        
+        # energy score: -logsumexp(logits)
+        energy = -torch.logsumexp(logits, dim=1).cpu().numpy().reshape(-1)
+        
+        metrics_list["vacuity"].append(vacuity)
+        metrics_list["ambiguity"].append(ambiguity)
+        metrics_list["entropy"].append(entropy)
+        metrics_list["max_conf"].append(max_conf)
+        metrics_list["energy"].append(energy)
+        
+    return {k: np.concatenate(v) for k, v in metrics_list.items()}
 
 
 def main():
@@ -244,17 +282,46 @@ def main():
     # 5. Out-of-Distribution (OOD) Detection Evaluation
     # We treat In-Distribution ISIC test samples as IN (label 0)
     # and External Domain-shifted samples as OOD (label 1)
-    print("\nEvaluating Out-of-Distribution (OOD) Detection using Epistemic Uncertainty...")
-    ue_ind = collect_ood_evidence(model, test_loader_ind, device)
-    ue_ood = collect_ood_evidence(model, external_loader, device)
+    print("\nEvaluating Out-of-Distribution (OOD) Detection using various uncertainty scores...")
+    ind_metrics = collect_ood_metrics(model, test_loader_ind, device)
+    ood_metrics = collect_ood_metrics(model, external_loader, device)
+    
+    # Compute Z-score parameters from In-Distribution (ID) metrics to avoid test-leakage
+    z_params = {}
+    for key in ind_metrics.keys():
+        mean = np.mean(ind_metrics[key])
+        std = np.std(ind_metrics[key])
+        z_params[key] = (mean, std)
+        
+    # Apply Z-score normalization and compute Fusion score (S_OOD = z(vac) + z(amb) + z(ent) + z(energy))
+    def compute_fusion(metrics):
+        v_z = (metrics["vacuity"] - z_params["vacuity"][0]) / (z_params["vacuity"][1] + 1e-8)
+        a_z = (metrics["ambiguity"] - z_params["ambiguity"][0]) / (z_params["ambiguity"][1] + 1e-8)
+        e_z = (metrics["entropy"] - z_params["entropy"][0]) / (z_params["entropy"][1] + 1e-8)
+        en_z = (metrics["energy"] - z_params["energy"][0]) / (z_params["energy"][1] + 1e-8)
+        return v_z + a_z + e_z + en_z
+        
+    ind_metrics["fusion"] = compute_fusion(ind_metrics)
+    ood_metrics["fusion"] = compute_fusion(ood_metrics)
     
     from sklearn.metrics import roc_auc_score, average_precision_score
-    ood_labels = np.zeros(len(ue_ind) + len(ue_ood))
-    ood_labels[len(ue_ind):] = 1.0
-    ood_scores = np.concatenate([ue_ind, ue_ood])
     
-    ood_auroc = roc_auc_score(ood_labels, ood_scores)
-    ood_aupr = average_precision_score(ood_labels, ood_scores)
+    ood_results = {}
+    for key in ind_metrics.keys():
+        scores_ind = ind_metrics[key]
+        scores_ood = ood_metrics[key]
+        
+        ood_labels = np.zeros(len(scores_ind) + len(scores_ood))
+        ood_labels[len(scores_ind):] = 1.0
+        ood_scores = np.concatenate([scores_ind, scores_ood])
+        
+        auroc = roc_auc_score(ood_labels, ood_scores)
+        aupr = average_precision_score(ood_labels, ood_scores)
+        
+        ood_results[key] = {
+            "auroc": float(auroc),
+            "aupr": float(aupr)
+        }
     
     print("\n" + "="*60)
     print("Domain Shift / External Validation Summary")
@@ -274,18 +341,15 @@ def main():
         print(f"  - Equalized Odds (EOM) Gap: N/A (Skipped - non-binary/partition external dataset)")
         
     print(f"OOD Detection Performance (In-dist vs OOD):")
-    print(f"  - OOD Detection AUROC:     {ood_auroc:.4f}")
-    print(f"  - OOD Detection AUPR:      {ood_aupr:.4f}")
+    for key in sorted(ood_results.keys()):
+        print(f"  - [{key:<10}] AUROC: {ood_results[key]['auroc']:.4f} | AUPR: {ood_results[key]['aupr']:.4f}")
     print("="*60)
     
     # Save results
     results = {
         "classification": metrics if is_binary_skin else "N/A",
         "fairness": {"eom_gap": eom_gap if is_binary_skin else "N/A"},
-        "ood_detection": {
-            "auroc": ood_auroc,
-            "aupr": ood_aupr
-        }
+        "ood_detection_metrics": ood_results
     }
     
     out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
