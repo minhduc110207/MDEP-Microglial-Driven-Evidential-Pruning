@@ -1389,30 +1389,70 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                 print("[INFO] Skin-cancer dataset not found. Falling back to CIFAR-10 for Outlier Exposure.")
 
         if args.outlier_exposure.lower() == "cifar10":
-            local_paths = [
-                "/kaggle/input/cifar10-pngs-in-folders/cifar10/train",
-                "/kaggle/input/cifar10-pngs-in-folders/cifar10/cifar10/train",
-                "/kaggle/input/cifar10/train",
-                "/kaggle/input/cifar-10/train",
+            # 1. First check if a local python pickle dataset exists (e.g., pankrzysiu/cifar10-python)
+            possible_pickle_paths = [
+                "/kaggle/input/datasets/pankrzysiu/cifar10-python",
+                "/kaggle/input/cifar10-python",
             ]
-            local_cifar_path = None
-            for p in local_paths:
+            local_pickle_path = None
+            for p in possible_pickle_paths:
                 if os.path.exists(p):
-                    local_cifar_path = p
+                    local_pickle_path = p
                     break
             
-            if local_cifar_path:
-                print(f"\n[INFO] Auto-detected local CIFAR-10 dataset at: {local_cifar_path}. Loading without download.")
+            loaded_pickle = False
+            if local_pickle_path:
+                print(f"\n[INFO] Auto-detected local python CIFAR-10 pickle dataset at: {local_pickle_path}")
                 try:
-                    ood_ds = datasets.ImageFolder(root=local_cifar_path, transform=transform_ood)
+                    os.makedirs("./data", exist_ok=True)
+                    target_link = os.path.abspath("./data/cifar-10-batches-py")
+                    if os.path.exists(target_link) or os.path.islink(target_link):
+                        if os.path.islink(target_link):
+                            os.unlink(target_link)
+                        else:
+                            shutil.rmtree(target_link)
+                    
+                    sub_dir = os.path.join(local_pickle_path, "cifar-10-batches-py")
+                    src_dir = sub_dir if os.path.exists(sub_dir) else local_pickle_path
+                    
+                    os.symlink(src_dir, target_link)
+                    print(f"[INFO] Created symlink for torchvision: {src_dir} -> {target_link}")
+                    
+                    ood_ds = datasets.CIFAR10(root='./data', train=True, download=False, transform=transform_ood)
                     ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
                     ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
                     print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
+                    loaded_pickle = True
                 except Exception as e:
-                    print(f"[WARNING] Failed to load local CIFAR-10: {e}. Falling back to PyTorch download.")
-                    local_cifar_path = None
+                    print(f"[WARNING] Failed to load local pickle dataset: {e}. Trying other methods.")
             
-            if not local_cifar_path:
+            # 2. If pickle is not loaded, check for local PNG dataset format (ImageFolder)
+            if not loaded_pickle:
+                local_paths = [
+                    "/kaggle/input/cifar10-pngs-in-folders/cifar10/train",
+                    "/kaggle/input/cifar10-pngs-in-folders/cifar10/cifar10/train",
+                    "/kaggle/input/cifar10/train",
+                    "/kaggle/input/cifar-10/train",
+                ]
+                local_cifar_path = None
+                for p in local_paths:
+                    if os.path.exists(p):
+                        local_cifar_path = p
+                        break
+                
+                if local_cifar_path:
+                    print(f"\n[INFO] Auto-detected local PNG CIFAR-10 dataset at: {local_cifar_path}. Loading without download.")
+                    try:
+                        ood_ds = datasets.ImageFolder(root=local_cifar_path, transform=transform_ood)
+                        ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
+                        ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                        print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
+                        loaded_pickle = True
+                    except Exception as e:
+                        print(f"[WARNING] Failed to load local PNG CIFAR-10: {e}. Falling back to default download.")
+            
+            # 3. Fallback to online PyTorch download
+            if not loaded_pickle:
                 print("\n[INFO] Loading CIFAR-10 for Outlier Exposure (OOD Regularization) via PyTorch download...")
                 try:
                     ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
