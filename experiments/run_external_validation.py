@@ -221,18 +221,31 @@ def score_mahalanobis(features, params):
 
 
 def score_knn(features, ref_features, k=20):
-    """Compute KNN-OOD distance using L2 normalized features."""
-    ref_norm = ref_features / (np.linalg.norm(ref_features, axis=1, keepdims=True) + 1e-8)
-    feat_norm = features / (np.linalg.norm(features, axis=1, keepdims=True) + 1e-8)
+    """Compute KNN-OOD distance using PyTorch GPU-accelerated matrix multiplication."""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Batch distance computation to prevent memory overhead
+    # Convert arrays to PyTorch tensors
+    feat_t = torch.from_numpy(features).float().to(device)
+    ref_t = torch.from_numpy(ref_features).float().to(device)
+    
+    # L2 normalize features
+    feat_t = feat_t / (torch.norm(feat_t, dim=1, keepdim=True) + 1e-8)
+    ref_t = ref_t / (torch.norm(ref_t, dim=1, keepdim=True) + 1e-8)
+    
     dists = []
-    for i in range(0, len(feat_norm), 100):
-        batch = feat_norm[i:i+100]
-        # Pairwise distance: (B, N_ref)
-        d = np.linalg.norm(batch[:, None, :] - ref_norm[None, :, :], axis=2)
-        d_sorted = np.sort(d, axis=1)[:, :k]
-        dists.append(np.mean(d_sorted, axis=1))
+    batch_size = 1000  # Compute in larger batches on GPU (extremely fast)
+    for i in range(0, len(feat_t), batch_size):
+        batch = feat_t[i:i+batch_size]
+        # Efficient pairwise Euclidean distance: ||x - y||^2 = ||x||^2 + ||y||^2 - 2 * x * y^T
+        # Since both are L2 normalized, ||x||^2 = 1 and ||y||^2 = 1
+        # Therefore, ||x - y||^2 = 2 - 2 * x * y^T
+        sim = torch.mm(batch, ref_t.t()) # Shape: (B, N_ref)
+        d_sq = torch.clamp(2.0 - 2.0 * sim, min=0.0)
+        d = torch.sqrt(d_sq)
+        
+        # Sort and take top-k smallest distances
+        d_sorted, _ = torch.topk(d, k, dim=1, largest=False)
+        dists.append(torch.mean(d_sorted, dim=1).cpu().numpy())
         
     return np.concatenate(dists)
 
