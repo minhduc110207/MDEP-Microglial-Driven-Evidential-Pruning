@@ -16,6 +16,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -51,6 +52,232 @@ class DummyDomainShiftDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx], self.targets[idx], self.skin_types[idx]
+
+
+class PADUFES20MetadataDataset(Dataset):
+    """PAD-UFES-20 image dataset backed by metadata.csv diagnostic labels."""
+
+    IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    IMAGE_COLUMNS = [
+        "img_id", "image", "image_id", "filename", "file_name", "fname",
+        "path", "filepath", "image_path", "image_number", "image_no",
+        "photo_id", "lesion_id"
+    ]
+    DIAGNOSTIC_COLUMNS = ["diagnostic", "diagnosis", "label", "class", "target"]
+    SUBGROUP_COLUMNS = [
+        "fitzpatrick", "fitspatrick", "skin_type", "skin_tone", "skin_color",
+        "gender", "sex", "age", "patient_age", "background_father",
+        "background_mother", "skin_cancer_history", "cancer_history",
+        "pesticide", "smoke", "drink", "region", "body_site",
+        "anatom_site_general", "has_piped_water", "has_sewage_system"
+    ]
+    MALIGNANT_DIAGNOSTICS = {
+        "mel", "melanoma", "bcc", "basal cell carcinoma",
+        "scc", "squamous cell carcinoma", "malignant", "cancer"
+    }
+    BENIGN_DIAGNOSTICS = {
+        "ack", "akiec", "actinic keratosis", "nev", "nevus", "nevi",
+        "sek", "seborrheic keratosis", "benign"
+    }
+
+    def __init__(
+        self,
+        root: str | Path,
+        metadata_csv: str | Path | None = None,
+        partition: str = "imgs_part_3",
+        transform=None,
+        subgroup_column: str | None = None,
+    ):
+        self.root = Path(root)
+        self.metadata_csv = Path(metadata_csv) if metadata_csv else self.root / "metadata.csv"
+        self.partition = partition
+        self.transform = transform
+        self.df = pd.read_csv(self.metadata_csv)
+
+        image_root = self.root / partition if partition else self.root
+        if not image_root.exists():
+            raise FileNotFoundError(f"PAD-UFES-20 partition not found: {image_root}")
+
+        self.file_lookup = self._build_file_lookup(image_root)
+        self.image_col = self._infer_image_column()
+        self.diagnostic_col = self._infer_column(self.DIAGNOSTIC_COLUMNS)
+        if self.diagnostic_col is None:
+            raise ValueError(
+                f"Could not find a PAD-UFES-20 diagnostic column in {self.metadata_csv}. "
+                f"Available columns: {list(self.df.columns)}"
+            )
+
+        self.subgroup_col = self._select_subgroup_column(subgroup_column)
+        self.samples = self._build_samples()
+        if not self.samples:
+            raise ValueError(
+                f"No metadata rows matched image files under {image_root}. "
+                f"image_col={self.image_col}, diagnostic_col={self.diagnostic_col}"
+            )
+
+        self.targets = np.array([s[1] for s in self.samples], dtype=np.int64)
+        self.subgroups = np.array([s[2] for s in self.samples], dtype=object)
+
+    def _build_file_lookup(self, image_root: Path) -> dict[str, Path]:
+        lookup = {}
+        for path in image_root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in self.IMAGE_EXTENSIONS:
+                lookup[path.name.lower()] = path
+                lookup[path.stem.lower()] = path
+        return lookup
+
+    def _infer_column(self, candidates: list[str]) -> str | None:
+        by_lower = {c.lower(): c for c in self.df.columns}
+        for candidate in candidates:
+            if candidate.lower() in by_lower:
+                return by_lower[candidate.lower()]
+        return None
+
+    def _match_image_path(self, value) -> Path | None:
+        if pd.isna(value):
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        name = Path(raw).name.lower()
+        keys = [name, Path(name).stem.lower()]
+        if not Path(name).suffix:
+            keys.extend([f"{name}{ext}" for ext in self.IMAGE_EXTENSIONS])
+            keys.extend([f"img_{name}{ext}" for ext in self.IMAGE_EXTENSIONS])
+        for key in keys:
+            if key in self.file_lookup:
+                return self.file_lookup[key]
+        return None
+
+    def _match_row_image_path(self, row) -> Path | None:
+        if self.image_col is not None:
+            direct = self._match_image_path(row[self.image_col])
+            if direct is not None:
+                return direct
+
+        by_lower = {c.lower(): c for c in self.df.columns}
+        patient_col = by_lower.get("patient_id")
+        lesion_col = by_lower.get("lesion_id")
+        img_cols = [
+            by_lower[c] for c in ["img_id", "image_id", "image_number", "image_no", "photo_id"]
+            if c in by_lower
+        ]
+
+        patient = str(row[patient_col]).strip() if patient_col and not pd.isna(row[patient_col]) else ""
+        lesion = str(row[lesion_col]).strip() if lesion_col and not pd.isna(row[lesion_col]) else ""
+        img_values = [str(row[c]).strip() for c in img_cols if not pd.isna(row[c])]
+        if not img_values:
+            img_values = [""]
+
+        bases = []
+        for img in img_values:
+            combos = [
+                [patient, lesion, img],
+                [patient, lesion],
+                [patient, img],
+                [lesion, img],
+            ]
+            for combo in combos:
+                parts = [p for p in combo if p]
+                if parts:
+                    bases.append("_".join(parts))
+                    bases.append("-".join(parts))
+
+        for base in bases:
+            matched = self._match_image_path(base)
+            if matched is not None:
+                return matched
+        return None
+
+    def _infer_image_column(self) -> str:
+        candidate_cols = []
+        by_lower = {c.lower(): c for c in self.df.columns}
+        for candidate in self.IMAGE_COLUMNS:
+            if candidate.lower() in by_lower:
+                candidate_cols.append(by_lower[candidate.lower()])
+        candidate_cols.extend([c for c in self.df.columns if c not in candidate_cols])
+
+        best_col = None
+        best_matches = 0
+        for col in candidate_cols:
+            values = self.df[col].dropna().head(500)
+            matches = sum(self._match_image_path(v) is not None for v in values)
+            if matches > best_matches:
+                best_col = col
+                best_matches = matches
+        if best_col is None or best_matches == 0:
+            return self._infer_column(self.IMAGE_COLUMNS)
+        return best_col
+
+    def _diagnostic_to_binary(self, value) -> int | None:
+        if pd.isna(value):
+            return None
+        text = str(value).strip().lower()
+        if text in self.MALIGNANT_DIAGNOSTICS:
+            return 1
+        if text in self.BENIGN_DIAGNOSTICS:
+            return 0
+        if any(token in text for token in ["melanoma", "basal", "squamous", "malignant"]):
+            return 1
+        if any(token in text for token in ["nevus", "keratosis", "benign"]):
+            return 0
+        return None
+
+    def _select_subgroup_column(self, requested: str | None) -> str | None:
+        if requested and requested.lower() != "auto":
+            by_lower = {c.lower(): c for c in self.df.columns}
+            if requested.lower() not in by_lower:
+                raise ValueError(
+                    f"Requested fairness group '{requested}' not found. "
+                    f"Available columns: {list(self.df.columns)}"
+                )
+            return by_lower[requested.lower()]
+        return self._infer_column(self.SUBGROUP_COLUMNS)
+
+    def _format_subgroup(self, row) -> str:
+        if self.subgroup_col is None or pd.isna(row[self.subgroup_col]):
+            return "unknown"
+        value = row[self.subgroup_col]
+        col = self.subgroup_col.lower()
+        if "age" in col:
+            try:
+                age = float(value)
+                if age < 40:
+                    return "age_<40"
+                if age < 60:
+                    return "age_40_59"
+                return "age_60_plus"
+            except Exception:
+                pass
+        return f"{self.subgroup_col}={str(value).strip()}"
+
+    def _build_samples(self):
+        samples = []
+        skipped_missing_file = 0
+        skipped_unknown_label = 0
+        for _, row in self.df.iterrows():
+            img_path = self._match_row_image_path(row)
+            if img_path is None:
+                skipped_missing_file += 1
+                continue
+            target = self._diagnostic_to_binary(row[self.diagnostic_col])
+            if target is None:
+                skipped_unknown_label += 1
+                continue
+            samples.append((img_path, target, self._format_subgroup(row)))
+        self.skipped_missing_file = skipped_missing_file
+        self.skipped_unknown_label = skipped_unknown_label
+        return samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, target, subgroup = self.samples[idx]
+        image = Image.open(path).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, target, subgroup
 
 
 def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
@@ -89,6 +316,12 @@ def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
     tpr_gap = max(tpr_vals) - min(tpr_vals)
     fpr_gap = max(fpr_vals) - min(fpr_vals)
     return tpr_gap + fpr_gap
+
+
+def batch_to_numpy(batch_value):
+    if torch.is_tensor(batch_value):
+        return batch_value.detach().cpu().numpy()
+    return np.asarray(batch_value)
 
 
 def extract_all_features_and_logits(model, loader, device, limit_batches=None, corrupt=False):
@@ -346,11 +579,17 @@ def main():
     parser.add_argument("--fitzpatrick_csv", type=str, help="Path to Fitzpatrick17k metadata (optional)")
     parser.add_argument("--pad_ufes_csv", type=str, help="Path to PAD-UFES-20 metadata (optional)")
     parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")
+    parser.add_argument("--pad_ufes_partition", type=str, default="imgs_part_3", help="PAD-UFES-20 image partition used for external testing")
+    parser.add_argument("--fairness_group", type=str, default="auto", help="PAD-UFES-20 subgroup column for Equalized Odds, or 'auto'")
     parser.add_argument("--seed", type=int, default=42, help="Model checkpoint seed folder")
     parser.add_argument("--split_seed", type=int, default=42, help="Fixed split seed for patient splits (must match training)")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
     
+    if not args.custom_image_folder and args.pad_ufes_csv:
+        args.custom_image_folder = str(Path(args.pad_ufes_csv).resolve().parent)
+        print(f"[INFO] Inferred PAD-UFES-20 root from metadata CSV: {args.custom_image_folder}")
+
     if not args.custom_image_folder:
         possible_paths = [
             "/kaggle/input/datasets/mahdavi1202/skin-cancer",
@@ -445,6 +684,7 @@ def main():
         
     # 2.3 Fit KNN reference features
     knn_ref_features = cal_features_dict[best_vim_layer]
+    knn_ref_features_by_layer = {layer: cal_features_dict[layer] for layer in ["layer3", "layer4", "penultimate"]}
     
     # 2.4 Fit ReAct threshold (95th percentile of calibration activations)
     react_threshold = np.percentile(cal_features_dict["penultimate"], 95)
@@ -460,53 +700,78 @@ def main():
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
         
-        try:
-            base_ds = datasets.ImageFolder(root=args.custom_image_folder, transform=transform)
+        root = Path(args.custom_image_folder)
+        metadata_csv = Path(args.pad_ufes_csv) if args.pad_ufes_csv else root / "metadata.csv"
+        if args.pad_ufes_csv and not metadata_csv.exists():
+            raise FileNotFoundError(f"Explicit --pad_ufes_csv path does not exist: {metadata_csv}")
+        if metadata_csv.exists():
+            external_ds = PADUFES20MetadataDataset(
+                root=root,
+                metadata_csv=metadata_csv,
+                partition=args.pad_ufes_partition,
+                transform=transform,
+                subgroup_column=args.fairness_group,
+            )
+            is_binary_skin = True
+            n_pos = int(external_ds.targets.sum())
+            n_neg = int(len(external_ds.targets) - n_pos)
+            unique_groups = sorted(str(g) for g in np.unique(external_ds.subgroups))
+            print("[INFO] Loaded PAD-UFES-20 with metadata.csv.")
+            print(f"[INFO] Metadata CSV: {metadata_csv}")
+            print(f"[INFO] Partition: {args.pad_ufes_partition}")
+            print(f"[INFO] Image column: {external_ds.image_col}")
+            print(f"[INFO] Diagnostic column: {external_ds.diagnostic_col}")
+            print(f"[INFO] Fairness subgroup column: {external_ds.subgroup_col or 'unknown'}")
+            print(f"[INFO] Matched samples: {len(external_ds)} (malignant={n_pos}, non_malignant={n_neg})")
+            print(f"[INFO] Skipped metadata rows: missing_file={external_ds.skipped_missing_file}, unknown_label={external_ds.skipped_unknown_label}")
+            print(f"[INFO] Subgroups: {unique_groups[:12]}{' ...' if len(unique_groups) > 12 else ''}")
+        else:
+            try:
+                base_ds = datasets.ImageFolder(root=args.custom_image_folder, transform=transform)
             
-            # If partitions exist (specifically for mahdavi1202/skin-cancer),
-            # we restrict OOD test evaluation to imgs_part_3 only.
-            test_partition = "imgs_part_3"
-            test_indices = [idx for name, idx in base_ds.class_to_idx.items() if name.lower() == test_partition]
+                # If partitions exist (specifically for mahdavi1202/skin-cancer),
+                # we restrict OOD test evaluation to the configured PAD-UFES partition.
+                test_partition = args.pad_ufes_partition
+                test_indices = [idx for name, idx in base_ds.class_to_idx.items() if name.lower() == test_partition.lower()]
             
-            if test_indices:
-                indices = [i for i, (_, label) in enumerate(base_ds.samples) if label in test_indices]
-                actual_name = [name for name, idx in base_ds.class_to_idx.items() if idx in test_indices][0]
-                print(f"[INFO] Detected partitions. Restricting OOD test set to partition: '{actual_name}' ({len(indices)} samples).")
-            else:
-                indices = list(range(len(base_ds)))
+                if test_indices:
+                    indices = [i for i, (_, label) in enumerate(base_ds.samples) if label in test_indices]
+                    actual_name = [name for name, idx in base_ds.class_to_idx.items() if idx in test_indices][0]
+                    print(f"[INFO] Detected partitions. Restricting OOD test set to partition: '{actual_name}' ({len(indices)} samples).")
+                else:
+                    indices = list(range(len(base_ds)))
             
-            classes_lower = [c.lower() for c in base_ds.classes]
-            idx_mapping = {}
-            if len(base_ds.classes) == 2:
-                is_binary_skin = True
-                for name, idx in base_ds.class_to_idx.items():
-                    if any(x in name.lower() for x in ["malignant", "melanoma", "cancer", "1"]):
-                        idx_mapping[idx] = 1
-                    else:
-                        idx_mapping[idx] = 0
-                print(f"[INFO] Detected binary skin classes: {base_ds.class_to_idx}. Mapping to: {idx_mapping}")
-            else:
-                is_binary_skin = False
-                print(f"[INFO] Multi-class/partition folder classes found: {base_ds.class_to_idx}. Classification metrics will be skipped.")
+                idx_mapping = {}
+                if len(base_ds.classes) == 2:
+                    is_binary_skin = True
+                    for name, idx in base_ds.class_to_idx.items():
+                        if any(x in name.lower() for x in ["malignant", "melanoma", "cancer", "1"]):
+                            idx_mapping[idx] = 1
+                        else:
+                            idx_mapping[idx] = 0
+                    print(f"[INFO] Detected binary skin classes: {base_ds.class_to_idx}. Mapping to: {idx_mapping}")
+                else:
+                    is_binary_skin = False
+                    print(f"[INFO] Multi-class/partition folder classes found: {base_ds.class_to_idx}. Classification metrics will be skipped.")
                 
-            class WrappedImageFolder(Dataset):
-                def __init__(self, ds, indices, is_binary_skin, idx_mapping):
-                    self.ds = ds
-                    self.indices = indices
-                    self.is_binary_skin = is_binary_skin
-                    self.idx_mapping = idx_mapping
-                def __len__(self):
-                    return len(self.indices)
-                def __getitem__(self, idx):
-                    real_idx = self.indices[idx]
-                    img, label = self.ds[real_idx]
-                    if self.is_binary_skin:
-                        label = self.idx_mapping[label]
-                    return img, label, 1
+                class WrappedImageFolder(Dataset):
+                    def __init__(self, ds, indices, is_binary_skin, idx_mapping):
+                        self.ds = ds
+                        self.indices = indices
+                        self.is_binary_skin = is_binary_skin
+                        self.idx_mapping = idx_mapping
+                    def __len__(self):
+                        return len(self.indices)
+                    def __getitem__(self, idx):
+                        real_idx = self.indices[idx]
+                        img, label = self.ds[real_idx]
+                        if self.is_binary_skin:
+                            label = self.idx_mapping[label]
+                        return img, label, "unknown"
             
-            external_ds = WrappedImageFolder(base_ds, indices, is_binary_skin, idx_mapping)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load ImageFolder from {args.custom_image_folder}. Error: {e}")
+                external_ds = WrappedImageFolder(base_ds, indices, is_binary_skin, idx_mapping)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load ImageFolder from {args.custom_image_folder}. Error: {e}")
             
     elif not args.fitzpatrick_csv and not args.pad_ufes_csv:
         print("\n" + "!" * 80)
@@ -533,9 +798,9 @@ def main():
         unc = compute_uncertainties(outputs)
         probs = unc["alpha"] / unc["S"]
         
-        targets_all.append(targets.numpy())
+        targets_all.append(batch_to_numpy(targets))
         probs_all.append(probs.detach().cpu().numpy())
-        skin_types_all.append(skin_types.numpy())
+        skin_types_all.append(batch_to_numpy(skin_types))
         
     y_true = np.concatenate(targets_all)
     probs = np.concatenate(probs_all, axis=0)
@@ -606,6 +871,26 @@ def main():
     
     ind_metrics["knn_ood"] = score_knn(ind_test[best_vim_layer], knn_ref_features, k=20)
     ood_metrics["knn_ood"] = score_knn(ood_test[best_vim_layer], knn_ref_features, k=20)
+
+    cal_knn_by_layer = {}
+    ind_knn_rank_layers = []
+    ood_knn_rank_layers = []
+    cal_knn_rank_layers = []
+    for layer, ref_features in knn_ref_features_by_layer.items():
+        cal_scores = score_knn(cal_features_dict[layer], ref_features, k=20)
+        ind_scores = score_knn(ind_test[layer], ref_features, k=20)
+        ood_scores = score_knn(ood_test[layer], ref_features, k=20)
+        cal_knn_by_layer[layer] = cal_scores
+        ind_metrics[f"knn_{layer}"] = ind_scores
+        ood_metrics[f"knn_{layer}"] = ood_scores
+        cal_rank = get_percentile_ranks(cal_scores, cal_scores)
+        cal_knn_rank_layers.append(cal_rank)
+        ind_knn_rank_layers.append(get_percentile_ranks(ind_scores, cal_scores))
+        ood_knn_rank_layers.append(get_percentile_ranks(ood_scores, cal_scores))
+
+    cal_knn_multi_rank = np.mean(cal_knn_rank_layers, axis=0)
+    ind_metrics["knn_multi_rank"] = np.mean(ind_knn_rank_layers, axis=0)
+    ood_metrics["knn_multi_rank"] = np.mean(ood_knn_rank_layers, axis=0)
     
     # 5.5 Backward compatible Fusions
     z_params = {}
@@ -646,6 +931,16 @@ def main():
     ood_metrics["fusion_rank"] = 0.5 * get_percentile_ranks(ood_metrics["vim"], cal_vim) + \
                                  0.3 * get_percentile_ranks(ood_metrics["mahalanobis_multi"], cal_mahal_multi) + \
                                  0.2 * get_percentile_ranks(ood_metrics["knn_ood"], cal_knn)
+
+    # Pre-specified stronger fusion for external OOD: favor multi-layer KNN, then ViM,
+    # then multi-layer Mahalanobis. Weights are fixed a priori and do not use PAD labels.
+    ind_metrics["fusion_rank_strong"] = 0.45 * get_percentile_ranks(ind_metrics["knn_multi_rank"], cal_knn_multi_rank) + \
+                                        0.35 * get_percentile_ranks(ind_metrics["vim"], cal_vim) + \
+                                        0.20 * get_percentile_ranks(ind_metrics["mahalanobis_multi"], cal_mahal_multi)
+
+    ood_metrics["fusion_rank_strong"] = 0.45 * get_percentile_ranks(ood_metrics["knn_multi_rank"], cal_knn_multi_rank) + \
+                                        0.35 * get_percentile_ranks(ood_metrics["vim"], cal_vim) + \
+                                        0.20 * get_percentile_ranks(ood_metrics["mahalanobis_multi"], cal_mahal_multi)
                                  
     from sklearn.metrics import roc_auc_score, average_precision_score
     ood_results = {}
@@ -704,7 +999,7 @@ def main():
         print(f"  - AUROC:                  N/A (Skipped - non-binary/partition external dataset)")
         print(f"  - Average Precision (AP): N/A (Skipped - non-binary/partition external dataset)")
         
-    print(f"Fairness Evaluation (Fitzpatrick skin subgroups):")
+    print(f"Fairness Evaluation (external metadata subgroups):")
     if is_binary_skin:
         print(f"  - Equalized Odds (EOM) Gap: {eom_gap:.4f}")
     else:
@@ -719,9 +1014,21 @@ def main():
     print("="*80)
     
     results = {
+        "seed": int(args.seed),
+        "split_seed": int(args.split_seed),
         "classification": metrics if is_binary_skin else "N/A",
         "fairness": {"eom_gap": eom_gap if is_binary_skin else "N/A"},
         "ood_detection_metrics": ood_results,
+        "external_dataset": {
+            "path": args.custom_image_folder,
+            "pad_ufes_csv": args.pad_ufes_csv,
+            "pad_ufes_partition": args.pad_ufes_partition,
+            "metadata_loader": isinstance(external_ds, PADUFES20MetadataDataset),
+            "image_column": getattr(external_ds, "image_col", None),
+            "diagnostic_column": getattr(external_ds, "diagnostic_col", None),
+            "fairness_group_column": getattr(external_ds, "subgroup_col", None),
+            "num_external_samples": len(external_ds),
+        },
         "best_hyperparams": {
             "vim_layer": best_vim_layer,
             "vim_pca_dim": best_vim_num_comp,
@@ -730,10 +1037,16 @@ def main():
     }
     
     out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
-    summary_path = out_dir / "paper_experiment_outputs" / "external_validation_summary.json"
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_dir = out_dir / "paper_experiment_outputs" / "external_validation"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    group_name = str(getattr(external_ds, "subgroup_col", args.fairness_group) or "unknown").replace("/", "_")
+    partition_name = str(args.pad_ufes_partition or "all").replace("/", "_")
+    summary_path = summary_dir / f"external_validation_seed_{args.seed}_{partition_name}_{group_name}.json"
+    legacy_path = out_dir / "paper_experiment_outputs" / "external_validation_summary.json"
     summary_path.write_text(json.dumps(json_safe(results), indent=2), encoding="utf-8")
+    legacy_path.write_text(json.dumps(json_safe(results), indent=2), encoding="utf-8")
     print(f"Summary written to: {summary_path}")
+    print(f"Latest-run compatibility summary written to: {legacy_path}")
 
 
 if __name__ == "__main__":
