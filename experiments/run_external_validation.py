@@ -133,7 +133,6 @@ def extract_all_features_and_logits(model, loader, device, limit_batches=None, c
                 inputs = torch.clamp(inputs, 0.0, 1.0)
                 
             # Forward pass
-            outputs = model(inputs)
             # Since model.backbone output is penultimate features, logits are:
             pen_feat = model.backbone(inputs)
             logits = model.fc[0](pen_feat)
