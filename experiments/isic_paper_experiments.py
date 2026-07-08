@@ -1546,6 +1546,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             log_every=args.log_every,
             verbose_structural_logs=args.verbose_structural_logs,
             structural_proxy_batches=args.structural_proxy_batches,
+            structural_proxy_min_classes=args.structural_proxy_min_classes,
+            efl_gamma_final=args.efl_gamma_final,
             ood_loader=ood_loader,
             lambda_ood=args.lambda_ood,
             ood_start_epoch=args.ood_start_epoch,
@@ -1747,6 +1749,8 @@ def main() -> int:
     parser.add_argument("--log_every", type=int, default=5, help="Print training progress every N epochs.")
     parser.add_argument("--verbose_structural_logs", action="store_true", help="Print detailed per-layer structural update diagnostics.")
     parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
+    parser.add_argument("--structural_proxy_min_classes", type=int, default=2, help="Minimum distinct target classes requested before caching a GUDS structural proxy batch.")
+    parser.add_argument("--efl_gamma_final", type=float, default=0.0, help="Final EFL focal gamma after cosine decay; keep 0.0 for the reported clean default.")
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--outlier_exposure", type=str, nargs="?", const="auto", default=None, help="Enable Outlier Exposure. Pass path to custom folder, or leave blank/'auto' to auto-detect skin-cancer folder.")

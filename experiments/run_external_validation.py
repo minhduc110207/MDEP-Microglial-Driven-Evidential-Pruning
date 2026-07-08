@@ -79,6 +79,7 @@ class PADUFES20MetadataDataset(Dataset):
         "ack", "akiec", "actinic keratosis", "nev", "nevus", "nevi",
         "sek", "seborrheic keratosis", "benign"
     }
+    UNKNOWN_VALUES = {"", "unk", "unknown", "nan", "none", "null"}
 
     def __init__(
         self,
@@ -94,11 +95,10 @@ class PADUFES20MetadataDataset(Dataset):
         self.transform = transform
         self.df = pd.read_csv(self.metadata_csv)
 
-        image_root = self.root / partition if partition else self.root
-        if not image_root.exists():
-            raise FileNotFoundError(f"PAD-UFES-20 partition not found: {image_root}")
+        image_roots = self._resolve_image_roots(partition)
+        self.partition_roots = image_roots
 
-        self.file_lookup = self._build_file_lookup(image_root)
+        self.file_lookup = self._build_file_lookup(image_roots)
         self.image_col = self._infer_image_column()
         self.diagnostic_col = self._infer_column(self.DIAGNOSTIC_COLUMNS)
         if self.diagnostic_col is None:
@@ -111,19 +111,37 @@ class PADUFES20MetadataDataset(Dataset):
         self.samples = self._build_samples()
         if not self.samples:
             raise ValueError(
-                f"No metadata rows matched image files under {image_root}. "
+                f"No metadata rows matched image files under {', '.join(str(p) for p in image_roots)}. "
                 f"image_col={self.image_col}, diagnostic_col={self.diagnostic_col}"
             )
 
         self.targets = np.array([s[1] for s in self.samples], dtype=np.int64)
         self.subgroups = np.array([s[2] for s in self.samples], dtype=object)
+        self.matched_diagnostic_counts = dict(self._count_matched_diagnostics())
+        self.metadata_diagnostic_counts = dict(self._count_metadata_diagnostics())
 
-    def _build_file_lookup(self, image_root: Path) -> dict[str, Path]:
+    def _resolve_image_roots(self, partition: str | None) -> list[Path]:
+        if not partition or partition.lower() == "all":
+            roots = sorted(p for p in self.root.glob("imgs_part_*") if p.is_dir())
+            if not roots:
+                roots = [self.root]
+        else:
+            roots = [self.root / p.strip() for p in str(partition).split(",") if p.strip()]
+        missing = [p for p in roots if not p.exists()]
+        if missing:
+            raise FileNotFoundError(
+                "PAD-UFES-20 partition path(s) not found: "
+                + ", ".join(str(p) for p in missing)
+            )
+        return roots
+
+    def _build_file_lookup(self, image_roots: list[Path]) -> dict[str, Path]:
         lookup = {}
-        for path in image_root.rglob("*"):
-            if path.is_file() and path.suffix.lower() in self.IMAGE_EXTENSIONS:
-                lookup[path.name.lower()] = path
-                lookup[path.stem.lower()] = path
+        for image_root in image_roots:
+            for path in image_root.rglob("*"):
+                if path.is_file() and path.suffix.lower() in self.IMAGE_EXTENSIONS:
+                    lookup[path.name.lower()] = path
+                    lookup[path.stem.lower()] = path
         return lookup
 
     def _infer_column(self, candidates: list[str]) -> str | None:
@@ -223,6 +241,25 @@ class PADUFES20MetadataDataset(Dataset):
             return 0
         return None
 
+    def _count_metadata_diagnostics(self):
+        counts = {}
+        for value in self.df[self.diagnostic_col].fillna("unknown"):
+            key = str(value).strip() or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _count_matched_diagnostics(self):
+        counts = {}
+        for _, row in self.df.iterrows():
+            if self._match_row_image_path(row) is None:
+                continue
+            target = self._diagnostic_to_binary(row[self.diagnostic_col])
+            if target is None:
+                continue
+            key = str(row[self.diagnostic_col]).strip() or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
     def _select_subgroup_column(self, requested: str | None) -> str | None:
         if requested and requested.lower() != "auto":
             by_lower = {c.lower(): c for c in self.df.columns}
@@ -239,6 +276,9 @@ class PADUFES20MetadataDataset(Dataset):
             return "unknown"
         value = row[self.subgroup_col]
         col = self.subgroup_col.lower()
+        text = str(value).strip()
+        if text.lower() in self.UNKNOWN_VALUES:
+            return "unknown"
         if "age" in col:
             try:
                 age = float(value)
@@ -249,7 +289,24 @@ class PADUFES20MetadataDataset(Dataset):
                 return "age_60_plus"
             except Exception:
                 pass
-        return f"{self.subgroup_col}={str(value).strip()}"
+        if col in {"fitzpatrick", "fitspatrick", "skin_type"}:
+            try:
+                skin_type = int(float(text))
+                if skin_type <= 2:
+                    return "fitz_1_2"
+                if skin_type <= 4:
+                    return "fitz_3_4"
+                return "fitz_5_6"
+            except Exception:
+                return "unknown"
+        if col in {"gender", "sex"}:
+            value_norm = text.lower()
+            if value_norm.startswith("f"):
+                return "gender=female"
+            if value_norm.startswith("m"):
+                return "gender=male"
+            return "unknown"
+        return f"{self.subgroup_col}={text}"
 
     def _build_samples(self):
         samples = []
@@ -280,42 +337,87 @@ class PADUFES20MetadataDataset(Dataset):
         return image, target, subgroup
 
 
-def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float:
-    """
-    Computes the Equalized Odds Metric (EOM) gap.
-    EOM Gap = max( |TPR_g1 - TPR_g2| + |FPR_g1 - FPR_g2| ) across subgroups.
-    """
-    unique_groups = np.unique(subgroups)
-    tprs = {}
-    fprs = {}
-    
-    for g in unique_groups:
+def equalized_odds_report(y_true, y_pred, subgroups, min_group_size: int = 1) -> dict:
+    """Compute Equalized Odds only when subgroup/class support is valid."""
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+    subgroups = np.asarray(subgroups).astype(str)
+    min_group_size = max(1, int(min_group_size))
+
+    group_stats = {}
+    for g in sorted(np.unique(subgroups)):
         mask = subgroups == g
-        if not mask.any():
-            continue
         yt = y_true[mask]
         yp = y_pred[mask]
-        
-        num_pos = (yt == 1).sum()
-        num_neg = (yt == 0).sum()
-        
-        if num_pos > 0:
-            tp = ((yt == 1) & (yp == 1)).sum()
-            tprs[g] = float(tp / num_pos)
-            
-        if num_neg > 0:
-            fp = ((yt == 0) & (yp == 1)).sum()
-            fprs[g] = float(fp / num_neg)
-            
-    if len(tprs) < 2 or len(fprs) < 2:
-        return 0.0
-        
-    tpr_vals = list(tprs.values())
-    fpr_vals = list(fprs.values())
-    
+        num_pos = int((yt == 1).sum())
+        num_neg = int((yt == 0).sum())
+        tp = int(((yt == 1) & (yp == 1)).sum())
+        fp = int(((yt == 0) & (yp == 1)).sum())
+        group_stats[str(g)] = {
+            "n": int(mask.sum()),
+            "positive": num_pos,
+            "negative": num_neg,
+            "predicted_positive": int((yp == 1).sum()),
+            "tpr": float(tp / num_pos) if num_pos > 0 else None,
+            "fpr": float(fp / num_neg) if num_neg > 0 else None,
+            "is_unknown": str(g).lower() == "unknown",
+        }
+
+    non_unknown_groups = {
+        g: s for g, s in group_stats.items()
+        if not s["is_unknown"] and s["n"] >= min_group_size
+    }
+    counts = binary_class_counts(y_true)
+    report = {
+        "eom_gap": None,
+        "status": "ok",
+        "class_counts": counts,
+        "min_group_size": min_group_size,
+        "group_stats": group_stats,
+        "eligible_groups": [],
+    }
+
+    if counts["negative"] == 0 or counts["positive"] == 0:
+        report["status"] = "undefined_single_class_external_labels"
+        return report
+    if len(non_unknown_groups) < 2:
+        report["status"] = "undefined_less_than_two_observed_subgroups"
+        return report
+
+    eligible = {
+        g: s for g, s in non_unknown_groups.items()
+        if s["positive"] > 0 and s["negative"] > 0
+    }
+    report["eligible_groups"] = sorted(eligible)
+    if len(eligible) < 2:
+        report["status"] = "undefined_missing_positive_or_negative_by_subgroup"
+        return report
+
+    tpr_vals = [s["tpr"] for s in eligible.values()]
+    fpr_vals = [s["fpr"] for s in eligible.values()]
     tpr_gap = max(tpr_vals) - min(tpr_vals)
     fpr_gap = max(fpr_vals) - min(fpr_vals)
-    return tpr_gap + fpr_gap
+    report["eom_gap"] = float(tpr_gap + fpr_gap)
+    report["tpr_gap"] = float(tpr_gap)
+    report["fpr_gap"] = float(fpr_gap)
+    return report
+
+
+def compute_equalized_odds_gap(y_true, y_pred, subgroups) -> float | None:
+    return equalized_odds_report(y_true, y_pred, subgroups)["eom_gap"]
+
+
+def binary_class_counts(y_true: np.ndarray) -> dict[str, int]:
+    y = np.asarray(y_true).astype(int)
+    return {
+        "negative": int((y == 0).sum()),
+        "positive": int((y == 1).sum()),
+    }
+
+
+def has_both_binary_classes(y_true: np.ndarray) -> bool:
+    counts = binary_class_counts(y_true)
+    return counts["negative"] > 0 and counts["positive"] > 0
 
 
 def batch_to_numpy(batch_value):
@@ -581,6 +683,9 @@ def main():
     parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")
     parser.add_argument("--pad_ufes_partition", type=str, default="imgs_part_3", help="PAD-UFES-20 image partition used for external testing")
     parser.add_argument("--fairness_group", type=str, default="auto", help="PAD-UFES-20 subgroup column for Equalized Odds, or 'auto'")
+    parser.add_argument("--fairness_min_group_size", type=int, default=1, help="Minimum non-unknown samples required for a subgroup to be considered in Equalized Odds.")
+    parser.add_argument("--knn_primary_layer", choices=["layer3", "layer4", "penultimate"], default="layer3", help="Fixed feature layer used for the primary KNN OOD score.")
+    parser.add_argument("--primary_ood_score", default="knn_layer3", help="Metric key treated as the primary OOD result in the JSON summary; use 'auto' for the fixed KNN primary layer.")
     parser.add_argument("--seed", type=int, default=42, help="Model checkpoint seed folder")
     parser.add_argument("--split_seed", type=int, default=42, help="Fixed split seed for patient splits (must match training)")
     parser.add_argument("--cpu", action="store_true")
@@ -682,8 +787,11 @@ def main():
     for layer in feature_layers:
         mahal_params[layer] = fit_mahalanobis_params(cal_features_dict[layer])
         
-    # 2.3 Fit KNN reference features
-    knn_ref_features = cal_features_dict[best_vim_layer]
+    # 2.3 Fit KNN reference features. KNN is tied to a fixed layer rather than
+    # the best ViM layer because the ViM pseudo-OOD selection is not a stable
+    # proxy for external PAD-UFES-20 separation across seeds.
+    knn_primary_layer = args.knn_primary_layer
+    knn_ref_features = cal_features_dict[knn_primary_layer]
     knn_ref_features_by_layer = {layer: cal_features_dict[layer] for layer in ["layer3", "layer4", "penultimate"]}
     
     # 2.4 Fit ReAct threshold (95th percentile of calibration activations)
@@ -719,10 +827,13 @@ def main():
             print("[INFO] Loaded PAD-UFES-20 with metadata.csv.")
             print(f"[INFO] Metadata CSV: {metadata_csv}")
             print(f"[INFO] Partition: {args.pad_ufes_partition}")
+            print(f"[INFO] Image roots: {[str(p) for p in external_ds.partition_roots]}")
             print(f"[INFO] Image column: {external_ds.image_col}")
             print(f"[INFO] Diagnostic column: {external_ds.diagnostic_col}")
             print(f"[INFO] Fairness subgroup column: {external_ds.subgroup_col or 'unknown'}")
             print(f"[INFO] Matched samples: {len(external_ds)} (malignant={n_pos}, non_malignant={n_neg})")
+            print(f"[INFO] Metadata diagnostic counts: {external_ds.metadata_diagnostic_counts}")
+            print(f"[INFO] Matched diagnostic counts: {external_ds.matched_diagnostic_counts}")
             print(f"[INFO] Skipped metadata rows: missing_file={external_ds.skipped_missing_file}, unknown_label={external_ds.skipped_unknown_label}")
             print(f"[INFO] Subgroups: {unique_groups[:12]}{' ...' if len(unique_groups) > 12 else ''}")
         else:
@@ -806,13 +917,39 @@ def main():
     probs = np.concatenate(probs_all, axis=0)
     y_pred = probs.argmax(axis=1)
     subgroups = np.concatenate(skin_types_all)
+    external_class_counts = binary_class_counts(y_true)
+    external_has_both_classes = has_both_binary_classes(y_true)
     
     if is_binary_skin:
         metrics = binary_image_anomaly_metrics(y_true, probs)
-        eom_gap = compute_equalized_odds_gap(y_true, y_pred, subgroups)
+        metrics["class_counts"] = external_class_counts
+        classification_status = "ok" if external_has_both_classes else "undefined_single_class_external_labels"
+        fairness_report = equalized_odds_report(
+            y_true,
+            y_pred,
+            subgroups,
+            min_group_size=args.fairness_min_group_size,
+        )
+        eom_gap = fairness_report["eom_gap"]
+        eom_status = fairness_report["status"]
+        if not external_has_both_classes:
+            print(
+                "[WARN] External classification labels contain only one class: "
+                f"{external_class_counts}. AUROC/AP and Equalized Odds are undefined for this partition."
+            )
+        if eom_gap is None:
+            print(f"[WARN] Equalized Odds is not reportable: {eom_status}.")
     else:
         metrics = None
         eom_gap = None
+        classification_status = "skipped_non_binary_external_dataset"
+        eom_status = "skipped_non_binary_external_dataset"
+        fairness_report = {
+            "eom_gap": None,
+            "status": eom_status,
+            "group_stats": {},
+            "eligible_groups": [],
+        }
     
     # 5. Advanced Out-of-Distribution (OOD) Detection Evaluation
     print("\nEvaluating Out-of-Distribution (OOD) Detection using various uncertainty scores...")
@@ -869,8 +1006,12 @@ def main():
     ind_metrics["mahalanobis_multi"] = np.mean(multi_m_ind, axis=0)
     ood_metrics["mahalanobis_multi"] = np.mean(multi_m_ood, axis=0)
     
-    ind_metrics["knn_ood"] = score_knn(ind_test[best_vim_layer], knn_ref_features, k=20)
-    ood_metrics["knn_ood"] = score_knn(ood_test[best_vim_layer], knn_ref_features, k=20)
+    ind_metrics["knn_ood"] = score_knn(ind_test[knn_primary_layer], knn_ref_features, k=20)
+    ood_metrics["knn_ood"] = score_knn(ood_test[knn_primary_layer], knn_ref_features, k=20)
+    if best_vim_layer != knn_primary_layer:
+        best_vim_knn_ref = cal_features_dict[best_vim_layer]
+        ind_metrics["knn_best_vim_layer"] = score_knn(ind_test[best_vim_layer], best_vim_knn_ref, k=20)
+        ood_metrics["knn_best_vim_layer"] = score_knn(ood_test[best_vim_layer], best_vim_knn_ref, k=20)
 
     cal_knn_by_layer = {}
     ind_knn_rank_layers = []
@@ -922,7 +1063,7 @@ def main():
         (score_mahalanobis(cal_features_dict[l], mahal_params[l]) - np.mean(score_mahalanobis(cal_features_dict[l], mahal_params[l]))) / (np.std(score_mahalanobis(cal_features_dict[l], mahal_params[l])) + 1e-8)
         for l in ["layer3", "layer4", "penultimate"]
     ], axis=0)
-    cal_knn = score_knn(cal_features_dict[best_vim_layer], knn_ref_features, k=20)
+    cal_knn = score_knn(cal_features_dict[knn_primary_layer], knn_ref_features, k=20)
     
     ind_metrics["fusion_rank"] = 0.5 * get_percentile_ranks(ind_metrics["vim"], cal_vim) + \
                                  0.3 * get_percentile_ranks(ind_metrics["mahalanobis_multi"], cal_mahal_multi) + \
@@ -941,6 +1082,13 @@ def main():
     ood_metrics["fusion_rank_strong"] = 0.45 * get_percentile_ranks(ood_metrics["knn_multi_rank"], cal_knn_multi_rank) + \
                                         0.35 * get_percentile_ranks(ood_metrics["vim"], cal_vim) + \
                                         0.20 * get_percentile_ranks(ood_metrics["mahalanobis_multi"], cal_mahal_multi)
+
+    primary_knn_key = f"knn_{knn_primary_layer}"
+    primary_cal_knn = cal_knn_by_layer[knn_primary_layer]
+    ind_metrics["fusion_rank_stable"] = 0.70 * get_percentile_ranks(ind_metrics[primary_knn_key], primary_cal_knn) + \
+                                        0.30 * get_percentile_ranks(ind_metrics["mahalanobis_multi"], cal_mahal_multi)
+    ood_metrics["fusion_rank_stable"] = 0.70 * get_percentile_ranks(ood_metrics[primary_knn_key], primary_cal_knn) + \
+                                        0.30 * get_percentile_ranks(ood_metrics["mahalanobis_multi"], cal_mahal_multi)
                                  
     from sklearn.metrics import roc_auc_score, average_precision_score
     ood_results = {}
@@ -987,25 +1135,44 @@ def main():
             "bal_aupr_mean": float(np.mean(bal_auprs)),
             "bal_aupr_std": float(np.std(bal_auprs))
         }
+
+    primary_ood_score = primary_knn_key if args.primary_ood_score == "auto" else args.primary_ood_score
+    if primary_ood_score not in ood_results:
+        fallback = primary_knn_key if primary_knn_key in ood_results else "knn_ood"
+        print(f"[WARN] Requested primary OOD score '{primary_ood_score}' not found; using '{fallback}'.")
+        primary_ood_score = fallback
+    primary_ood_result = ood_results[primary_ood_score]
         
     print("\n" + "="*80)
     print("Domain Shift / External Validation Summary")
     print("="*80)
     print(f"Classification Performance under Domain Shift:")
     if is_binary_skin:
-        print(f"  - AUROC:                  {metrics['image_auroc']:.4f}")
-        print(f"  - Average Precision (AP): {metrics['image_ap']:.4f}")
+        print(f"  - External class counts:  neg={external_class_counts['negative']} pos={external_class_counts['positive']}")
+        if external_has_both_classes:
+            print(f"  - AUROC:                  {metrics['image_auroc']:.4f}")
+            print(f"  - Average Precision (AP): {metrics['image_ap']:.4f}")
+        else:
+            print("  - AUROC:                  N/A (single-class external labels)")
+            print("  - Average Precision (AP): N/A (single-class external labels)")
     else:
         print(f"  - AUROC:                  N/A (Skipped - non-binary/partition external dataset)")
         print(f"  - Average Precision (AP): N/A (Skipped - non-binary/partition external dataset)")
         
     print(f"Fairness Evaluation (external metadata subgroups):")
-    if is_binary_skin:
+    if is_binary_skin and eom_gap is not None:
         print(f"  - Equalized Odds (EOM) Gap: {eom_gap:.4f}")
+    elif is_binary_skin:
+        print(f"  - Equalized Odds (EOM) Gap: N/A ({eom_status})")
     else:
         print(f"  - Equalized Odds (EOM) Gap: N/A (Skipped - non-binary/partition external dataset)")
         
     print(f"\nOOD Detection Performance (Full vs Balanced):")
+    print(
+        f"Primary OOD score: {primary_ood_score} | "
+        f"Full AUROC={primary_ood_result['full_auroc']:.4f} | "
+        f"Balanced AUROC={primary_ood_result['bal_auroc_mean']:.4f} +/- {primary_ood_result['bal_auroc_std']:.4f}"
+    )
     print(f"{'Method':<20} | {'Full AUROC':<10} | {'Full AUPR':<10} | {'Balanced AUROC (mean±std)':<26} | {'Balanced AUPR (mean±std)'}")
     print("-"*110)
     for key in sorted(ood_results.keys()):
@@ -1017,21 +1184,36 @@ def main():
         "seed": int(args.seed),
         "split_seed": int(args.split_seed),
         "classification": metrics if is_binary_skin else "N/A",
-        "fairness": {"eom_gap": eom_gap if is_binary_skin else "N/A"},
+        "classification_status": classification_status,
+        "fairness": {
+            **fairness_report,
+            "eom_gap": eom_gap if is_binary_skin else None,
+            "status": eom_status,
+        },
+        "primary_ood": {
+            "score": primary_ood_score,
+            "result": primary_ood_result,
+        },
         "ood_detection_metrics": ood_results,
         "external_dataset": {
             "path": args.custom_image_folder,
             "pad_ufes_csv": args.pad_ufes_csv,
             "pad_ufes_partition": args.pad_ufes_partition,
+            "pad_ufes_partition_roots": [str(p) for p in getattr(external_ds, "partition_roots", [])],
             "metadata_loader": isinstance(external_ds, PADUFES20MetadataDataset),
             "image_column": getattr(external_ds, "image_col", None),
             "diagnostic_column": getattr(external_ds, "diagnostic_col", None),
+            "metadata_diagnostic_counts": getattr(external_ds, "metadata_diagnostic_counts", None),
+            "matched_diagnostic_counts": getattr(external_ds, "matched_diagnostic_counts", None),
             "fairness_group_column": getattr(external_ds, "subgroup_col", None),
             "num_external_samples": len(external_ds),
+            "class_counts": external_class_counts if is_binary_skin else None,
         },
         "best_hyperparams": {
             "vim_layer": best_vim_layer,
             "vim_pca_dim": best_vim_num_comp,
+            "knn_primary_layer": knn_primary_layer,
+            "primary_ood_score": primary_ood_score,
             "react_threshold": float(react_threshold)
         }
     }

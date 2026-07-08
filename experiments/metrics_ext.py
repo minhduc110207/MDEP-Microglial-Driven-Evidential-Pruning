@@ -47,6 +47,11 @@ def _safe_metric(fn, default: float = float("nan")) -> float:
         return default
 
 
+def _has_both_binary_classes(y_true: np.ndarray) -> bool:
+    labels = set(np.asarray(y_true).astype(int).tolist())
+    return 0 in labels and 1 in labels
+
+
 def _integrate_trapezoid(y: np.ndarray, x: np.ndarray) -> float:
     integrate = getattr(np, "trapezoid", None)
     if integrate is None:
@@ -281,18 +286,22 @@ def binary_image_anomaly_metrics(
     confidences = probs.max(axis=1)
     correct = (y_pred_default == y_true).astype(float)
     ece_default = _ece(confidences, correct)
+    has_both_classes = _has_both_binary_classes(y_true)
 
     metrics: dict[str, float] = {
+        f"{prefix}num_negative": int((y_true == 0).sum()),
+        f"{prefix}num_positive": int((y_true == 1).sum()),
         f"{prefix}nll": _safe_metric(lambda: log_loss(y_true, probs, labels=[0, 1])),
         f"{prefix}brier_pos": _safe_metric(lambda: brier_score_loss(y_true, pos)),
-        f"{prefix}image_auroc": _safe_metric(lambda: roc_auc_score(y_true, pos)),
-        f"{prefix}image_ap": _safe_metric(lambda: average_precision_score(y_true, pos)),
+        f"{prefix}image_auroc": _safe_metric(lambda: roc_auc_score(y_true, pos)) if has_both_classes else float("nan"),
+        f"{prefix}image_ap": _safe_metric(lambda: average_precision_score(y_true, pos)) if has_both_classes else float("nan"),
         f"{prefix}accuracy_default": _safe_metric(lambda: accuracy_score(y_true, y_pred_default)),
-        f"{prefix}balanced_accuracy_default": _safe_metric(lambda: balanced_accuracy_score(y_true, y_pred_default)),
+        f"{prefix}balanced_accuracy_default": _safe_metric(lambda: balanced_accuracy_score(y_true, y_pred_default)) if has_both_classes else float("nan"),
         f"{prefix}precision_default": _safe_metric(lambda: precision_score(y_true, y_pred_default, zero_division=0)),
         f"{prefix}recall_default": _safe_metric(lambda: recall_score(y_true, y_pred_default, zero_division=0)),
         f"{prefix}f1_default": _safe_metric(lambda: f1_score(y_true, y_pred_default, zero_division=0)),
         f"{prefix}ece_default": float(ece_default),
+        f"{prefix}single_class_warning": None if has_both_classes else "Only one class is present in y_true; AUROC/AP/balanced accuracy/F1-threshold metrics are undefined.",
     }
 
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred_default, labels=[0, 1]).ravel()
@@ -300,13 +309,17 @@ def binary_image_anomaly_metrics(
     metrics[f"{prefix}false_positive_rate_default"] = float(fp / max(fp + tn, 1))
     metrics[f"{prefix}false_negative_rate_default"] = float(fn / max(fn + tp, 1))
 
-    precision, recall, pr_thresholds = precision_recall_curve(y_true, pos)
-    f1_values = 2.0 * precision * recall / np.maximum(precision + recall, 1e-12)
-    best_idx = int(np.nanargmax(f1_values)) if len(f1_values) else 0
-    metrics[f"{prefix}f1_max"] = float(f1_values[best_idx]) if len(f1_values) else float("nan")
-    if len(pr_thresholds):
-        threshold_idx = min(best_idx, len(pr_thresholds) - 1)
-        metrics[f"{prefix}threshold_f1_max"] = float(pr_thresholds[threshold_idx])
+    if has_both_classes:
+        precision, recall, pr_thresholds = precision_recall_curve(y_true, pos)
+        f1_values = 2.0 * precision * recall / np.maximum(precision + recall, 1e-12)
+        best_idx = int(np.nanargmax(f1_values)) if len(f1_values) else 0
+        metrics[f"{prefix}f1_max"] = float(f1_values[best_idx]) if len(f1_values) else float("nan")
+        if len(pr_thresholds):
+            threshold_idx = min(best_idx, len(pr_thresholds) - 1)
+            metrics[f"{prefix}threshold_f1_max"] = float(pr_thresholds[threshold_idx])
+    else:
+        metrics[f"{prefix}f1_max"] = float("nan")
+        metrics[f"{prefix}threshold_f1_max"] = float("nan")
 
     metrics.update(failure_detection_metrics(y_true, y_pred_default, confidences, prefix=prefix))
     return metrics
