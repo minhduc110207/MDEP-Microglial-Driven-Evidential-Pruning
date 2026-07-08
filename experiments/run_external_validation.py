@@ -29,6 +29,7 @@ from guds_edl_core import (
 )
 from experiments.generalization_paper_suite import EvidenceResNet
 from experiments.isic_paper_experiments import (
+    attach_ood_projection_head,
     seed_everything,
     collect_evidential_outputs,
     json_safe,
@@ -103,6 +104,8 @@ def extract_all_features_and_logits(model, loader, device, limit_batches=None, c
     entropy_all = []
     max_conf_all = []
     energy_all = []
+    ood_projection_all = []
+    ood_domain_all = []
     
     hooks = []
     
@@ -139,6 +142,10 @@ def extract_all_features_and_logits(model, loader, device, limit_batches=None, c
             evidence = model.fc[1](logits)
             
             logits_all.append(logits.cpu().numpy())
+            if hasattr(model, "ood_projection_head"):
+                projection, domain_logits = model.ood_projection_head(pen_feat.float(), return_projection=True)
+                ood_projection_all.append(projection.cpu().numpy())
+                ood_domain_all.append(domain_logits.cpu().numpy().reshape(-1))
             
             unc = compute_uncertainties(evidence)
             alpha = unc["alpha"]
@@ -156,7 +163,7 @@ def extract_all_features_and_logits(model, loader, device, limit_batches=None, c
     for h in hooks:
         h.remove()
         
-    return {
+    result = {
         "layer3": np.concatenate(features_layer3, axis=0),
         "layer4": np.concatenate(features_layer4, axis=0),
         "penultimate": np.concatenate(features_penultimate, axis=0),
@@ -167,6 +174,10 @@ def extract_all_features_and_logits(model, loader, device, limit_batches=None, c
         "max_conf": np.concatenate(max_conf_all),
         "energy": np.concatenate(energy_all)
     }
+    if ood_projection_all:
+        result["ood_projection"] = np.concatenate(ood_projection_all, axis=0)
+        result["ood_head_domain"] = np.concatenate(ood_domain_all)
+    return result
 
 
 def fit_vim_params(features, logits, num_components=128):
@@ -315,6 +326,20 @@ def get_percentile_ranks(scores, ref_scores):
     return np.array(ranks)
 
 
+def load_state_with_optional_ood_head(model, checkpoint_path, device):
+    state = torch.load(checkpoint_path, map_location=device)
+    state_dict = state.get("model_state_dict", state) if isinstance(state, dict) else state
+    if any(str(k).startswith("ood_projection_head.") for k in state_dict.keys()):
+        attach_ood_projection_head(model)
+        print("[INFO] Detected detached OOD projection head in checkpoint; enabling projection-head OOD scores.")
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if unexpected:
+        print(f"[WARN] Ignored unexpected checkpoint keys: {unexpected}")
+    missing = [k for k in missing if not k.startswith("ood_projection_head.")]
+    if missing:
+        print(f"[WARN] Missing checkpoint keys: {missing}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Domain Shift & Fairness.")
     parser.add_argument("--model_path", type=str, help="Path to trained model model_state.pth (optional)")
@@ -350,10 +375,10 @@ def main():
     default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds" / f"seed_{args.seed}" / "model_state.pth"
     
     if args.model_path and os.path.exists(args.model_path):
-        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        load_state_with_optional_ood_head(model, args.model_path, device)
         print(f"Loaded trained checkpoint from: {args.model_path}")
     elif default_ckpt.exists():
-        model.load_state_dict(torch.load(default_ckpt, map_location=device))
+        load_state_with_optional_ood_head(model, default_ckpt, device)
         print(f"Loaded trained checkpoint from default path: {default_ckpt}")
     else:
         raise FileNotFoundError(
@@ -371,6 +396,9 @@ def main():
     # Extract calibration features for fitting
     print("\n[INFO] Extracting Calibration set features...")
     cal_features_dict = extract_all_features_and_logits(model, cal_loader, device)
+    feature_layers = ["layer3", "layer4", "penultimate"]
+    if "ood_projection" in cal_features_dict:
+        feature_layers.append("ood_projection")
     
     # 2.1 Grid Search for ViM on validation clean vs pseudo-OOD (corrupted)
     print("\n[INFO] Fitting and Tuning SVD PCA ViM hyperparameters on Validation Split...")
@@ -382,7 +410,7 @@ def main():
     best_vim_layer = None
     best_vim_num_comp = None
     
-    for layer in ["layer3", "layer4", "penultimate"]:
+    for layer in feature_layers:
         max_dim = cal_features_dict[layer].shape[1]
         dims_to_try = [d for d in [32, 64, 128, 256, 512] if d < max_dim]
         for num_comp in dims_to_try:
@@ -412,7 +440,7 @@ def main():
     
     # 2.2 Fit Mahalanobis parameters
     mahal_params = {}
-    for layer in ["layer3", "layer4", "penultimate"]:
+    for layer in feature_layers:
         mahal_params[layer] = fit_mahalanobis_params(cal_features_dict[layer])
         
     # 2.3 Fit KNN reference features
@@ -533,6 +561,9 @@ def main():
     for k in ["vacuity", "ambiguity", "entropy", "max_conf", "energy"]:
         ind_metrics[k] = ind_test[k]
         ood_metrics[k] = ood_test[k]
+    if "ood_head_domain" in ind_test:
+        ind_metrics["ood_head_domain"] = ind_test["ood_head_domain"]
+        ood_metrics["ood_head_domain"] = ood_test["ood_head_domain"]
         
     # 5.2 ReAct output-level scores (threshold-based clipping)
     react_ind = score_react(ind_test["penultimate"], model, react_threshold)
@@ -554,6 +585,11 @@ def main():
     
     ind_metrics["mahalanobis"] = score_mahalanobis(ind_test["penultimate"], mahal_params["penultimate"])
     ood_metrics["mahalanobis"] = score_mahalanobis(ood_test["penultimate"], mahal_params["penultimate"])
+    if "ood_projection" in cal_features_dict:
+        ind_metrics["mahalanobis_ood_projection"] = score_mahalanobis(ind_test["ood_projection"], mahal_params["ood_projection"])
+        ood_metrics["mahalanobis_ood_projection"] = score_mahalanobis(ood_test["ood_projection"], mahal_params["ood_projection"])
+        ind_metrics["knn_ood_projection"] = score_knn(ind_test["ood_projection"], cal_features_dict["ood_projection"], k=20)
+        ood_metrics["knn_ood_projection"] = score_knn(ood_test["ood_projection"], cal_features_dict["ood_projection"], k=20)
     
     multi_m_ind = []
     multi_m_ood = []

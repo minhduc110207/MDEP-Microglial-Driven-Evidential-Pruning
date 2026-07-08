@@ -441,6 +441,34 @@ class ResNetEvidenceModel(nn.Module):
         return self.fc(self.backbone(x))
 
 
+class OODProjectionHead(nn.Module):
+    """Small detached-feature domain head for low-impact Outlier Exposure."""
+
+    def __init__(self, in_features: int, projection_dim: int = 128):
+        super().__init__()
+        self.projector = nn.Sequential(
+            nn.Linear(in_features, projection_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(projection_dim, projection_dim),
+            nn.LayerNorm(projection_dim),
+        )
+        self.domain_classifier = nn.Linear(projection_dim, 1)
+
+    def forward(self, features: torch.Tensor, return_projection: bool = False):
+        projection = F.normalize(self.projector(features), dim=1)
+        domain_logits = self.domain_classifier(projection).squeeze(1)
+        if return_projection:
+            return projection, domain_logits
+        return domain_logits
+
+
+def attach_ood_projection_head(model: nn.Module, projection_dim: int = 128) -> nn.Module:
+    in_features = int(model.fc[0].in_features)
+    if not hasattr(model, "ood_projection_head"):
+        model.ood_projection_head = OODProjectionHead(in_features, projection_dim=projection_dim)
+    return model
+
+
 class FisherEDLLoss(nn.Module):
     def __init__(self, base_loss: nn.Module, fisher_lambda: float = 1e-3):
         super().__init__()
@@ -1225,6 +1253,8 @@ def train_guds(
     validation_callback=None,
     ood_loader=None,
     lambda_ood=0.05,
+    ood_start_epoch=None,
+    ood_loss_target="direct",
 ) -> list[dict[str, float]]:
     warmup_epochs = max(1, int(0.30 * total_epochs))
     criterion = make_loss(
@@ -1256,7 +1286,16 @@ def train_guds(
     trainer = MDEPTrainer(model, optimizer, criterion, total_epochs, warmup_epochs, args=trainer_args, scheduler=scheduler)
     history = []
     for epoch in range(total_epochs):
-        loss = trainer.train_epoch(epoch, train_loader, device, print_interval=200, ood_loader=ood_loader, lambda_ood=lambda_ood)
+        loss = trainer.train_epoch(
+            epoch,
+            train_loader,
+            device,
+            print_interval=200,
+            ood_loader=ood_loader,
+            lambda_ood=lambda_ood,
+            ood_start_epoch=ood_start_epoch,
+            ood_loss_target=ood_loss_target,
+        )
         topo_gamma = float(trainer.step_gamma(epoch))
         efl_gamma = float(getattr(criterion, "gamma", 0.0))
         row = {
@@ -1487,6 +1526,14 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                 print(f"[WARNING] Failed to load custom OE folder: {e}. Outlier Exposure is disabled.")
                 ood_loader = None
 
+    if ood_loader is not None and args.ood_loss_target == "projection":
+        attach_ood_projection_head(model)
+        model.ood_projection_head.to(device)
+        print(
+            "[INFO] Low-impact OE active: training detached OOD projection head only; "
+            "backbone, classifier, and sparse topology are protected from OE gradients."
+        )
+
     if spec.use_mdep_trainer:
         history = train_guds(
             model,
@@ -1501,6 +1548,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             structural_proxy_batches=args.structural_proxy_batches,
             ood_loader=ood_loader,
             lambda_ood=args.lambda_ood,
+            ood_start_epoch=args.ood_start_epoch,
+            ood_loss_target=args.ood_loss_target,
         )
     else:
         history = train_standard(
@@ -1632,6 +1681,11 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "split_seed": args.split_seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
+        "outlier_exposure": args.outlier_exposure,
+        "lambda_ood": args.lambda_ood,
+        "ood_batch_ratio": args.ood_batch_ratio,
+        "ood_start_epoch": args.ood_start_epoch,
+        "ood_loss_target": args.ood_loss_target,
         "temperature": float(temperature),
         "bias": bias.tolist() if bias is not None else None,
         "calibration_bias": bias.tolist() if bias is not None else None,
@@ -1696,8 +1750,15 @@ def main() -> int:
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--outlier_exposure", type=str, nargs="?", const="auto", default=None, help="Enable Outlier Exposure. Pass path to custom folder, or leave blank/'auto' to auto-detect skin-cancer folder.")
-    parser.add_argument("--lambda_ood", type=float, default=0.05, help="OOD loss scaling weight.")
-    parser.add_argument("--ood_batch_ratio", type=float, default=0.5, help="OOD batch size ratio relative to ID batch size.")
+    parser.add_argument("--lambda_ood", type=float, default=0.003, help="OOD loss scaling weight when Outlier Exposure is enabled.")
+    parser.add_argument("--ood_batch_ratio", type=float, default=0.125, help="OOD batch size ratio relative to ID batch size.")
+    parser.add_argument("--ood_start_epoch", type=int, default=30, help="First zero-based epoch that receives Outlier Exposure loss.")
+    parser.add_argument(
+        "--ood_loss_target",
+        choices=["projection", "direct"],
+        default="projection",
+        help="projection trains a detached OOD head only; direct applies OE to the main evidential model.",
+    )
     args = parser.parse_args()
 
     output_root().mkdir(parents=True, exist_ok=True)

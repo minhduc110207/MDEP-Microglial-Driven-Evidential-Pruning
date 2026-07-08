@@ -996,10 +996,26 @@ class MDEPTrainer:
         self.model.zero_grad()
         self.reset_effective_weight_grads()
 
-    def train_epoch(self, epoch, dataloader, device, print_interval=200, ood_loader=None, lambda_ood=0.05):
+    def train_epoch(
+        self,
+        epoch,
+        dataloader,
+        device,
+        print_interval=200,
+        ood_loader=None,
+        lambda_ood=0.05,
+        ood_start_epoch=None,
+        ood_loss_target="direct",
+    ):
         self.model.train()
-        
-        if ood_loader is not None and epoch >= self.warmup_epochs:
+
+        if ood_start_epoch is None:
+            ood_start_epoch = self.warmup_epochs
+        ood_start_epoch = max(0, int(ood_start_epoch))
+        use_ood_this_epoch = ood_loader is not None and epoch >= ood_start_epoch
+        use_ood_projection = use_ood_this_epoch and ood_loss_target == "projection"
+
+        if use_ood_this_epoch:
             ood_iter = iter(ood_loader)
 
         # Freeze optional channel permutations when the sparse phase starts.
@@ -1096,27 +1112,50 @@ class MDEPTrainer:
 
             # Use Automatic Mixed Precision for Forward Pass
             with torch.amp.autocast('cuda', enabled=amp_enabled):
-                evidence = self.model(inputs)
+                if use_ood_projection and hasattr(self.model, "backbone") and hasattr(self.model, "fc"):
+                    id_features = self.model.backbone(inputs)
+                    evidence = self.model.fc(id_features)
+                else:
+                    id_features = None
+                    evidence = self.model(inputs)
                 
-            loss_ood = 0.0
-            if ood_loader is not None and epoch >= self.warmup_epochs:
+            loss_ood = None
+            if use_ood_this_epoch:
                 try:
-                    ood_inputs, _ = next(ood_iter)
+                    ood_batch = next(ood_iter)
                 except StopIteration:
                     ood_iter = iter(ood_loader)
-                    ood_inputs, _ = next(ood_iter)
+                    ood_batch = next(ood_iter)
+                ood_inputs = ood_batch[0] if isinstance(ood_batch, (tuple, list)) else ood_batch
                 
                 ood_inputs = ood_inputs.to(device)
-                with torch.amp.autocast('cuda', enabled=amp_enabled):
-                    ood_evidence = self.model(ood_inputs)
-                with torch.amp.autocast('cuda', enabled=False):
-                    ood_alpha = ood_evidence.float() + 1.0
-                    loss_ood = torch.mean(kl_divergence(ood_alpha, ood_evidence.shape[1]))
+                if use_ood_projection:
+                    ood_head = getattr(self.model, "ood_projection_head", None)
+                    if ood_head is None:
+                        raise AttributeError("ood_loss_target='projection' requires model.ood_projection_head")
+                    with torch.no_grad():
+                        with torch.amp.autocast('cuda', enabled=amp_enabled):
+                            ood_features = self.model.backbone(ood_inputs)
+                    with torch.amp.autocast('cuda', enabled=False):
+                        id_logits = ood_head(id_features.detach().float())
+                        ood_logits = ood_head(ood_features.detach().float())
+                        domain_logits = torch.cat([id_logits.reshape(-1), ood_logits.reshape(-1)], dim=0)
+                        domain_targets = torch.cat([
+                            torch.zeros_like(id_logits.reshape(-1)),
+                            torch.ones_like(ood_logits.reshape(-1)),
+                        ], dim=0)
+                        loss_ood = F.binary_cross_entropy_with_logits(domain_logits, domain_targets)
+                else:
+                    with torch.amp.autocast('cuda', enabled=amp_enabled):
+                        ood_evidence = self.model(ood_inputs)
+                    with torch.amp.autocast('cuda', enabled=False):
+                        ood_alpha = ood_evidence.float() + 1.0
+                        loss_ood = torch.mean(kl_divergence(ood_alpha, ood_evidence.shape[1]))
                 
             # Ensure Evidential Loss runs strictly in FP32 to avoid digamma/log underflow
             with torch.amp.autocast('cuda', enabled=False):
                 loss = self.criterion(evidence.float(), targets, epoch)
-                if ood_loader is not None and epoch >= self.warmup_epochs:
+                if loss_ood is not None:
                     loss = loss + lambda_ood * loss_ood
                 if is_warmup:
                     perm_loss = get_permutation_loss(self.model, penalty_weight=0.01)
