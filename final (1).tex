@@ -49,18 +49,7 @@
 \usetikzlibrary{arrows.meta, positioning, calc}
 \usepackage[table]{xcolor}
 \usepackage{colortbl}
-\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
-
-% Keep AAAI author-year citation text, but do not hyperlink citations to the
-% References section in the generated PDF. URL and cross-reference links remain
-% controlled by hyperref.
-\makeatletter
-\AtBeginDocument{%
-  \let\NAT@hyper@\@secondoftwo
-  \let\hyper@natlinkstart\@gobble
-  \let\hyper@natlinkend\@empty
-}
-\makeatother
+% Removed hyperref to strictly follow AAAI submission formatting guidelines and resolve citation formatting issues.
 
 \newcolumntype{C}{>{\centering\arraybackslash}c}
 
