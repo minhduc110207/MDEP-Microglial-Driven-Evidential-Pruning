@@ -1759,7 +1759,17 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             true_class_prior=p_true,
             train_class_prior=p_train,
         )
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         evaluate_adaptive_modes(decision_support, test_loader, device)
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         quality_metrics = quality_gate_report(decision_support, test_loader, device)
         decision_support.restore_model()
 

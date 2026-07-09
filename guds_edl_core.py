@@ -77,11 +77,11 @@ def configure_training_runtime():
 
 
 def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
+    is_kaggle = os.path.exists('/kaggle')
     if num_workers is None:
         if os.name == "nt":
             num_workers = 0
         else:
-            is_kaggle = os.path.exists('/kaggle')
             default_workers = 2 if is_kaggle else min(4, os.cpu_count() or 4)
             num_workers = _env_int("MDEP_NUM_WORKERS", default_workers)
     num_workers = max(0, int(num_workers))
@@ -93,10 +93,10 @@ def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
         "pin_memory": bool(pin_memory),
     }
     if num_workers > 0:
-        # Avoid persistent_workers on Kaggle to prevent worker memory leak across multiple loops
-        is_kaggle = os.path.exists('/kaggle')
         kwargs["persistent_workers"] = not is_kaggle
-        kwargs["prefetch_factor"] = max(2, _env_int("MDEP_PREFETCH_FACTOR", 4))
+        # Reduce prefetch_factor to 2 on Kaggle to prevent RAM bloat from large batches
+        default_prefetch = 2 if is_kaggle else 4
+        kwargs["prefetch_factor"] = max(2, _env_int("MDEP_PREFETCH_FACTOR", default_prefetch))
     return kwargs
 
 
@@ -1645,7 +1645,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     
     loader_kwargs = dataloader_runtime_kwargs()
 
-    eval_batch_size = 256 if torch.cuda.is_available() else batch_size
+    eval_batch_size = 128 if torch.cuda.is_available() else batch_size
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
     val_loader   = DataLoader(val_ds,   batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
     cal_loader   = DataLoader(cal_ds,   batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
