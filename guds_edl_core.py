@@ -81,7 +81,8 @@ def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
         if os.name == "nt":
             num_workers = 0
         else:
-            default_workers = min(4, os.cpu_count() or 4)
+            is_kaggle = os.path.exists('/kaggle')
+            default_workers = 2 if is_kaggle else min(4, os.cpu_count() or 4)
             num_workers = _env_int("MDEP_NUM_WORKERS", default_workers)
     num_workers = max(0, int(num_workers))
     if pin_memory is None:
@@ -92,7 +93,9 @@ def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
         "pin_memory": bool(pin_memory),
     }
     if num_workers > 0:
-        kwargs["persistent_workers"] = True
+        # Avoid persistent_workers on Kaggle to prevent worker memory leak across multiple loops
+        is_kaggle = os.path.exists('/kaggle')
+        kwargs["persistent_workers"] = not is_kaggle
         kwargs["prefetch_factor"] = max(2, _env_int("MDEP_PREFETCH_FACTOR", 4))
     return kwargs
 
@@ -1355,20 +1358,8 @@ class LongTailedDataset(Dataset):
         isic_id = self.data_frame.iloc[idx]['isic_id']
         image = None
 
-        # Try 1: Load from individual image file
-        if self.image_dir:
-            img_path = os.path.join(self.image_dir, f"{isic_id}.jpg")
-            if os.path.exists(img_path):
-                try:
-                    image = Image.open(img_path).convert('RGB')
-                except Exception as e:
-                    if not self._error_printed:
-                        print(f"\n⚠️ Error loading image file {img_path}: {e}")
-                        self._error_printed = True
-                    image = None
-
-        # Try 2: Load from HDF5 archive
-        if image is None and self.hdf5_path and HAS_H5PY:
+        # Try 1: Load from HDF5 archive (preferred for RAM and I/O efficiency on Kaggle)
+        if self.hdf5_path and HAS_H5PY:
             try:
                 hf = self._get_hdf5()
                 if isic_id in hf:
@@ -1379,6 +1370,18 @@ class LongTailedDataset(Dataset):
                     print(f"\n⚠️ Error loading image {isic_id} from HDF5: {e}")
                     self._error_printed = True
                 image = None
+
+        # Try 2: Fallback to individual image file
+        if image is None and self.image_dir:
+            img_path = os.path.join(self.image_dir, f"{isic_id}.jpg")
+            if os.path.exists(img_path):
+                try:
+                    image = Image.open(img_path).convert('RGB')
+                except Exception as e:
+                    if not self._error_printed:
+                        print(f"\n⚠️ Error loading image file {img_path}: {e}")
+                        self._error_printed = True
+                    image = None
 
         # Fallback: black placeholder
         if image is None:
