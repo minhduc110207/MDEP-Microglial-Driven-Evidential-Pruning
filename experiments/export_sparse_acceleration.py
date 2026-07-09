@@ -1,5 +1,11 @@
 """
-Realized 2:4 Sparse Tensor Core Acceleration Profiler & Exporter.
+Legacy exploratory 2:4 Sparse Tensor Core exporter.
+
+Do not use this script for paper-facing hardware claims. It builds an
+untrained model, does not compare the fair-v3 checkpoints, and its native
+PyTorch path falls back to dense Conv2d. Use
+``experiments/nvidia_sparse_benchmark.py`` for the quality-gated TensorRT
+Level-3 experiment.
 
 This script demonstrates Level 3 of the Hardware Evidence Ladder: Realized Sparse Acceleration.
 It provides two paths:

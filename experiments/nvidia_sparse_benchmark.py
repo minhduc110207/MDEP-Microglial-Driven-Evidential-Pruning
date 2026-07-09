@@ -523,25 +523,43 @@ def latex_escape(value: str) -> str:
 
 def write_latex_table(rows: list[dict[str, Any]], path: Path, seed: int) -> None:
     network_rows = [row for row in rows if row["comparison"] == "network"]
+    kernel_rows = [row for row in rows if row["comparison"] == "kernel_ablation"]
     lines = [
         r"\begin{table*}[t]",
         r"\centering",
         r"\caption{TensorRT FP16 inference on an NVIDIA RTX A2000. Results use trained fair-v3 "
         r"checkpoints, CUDA Graph execution, disabled host--device transfers, and repeated timed runs.}",
         r"\label{tab:rtx_a2000_level3}",
-        r"\begin{tabular}{llrrrr}",
+        r"\begin{tabular}{llrrrrr}",
         r"\toprule",
-        r"Model & TensorRT path & Batch & Median img/s & Mean latency (ms) & p95 latency (ms) \\",
+        r"Model & TensorRT path & Batch & Median img/s & Mean latency (ms) & p95 latency (ms) & Speedup \\",
         r"\midrule",
     ]
     for row in sorted(network_rows, key=lambda item: (int(item["batch_size"]), MODEL_NAMES.index(item["model"]))):
         lines.append(
             f"{latex_escape(DISPLAY_NAMES[row['model']])} & "
-            f"{'Sparse FP16' if row['sparsity_enabled'] else 'Dense FP16'} & "
+            f"{'Sparse enabled' if row['sparsity_enabled'] else 'Dense'} FP16 & "
             f"{int(row['batch_size'])} & "
             f"{row['images_per_second_median']:.1f} & "
             f"{row['latency_mean_ms_median']:.3f} & "
-            f"{row.get('latency_p95_ms_median', float('nan')):.3f} \\\\"
+            f"{row.get('latency_p95_ms_median', float('nan')):.3f} & "
+            f"{row['speedup_vs_comparison_baseline']:.2f}$\\times$ \\\\"
+        )
+    lines.extend(
+        [
+            r"\midrule",
+            r"\multicolumn{7}{l}{\textit{Same-checkpoint kernel ablation (DST-EDL)}} \\",
+        ]
+    )
+    for row in sorted(kernel_rows, key=lambda item: (int(item["batch_size"]), bool(item["sparsity_enabled"]))):
+        lines.append(
+            f"DST-EDL & "
+            f"{'Sparse enabled' if row['sparsity_enabled'] else 'Sparse disabled'} FP16 & "
+            f"{int(row['batch_size'])} & "
+            f"{row['images_per_second_median']:.1f} & "
+            f"{row['latency_mean_ms_median']:.3f} & "
+            f"{row.get('latency_p95_ms_median', float('nan')):.3f} & "
+            f"{row['speedup_vs_comparison_baseline']:.2f}$\\times$ \\\\"
         )
     lines.extend(
         [
@@ -765,6 +783,39 @@ def main() -> int:
             unique_rows.append(row)
             seen.add(key)
     rows = unique_rows
+
+    # Network rows are normalized to Dense EDL. Kernel-ablation rows are
+    # normalized to the same frozen DST-EDL engine with sparsity disabled.
+    for row in rows:
+        if row["comparison"] == "network":
+            baseline = next(
+                item
+                for item in rows
+                if item["comparison"] == "network"
+                and item["model"] == "dense_edl"
+                and item["batch_size"] == row["batch_size"]
+            )
+        else:
+            baseline = next(
+                item
+                for item in rows
+                if item["comparison"] == "kernel_ablation"
+                and item["model"] == "full_guds"
+                and item["batch_size"] == row["batch_size"]
+                and not item["sparsity_enabled"]
+            )
+        row["speedup_vs_comparison_baseline"] = float(
+            row["images_per_second_median"]
+            / max(baseline["images_per_second_median"], 1e-12)
+        )
+        row["latency_reduction_percent"] = float(
+            100.0
+            * (
+                1.0
+                - row["latency_mean_ms_median"]
+                / max(baseline["latency_mean_ms_median"], 1e-12)
+            )
+        )
 
     all_sparse_verified = all(
         bool(record["sparse_build_evidence"]["verified"])

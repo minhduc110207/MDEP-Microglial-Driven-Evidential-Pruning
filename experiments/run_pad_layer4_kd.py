@@ -202,7 +202,7 @@ def main():
     parser.add_argument("--pad_csv", required=True)
     parser.add_argument("--partition", default="all")
     parser.add_argument("--model_path", help="Checkpoint path; may contain {seed}.")
-    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v2 checkpoints for diagnostic-only runs.")
+    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v3 checkpoints for diagnostic-only runs.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 456])
     parser.add_argument("--split_seed", type=int, default=42)
     parser.add_argument("--outer_folds", type=int, default=5)
