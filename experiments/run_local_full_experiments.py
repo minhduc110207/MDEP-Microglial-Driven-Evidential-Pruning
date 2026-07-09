@@ -95,7 +95,6 @@ def compact_line(line: str) -> bool:
         "FileNotFoundError",
         "Completed ",
         "Saved summary",
-        "Saved hardware profile",
         "All selected",
     ]
     return any(marker in line for marker in markers)
@@ -242,20 +241,6 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
             if args.verbose_structural_logs:
                 cmd.append("--verbose_structural_logs")
             commands.append(CommandSpec(f"cifar100lt_ir{ratio}", cmd))
-
-    if not args.skip_hardware:
-        cmd = python_cmd([
-            "experiments/hardware_profile.py",
-            "--batch_size",
-            str(min(batch_size, 16)),
-            "--iters",
-            str(5 if args.smoke else args.hardware_iters),
-            "--warmup",
-            str(2 if args.smoke else args.hardware_warmup),
-        ])
-        if args.cpu:
-            cmd.append("--cpu")
-        commands.append(CommandSpec("hardware_profile", cmd))
 
     if args.include_backbones:
         cmd = python_cmd([
@@ -422,13 +407,10 @@ def main() -> int:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 456])
     parser.add_argument("--cifar_ratios", type=int, nargs="+", default=[10, 50, 100], choices=[10, 50, 100])
-    parser.add_argument("--hardware_iters", type=int, default=50)
-    parser.add_argument("--hardware_warmup", type=int, default=10)
     parser.add_argument("--log_every", type=int, default=5)
     parser.add_argument("--stream", choices=["compact", "full", "none"], default="compact")
     parser.add_argument("--skip_isic", action="store_true")
     parser.add_argument("--skip_cifar", action="store_true")
-    parser.add_argument("--skip_hardware", action="store_true")
     parser.add_argument("--skip_summary", action="store_true")
     parser.add_argument("--include_backbones", action="store_true")
     parser.add_argument("--no_save_model", action="store_true", help="Do not save model checkpoints for large sweeps.")

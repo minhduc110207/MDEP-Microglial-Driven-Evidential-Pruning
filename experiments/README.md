@@ -2,6 +2,16 @@
 
 This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
 
+## Notebook Separation
+
+- `run_fair_v3_nvidia24_experiments.ipynb` (repository root) contains training,
+  ablations, CIFAR-100-LT, OOD evaluation, and metric aggregation only. It does
+  not execute hardware profiling or TensorRT.
+- `run_rtx_a2000_hardware_experiments.ipynb` (repository root) is the standalone
+  local RTX A2000 workflow. It consumes saved fair-v3 checkpoints and runs
+  structural profiling, ONNX preflight, TensorRT Level 3, and paper-readiness
+  checks without loading datasets or training models.
+
 ## Active Runners
 
 - `isic_paper_experiments.py`: ISIC 2024 main-table baselines, evidential
@@ -13,8 +23,8 @@ This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
 - `run_isic_guds_ablations.py`: thin wrapper for ISIC GUDS-EDL ablations.
 - `generalization_paper_suite.py`: CIFAR-100-LT paper-facing baseline suite.
 - `run_cifar_suite.py`: thin wrapper that injects `--benchmark cifar`.
-- `run_kaggle_paper_suite.py`: Kaggle launcher for ISIC, CIFAR, hardware
-  profiling, and optional backbone runs.
+- `run_kaggle_paper_suite.py`: Kaggle launcher for ISIC, CIFAR, summary, and
+  optional backbone runs. Hardware profiling is intentionally excluded.
 - `run_local_full_experiments.py`: local launcher with compact logging.
 - `hardware_profile.py`: dense/static-2:4/GUDS structural profiling.
 - `nvidia_sparse_benchmark.py`: Level-3 TensorRT FP16 benchmark for trained

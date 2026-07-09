@@ -6,7 +6,9 @@ This script runs the experiment groups referenced by main_text.tex:
 1. ISIC 2024 main-table baselines, GUDS-EDL ablations, calibration ablations,
    topology-cache ablation, and quality-gated reports.
 2. CIFAR-100-LT planned generalization baselines for ratios 1:10, 1:50, 1:100.
-3. Hardware profiling for dense/static-2:4/GUDS structural efficiency.
+
+Hardware experiments are intentionally excluded. Run the standalone
+``run_rtx_a2000_hardware_experiments.ipynb`` workflow after training.
 
 Recommended Kaggle usage:
 
@@ -133,22 +135,6 @@ def build_commands(args: argparse.Namespace) -> list[CommandSpec]:
                 )
             )
 
-    if not args.skip_hardware:
-        commands.append(
-            CommandSpec(
-                name="hardware_profile",
-                command=[
-                    sys.executable,
-                    str(REPO_ROOT / "experiments" / "hardware_profile.py"),
-                    "--batch_size",
-                    str(min(batch_size, 16) if args.smoke else batch_size),
-                    "--iters",
-                    str(5 if args.smoke else args.hardware_iters),
-                    "--warmup",
-                    str(2 if args.smoke else args.hardware_warmup),
-                ],
-            )
-        )
     if args.include_backbones:
         backbone_command = [
             sys.executable,
@@ -188,14 +174,11 @@ def main() -> int:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--cifar_epochs", type=int, default=100)
     parser.add_argument("--backbone_epochs", type=int, default=40)
-    parser.add_argument("--hardware_iters", type=int, default=50)
-    parser.add_argument("--hardware_warmup", type=int, default=10)
     parser.add_argument("--cifar_ratios", type=int, nargs="+", default=[10, 50, 100])
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--split_seed", type=int, default=42, help="Fixed ISIC patient split seed used across model seeds.")
     parser.add_argument("--skip_isic", action="store_true")
     parser.add_argument("--skip_cifar", action="store_true")
-    parser.add_argument("--skip_hardware", action="store_true")
     parser.add_argument("--skip_summary", action="store_true")
     parser.add_argument("--include_backbones", action="store_true", help="Also run the heavyweight ConvNeXt/Swin backbone protocol.")
     parser.add_argument("--no_save_model", action="store_true", help="Avoid saving every model checkpoint in large multi-seed sweeps.")
