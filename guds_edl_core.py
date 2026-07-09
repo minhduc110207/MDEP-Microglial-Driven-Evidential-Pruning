@@ -1358,8 +1358,20 @@ class LongTailedDataset(Dataset):
         isic_id = self.data_frame.iloc[idx]['isic_id']
         image = None
 
-        # Try 1: Load from HDF5 archive (preferred for RAM and I/O efficiency on Kaggle)
-        if self.hdf5_path and HAS_H5PY:
+        # Try 1: Load from individual image file (Preferred for OS page-cache speed during training)
+        if self.image_dir:
+            img_path = os.path.join(self.image_dir, f"{isic_id}.jpg")
+            if os.path.exists(img_path):
+                try:
+                    image = Image.open(img_path).convert('RGB')
+                except Exception as e:
+                    if not self._error_printed:
+                        print(f"\n⚠️ Error loading image file {img_path}: {e}")
+                        self._error_printed = True
+                    image = None
+
+        # Try 2: Fallback to HDF5 archive
+        if image is None and self.hdf5_path and HAS_H5PY:
             try:
                 hf = self._get_hdf5()
                 if isic_id in hf:
@@ -1370,18 +1382,6 @@ class LongTailedDataset(Dataset):
                     print(f"\n⚠️ Error loading image {isic_id} from HDF5: {e}")
                     self._error_printed = True
                 image = None
-
-        # Try 2: Fallback to individual image file
-        if image is None and self.image_dir:
-            img_path = os.path.join(self.image_dir, f"{isic_id}.jpg")
-            if os.path.exists(img_path):
-                try:
-                    image = Image.open(img_path).convert('RGB')
-                except Exception as e:
-                    if not self._error_printed:
-                        print(f"\n⚠️ Error loading image file {img_path}: {e}")
-                        self._error_printed = True
-                    image = None
 
         # Fallback: black placeholder
         if image is None:
