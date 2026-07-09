@@ -265,7 +265,7 @@ The latent score update separates active retention from dormant reactivation. Fi
     \Delta V_{ij}^{(t)} &= M_{ij}^{(t)}A_{ij}^{(t)} +\left(1-M_{ij}^{(t)}\right)D_{ij}^{(t)}.
 \end{aligned}
 \end{equation}
-Here, active links ($M_{ij}=1$) are penalized by the signed removal pressure $C_{ij}$, while dormant links ($M_{ij}=0$) are guided by the attenuated regrowth score $\rho G_{ij}$. Exploration noise $\xi_{ij}$ (the anti-crystallization term reported in the component analysis of Sec.~\ref{subsec:ablation}) is not applied unconditionally: it fires only when $G_{ij}^{(t)}\le\tau$ ($\tau=10^{-8}$ in the reported configuration), i.e., when the regrowth saliency is numerically flat, typically the result of tied raw gradients collapsing to the same rank. Active-link scores are already separated from dormant candidates by the $-\lambda_p C_{ij}$ term and do not require this tie-breaking mechanism. To ensure topological stability, this step is smoothed via an exponential moving average, mean-centered to prevent global drift, and clamped to a bounded morphological state:
+Here, active links ($M_{ij}=1$) are penalized by the signed removal pressure $C_{ij}$, while dormant links ($M_{ij}=0$) are guided by the attenuated regrowth score $\rho G_{ij}$. Exploration noise $\xi_{ij}$ (the anti-crystallization term reported in the component analysis of Appendix~\ref{app:ablation}) is not applied unconditionally: it fires only when $G_{ij}^{(t)}\le\tau$ ($\tau=10^{-8}$ in the reported configuration), i.e., when the regrowth saliency is numerically flat, typically the result of tied raw gradients collapsing to the same rank. Active-link scores are already separated from dormant candidates by the $-\lambda_p C_{ij}$ term and do not require this tie-breaking mechanism. To ensure topological stability, this step is smoothed via an exponential moving average, mean-centered to prevent global drift, and clamped to a bounded morphological state:
 \begin{equation}\label{eq:score_update}
 \begin{aligned}
     \mu_{ij}^{(t)} &= \beta_m\mu_{ij}^{(t - 1)} +(1-\beta_m)\Delta V_{ij}^{(t)},\\
@@ -345,10 +345,7 @@ The focal term is applied with stop gradient confidence so that focal weighting 
     \gamma_{\max} &= 5.0 .
 \end{aligned}
 \end{equation}
-This is the effective EFL exponent. The implementation also logs a separate
-topology smoothing parameter for the sparse structural controller. That logged
-topology value remains at its base value during dense warmup and should not be
-read as the effective focal exponent in Eq.~\ref{eq:focal_schedule}.
+This is the effective EFL exponent.
 For KL regularization, we remove the true class evidence from the penalty by defining
 $\tilde{\alpha}_c^{(n)}=y_c^{(n)}+(1-y_c^{(n)})\alpha_c^{(n)}$. The adjusted KL term is:
 \begin{equation}\label{eq:kl_loss_main}
@@ -356,14 +353,7 @@ $\tilde{\alpha}_c^{(n)}=y_c^{(n)}+(1-y_c^{(n)})\alpha_c^{(n)}$. The adjusted KL 
     =
     \KL\!\left(\Dir(\tilde{\bm{\alpha}}^{(n)})\parallel\Dir(\mathbf{1})\right).
 \end{equation}
-The annealing coefficient is $\mu(t)=\min(1.0,t/t_{\text{anneal}})$ with $t_{\text{anneal}}=10$. In the reported symmetric setting, the KL regularizer treats all classes uniformly, equivalent to multiplying $L_{\text{KL}}^{(n)}$ by $1.0$. The asymmetric KL diagnostic variant instead uses a capped class dependent multiplier:
-\begin{equation}\label{eq:asym_multiplier}
-    \Lambda_{\text{asym}}^{(n)}
-    =
-    \min(\bar{\omega}_{y_n},\Lambda_{\max}),
-    \qquad \Lambda_{\max}=10.0 .
-\end{equation}
-The reported model applies $\bar{\omega}_{y_n}$ to the supervised CE term.
+The annealing coefficient is $\mu(t)=\min(1.0,t/t_{\text{anneal}})$ with $t_{\text{anneal}}=10$. In the reported symmetric setting, the KL regularizer treats all classes uniformly, equivalent to multiplying $L_{\text{KL}}^{(n)}$ by $1.0$. The asymmetric KL diagnostic variant instead uses a capped class dependent multiplier (formula detailed in Appendix~\ref{app:proofs}). The reported model applies $\bar{\omega}_{y_n}$ to the supervised CE term.
 The resulting training objective is
 \begin{equation}\label{eq:total_loss}
     L_{\text{total}}=L_{\text{EFL}}(\bm{e},\bm{y},t).
@@ -376,13 +366,8 @@ For each sample $n$, the stop gradient focal factor $\mathcal{F}_n(t)$ reweights
 We use a short learning rate and loss scale warmup for numerical stability. Its schedule is an implementation detail and is given with the full training algorithm in Appendix~\ref{app:algorithm}.
 
 
-\subsection{Post hoc Calibration and Decision Thresholding}
-Post hoc calibration is applied to logits before the Softplus evidence map. This alters both predictive probabilities and Dirichlet strength, and we therefore consider it evidential post hoc calibration rather than ordinary softmax temperature scaling. Calibration is applied after training and leaves the learned sparse topology fixed. The runs reported use bias temperature calibration with prior shift correction fitted on the calibration partition (formula detailed in \textbf{Appendix B}).
-
-Operating thresholds are selected by sweeping validation probabilities $\hat p_c=\alpha_c/S$. Threshold selection modifies the decision rule for both sensitivity and specificity, while leaving the evidence values themselves unchanged. The completed repeated seed ablations indicate that different operating points have differential impacts on sensitivity, specificity, ranking, and calibration. Calibration metrics are therefore reported separately from ranking, and no single post hoc operating point is considered universally preferable under extreme prevalence.
-
-\paragraph{Scope of Claims.}
-The same theoretical exclusions as in Sec.~\ref{sec:methodology} apply here. Empirical claims are limited to the reported ISIC 2024 case study; broader validation protocols are treated as supporting evidence only when explicitly reported.
+\paragraph{Post hoc Calibration.}
+Post hoc calibration and decision threshold selection procedures are detailed in Appendix~\ref{app:algorithm}.
 
 \section{Experimental Setup}\label{sec:experiment}
 
@@ -408,36 +393,10 @@ Table~\ref{tab:main_evidential_comparison} compares DST-EDL with dense evidentia
 
 DST-EDL's advantage is concentrated in high sensitivity ranking under exact structured sparsity. Mean pAUC$_{0.80}$ improves over Dense EDL ($0.1168$ vs. $0.0885$). Mean Macro AUROC improves from $0.8663$ to $0.8891$. Dense EDL remains slightly stronger in balanced accuracy and calibration. Several evidential baselines obtain higher PR AUC. The result therefore indicates a ranking, specificity, and calibration tradeoff.
 
-\begin{table*}[tbp]
-\centering
-\caption{Compact ISIC 2024 repeated seed comparison under validation selected balanced operating points. Values are mean $\pm$ standard deviation over seeds 42, 123, and 456. Lower ECE is better.}
-\label{tab:main_evidential_comparison}
-\scriptsize
-\renewcommand{\arraystretch}{1.03}
-\setlength{\tabcolsep}{1.4pt}
-\begin{adjustbox}{max width=\textwidth}
-\begin{tabular}{@{}l C C C C C@{}}
-\toprule
-\textbf{Model} & \textbf{Bal.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro AUROC} $\uparrow$ & \textbf{PR AUC} $\uparrow$ & \textbf{ECE} $\downarrow$ \\
-\midrule
-Dense EDL & $\mathbf{0.8221\pm0.0195}$ & $0.0885\pm0.0124$ & $0.8663\pm0.0102$ & $0.0413\pm0.0085$ & $0.0524\pm0.0013$ \\
-Fisher EDL & $0.8080\pm0.0152$ & $0.0842\pm0.0111$ & $0.8604\pm0.0163$ & $0.0414\pm0.0104$ & $\mathbf{0.0519\pm0.0009}$ \\
-Flexible EDL & $0.8059\pm0.0116$ & $0.0847\pm0.0022$ & $0.8595\pm0.0078$ & $0.0373\pm0.0064$ & $0.0525\pm0.0013$ \\
-R-EDL & $0.8034\pm0.0357$ & $0.0743\pm0.0175$ & $0.8479\pm0.0241$ & $\mathbf{0.0422\pm0.0051}$ & $0.0523\pm0.0012$ \\
-\midrule
-\textbf{DST-EDL} & $0.8110\pm0.0050$ & $\mathbf{0.1168\pm0.0070}$ & $\mathbf{0.8891\pm0.0080}$ & $0.0355\pm0.0063$ & $0.0564\pm0.0009$ \\
-\bottomrule
-\end{tabular}
-\end{adjustbox}
-\end{table*}
-
-\subsection{Sparse 2:4 Baseline Comparison}
-Table~\ref{tab:sparse_comparison} compares DST-EDL against sparse 2:4 baselines with completed three seed metrics.
-
 \begin{table}[tbp]
 \centering
-\caption{Sparse 2:4 comparison over seeds 42, 123, and 456. Values are mean $\pm$ standard deviation. All sparse models maintain 50\% active density in wrapped layers. Lower ECE is better.}
-\label{tab:sparse_comparison}
+\caption{ISIC 2024 repeated seed comparison under validation selected balanced operating points. Values are mean $\pm$ standard deviation over seeds 42, 123, and 456. Models are grouped by capacity style. Lower ECE is better.}
+\label{tab:main_evidential_comparison}
 \scriptsize
 \renewcommand{\arraystretch}{1.03}
 \setlength{\tabcolsep}{1.4pt}
@@ -446,6 +405,13 @@ Table~\ref{tab:sparse_comparison} compares DST-EDL against sparse 2:4 baselines 
 \toprule
 \textbf{Model} & \textbf{Bal.} $\uparrow$ & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro AUROC} $\uparrow$ & \textbf{PR AUC} $\uparrow$ & \textbf{ECE} $\downarrow$ \\
 \midrule
+\multicolumn{6}{l}{\textbf{Dense Evidential Baselines}} \\
+Dense EDL & $\mathbf{0.8221\pm0.0195}$ & $0.0885\pm0.0124$ & $0.8663\pm0.0102$ & $0.0413\pm0.0085$ & $0.0524\pm0.0013$ \\
+Fisher EDL & $0.8080\pm0.0152$ & $0.0842\pm0.0111$ & $0.8604\pm0.0163$ & $0.0414\pm0.0104$ & $\mathbf{0.0519\pm0.0009}$ \\
+Flexible EDL & $0.8059\pm0.0116$ & $0.0847\pm0.0022$ & $0.8595\pm0.0078$ & $0.0373\pm0.0064$ & $0.0525\pm0.0013$ \\
+R-EDL & $0.8034\pm0.0357$ & $0.0743\pm0.0175$ & $0.8479\pm0.0241$ & $\mathbf{0.0422\pm0.0051}$ & $0.0523\pm0.0012$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Sparse 2:4 Baselines (50\% active density)}} \\
 Static 2:4 EDL & $0.7956\pm0.0121$ & $0.0965\pm0.0109$ & $0.8663\pm0.0149$ & $\mathbf{0.0444\pm0.0099}$ & $\mathbf{0.0529\pm0.0006}$ \\
 RigL style 2:4 & $0.7696\pm0.0608$ & $0.1096\pm0.0100$ & $0.8829\pm0.0170$ & $0.0373\pm0.0034$ & $0.0541\pm0.0004$ \\
 \textbf{DST-EDL} & $\mathbf{0.8110\pm0.0050}$ & $\mathbf{0.1168\pm0.0070}$ & $\mathbf{0.8891\pm0.0080}$ & $0.0355\pm0.0063$ & $0.0564\pm0.0009$ \\
@@ -454,57 +420,17 @@ RigL style 2:4 & $0.7696\pm0.0608$ & $0.1096\pm0.0100$ & $0.8829\pm0.0170$ & $0.
 \end{adjustbox}
 \end{table}
 
+\subsection{Sparse 2:4 Baseline Comparison}
+Table~\ref{tab:main_evidential_comparison} compares DST-EDL against sparse 2:4 baselines with completed three seed metrics.
+
 DST-EDL improves over Static 2:4 EDL in balanced accuracy ($0.8110$ vs. $0.7956$), pAUC$_{0.80}$ ($0.1168$ vs. $0.0965$), and Macro AUROC ($0.8891$ vs. $0.8663$). The result is consistent with a high sensitivity ranking benefit from uncertainty guided topology adaptation over a fixed valid block sparse mask. DST-EDL also improves over RigL style 2:4 in pAUC$_{0.80}$ ($0.1168$ vs. $0.1096$), Macro AUROC ($0.8891$ vs. $0.8829$), and balanced accuracy ($0.8110$ vs. $0.7696$). Its operating point variance is lower. Static 2:4 remains stronger in PR AUC and ECE. The sparse comparison therefore supports a ranking and stability advantage. Broader superiority across every metric is outside the stated claim.
 
 \paragraph{Sparse morphology diagnostics.}
-All sparse models preserved 50.0\% active density and showed no detected structural collapse (see Appendix~\ref{app:seed_level}). For the current DST-EDL runs, all wrapped sparse layers satisfied exact valid block 2:4 feasibility, with 2,789,376/2,789,376 valid blocks and no detected representational collapse. This diagnostic rules out a trivial explanation in which performance differences arise from invalid masks or collapsed sparse layers.
-
-\subsection{Hardware Efficiency and TensorRT Sparse Execution}
-The hardware result separates structural sparsity from realized acceleration. The masked PyTorch diagnostic verifies the structural cost reduction but does not expose compressed 2:4 operands to Sparse Tensor Cores. Under this diagnostic, sparse models reduce theoretical active computation from 1.8136 to 0.9658 GMAC per image, a 46.75\% total-model MAC reduction, while masked PyTorch throughput remains below dense execution because the kernels still operate on dense tensors.
-
-We therefore use TensorRT 11.1 as the main hardware acceleration diagnostic. Exported ONNX graphs are benchmarked on an NVIDIA RTX A2000 8GB Laptop GPU with FP16 execution, batch size 64, CUDA Graph execution, disabled host-device transfers, and sparse tactics verified from TensorRT build logs. Table~\ref{tab:main_hardware_trt} reports the main-body evidence. The most controlled comparison freezes the DST-EDL graph and changes only the TensorRT sparsity path: enabling sparse execution improves throughput from 4847.1 to 5546.3 images/s, a 1.14$\times$ same-graph gain, and reduces mean latency from 13.20 to 11.54 ms. Relative to Dense EDL under the same TensorRT FP16 setting, sparse DST-EDL gives a 1.18$\times$ throughput gain.
-
-\begin{table}[tbp]
-\centering
-\caption{Main-body TensorRT FP16 hardware diagnostic on RTX A2000, batch size 64. Sparse tactics are counted only when TensorRT build logs select a sparse kernel.}
-\label{tab:main_hardware_trt}
-\scriptsize
-\renewcommand{\arraystretch}{1.04}
-\setlength{\tabcolsep}{1.2pt}
-\begin{adjustbox}{max width=\columnwidth}
-\begin{tabular}{@{}l c c c c@{}}
-\toprule
-\textbf{Model / comparison} & \textbf{Path} & \textbf{Sparse} & \textbf{Img/s} $\uparrow$ & \textbf{Speedup} \\
-\midrule
-Dense EDL & disable & N/A & 4686.9 & 1.00$\times$ \\
-Static 2:4 EDL & enable & 12/19 & 5699.8 & 1.22$\times$ \\
-RigL style 2:4 & enable & 13/19 & 5593.7 & 1.19$\times$ \\
-\textbf{DST-EDL} & enable & 10/19 & \textbf{5546.3} & \textbf{1.18$\times$} \\
-\midrule
-DST-EDL, same graph & disable & N/A & 4847.1 & 1.00$\times$ \\
-\textbf{DST-EDL, same graph} & enable & 10/19 & \textbf{5546.3} & \textbf{1.14$\times$} \\
-\bottomrule
-\end{tabular}
-\end{adjustbox}
-\end{table}
-
-The sparse baselines are slightly faster than DST-EDL because TensorRT selects sparse tactics for more eligible layers: 12/19 for Static 2:4 EDL and 13/19 for RigL style 2:4, compared with 10/19 for DST-EDL. This layer-level autotuning explains the small throughput gap despite identical exact 2:4 feasibility. DST-EDL nevertheless retains 97.3\% of Static 2:4 throughput and 99.2\% of RigL-style throughput while providing stronger ISIC pAUC$_{0.80}$ and Macro AUROC. The supported hardware claim is therefore not merely mask validity, but backend-verified sparse-path batch-throughput speedup in the tested TensorRT setting. Appendix~\ref{app:seed_level} gives the full structural-cost table, latency values, and protocol details.
+All sparse models preserved 50.0\% active density and showed no detected structural collapse (see Appendix~\ref{app:seed_level}). For the current DST-EDL runs, all wrapped sparse layers satisfied exact valid block 2:4 feasibility, with 2,789,376/2,789,376 valid blocks and no detected representational collapse. This diagnostic rules out a trivial explanation in which performance differences arise from invalid masks or collapsed sparse layers. Hardware efficiency diagnostics and TensorRT sparse execution benchmarks are detailed in Appendix~\ref{app:seed_level}.
 
 \subsection{Seed Level Stability and Operating Point Tradeoffs}
 Appendix~\ref{app:seed_level} reports seed level results. Across seeds 42, 123, and 456, DST-EDL obtains mean balanced accuracy $0.8110$, sensitivity $0.7835$, and specificity $0.8386$. It obtains pAUC$_{0.80}=0.1168$, Macro AUROC $=0.8891$, PR AUC $=0.0355$, AURC $=0.00023$, and ECE $=0.0564$.
-DST-EDL is more stable than the RigL style sparse baseline at the balanced operating point. Its balanced accuracy, sensitivity, and specificity standard deviations are $0.0050$, $0.0418$, and $0.0399$. The corresponding RigL style 2:4 values are $0.0608$, $0.2088$, and $0.1251$.
-
-\subsection{Component Attribution Diagnostics}
-\label{subsec:ablation}
-Completed three seed component diagnostics suggest that the KL uniform regrower
-is the most important structural component. Removing it causes the largest drop
-in pAUC$_{0.80}$, Macro AUROC, PR AUC, AURC, and balanced accuracy. Removing the
-pruner produces a smaller but consistent degradation. Asymmetric KL mostly
-shifts the operating point toward higher specificity. Removing EFL improves ECE
-and specificity. It sharply lowers sensitivity. Removing anti crystallization
-slightly increases pAUC. It also makes the operating point less stable. These
-diagnostic variants are used only to attribute the components that support the
-single reported model. Full tables are provided in Appendix~\ref{app:ablation}.
+DST-EDL is more stable than the RigL style sparse baseline at the balanced operating point. Its balanced accuracy, sensitivity, and specificity standard deviations are $0.0050$, $0.0418$, and $0.0399$. The corresponding RigL style 2:4 values are $0.0608$, $0.2088$, and $0.1251$. Component attribution diagnostics and ablation studies are detailed in Appendix~\ref{app:ablation}.
 
 \section{Limitations and Broader Impact}\label{sec:limitations}
 The evidence supports a focused interpretation of DST-EDL as a sparse evidential classifier for high sensitivity rare event ranking. On ISIC 2024, it obtains the highest mean pAUC$_{0.80}$ and Macro AUROC among the compared methods. Dense EDL remains stronger in balanced accuracy, specificity, and calibration. Static 2:4 EDL obtains higher PR AUC and lower ECE. DST-EDL therefore trades some specificity for higher sensitivity and high TPR ranking. At the balanced operating point, DST-EDL reaches mean sensitivity $0.7835$ and specificity $0.8386$. The reported Dense EDL and Static 2:4 specificities are $0.9158$ and $0.9140$. The current evidence is centered on ISIC 2024. Appendix~\ref{app:external} reports the completed CIFAR-100-LT 1:100 diagnostic. That diagnostic preserves exact 2:4 structure and improves ECE relative to dense CIFAR baselines. Classification and ranking metrics remain below Standard CE and Dense EDL. We report it as a limitation and stress test.
@@ -1442,7 +1368,14 @@ Because $\operatorname{sg}[\hat{p}_{y_n}^{(n)}]$ is treated as constant during b
     L_{\text{KL}}^{(n)}
     \right).
 \end{equation}
-Moreover, $\mathcal{F}_n(t)\ge0$, $\mu(t)\in[0,1]$, and $\bar{\omega}_{y_n}\le\omega_{\max}$ by Eq.~\ref{eq:sample_weight}. In the reported symmetric KL setting, the KL term has no additional class dependent multiplier. In the asymmetric diagnostic variant, the multiplier is capped at $\Lambda_{\max}$ by Eq.~\ref{eq:asym_multiplier}. Hence focal modulation changes sample emphasis without adding an uncontrolled confidence derivative path. The supervised class weight is explicitly capped.
+Moreover, $\mathcal{F}_n(t)\ge0$, $\mu(t)\in[0,1]$, and $\bar{\omega}_{y_n}\le\omega_{\max}$ by Eq.~\ref{eq:sample_weight}. In the reported symmetric KL setting, the KL term has no additional class dependent multiplier. In the asymmetric diagnostic variant, the multiplier is capped at $\Lambda_{\max}$ by:
+\begin{equation}\label{eq:asym_multiplier}
+    \Lambda_{\text{asym}}^{(n)}
+    =
+    \min(\bar{\omega}_{y_n},\Lambda_{\max}),
+    \qquad \Lambda_{\max}=10.0 .
+\end{equation}
+Hence focal modulation changes sample emphasis without adding an uncontrolled confidence derivative path. The supervised class weight is explicitly capped.
 
 \section{Novelty Boundary Against Closest Prior Art}
 \label{app:novelty}
