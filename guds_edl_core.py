@@ -1645,10 +1645,11 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     
     loader_kwargs = dataloader_runtime_kwargs()
 
+    eval_batch_size = 256 if torch.cuda.is_available() else batch_size
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, **loader_kwargs)
-    cal_loader   = DataLoader(cal_ds,   batch_size=batch_size, shuffle=False, **loader_kwargs)
-    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, **loader_kwargs)
+    val_loader   = DataLoader(val_ds,   batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
+    cal_loader   = DataLoader(cal_ds,   batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
+    test_loader  = DataLoader(test_ds,  batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
 
     # Compute class weights (dampened inverse frequency to prevent loss/gradient explosion)
     import math
