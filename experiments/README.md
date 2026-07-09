@@ -17,6 +17,14 @@ This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
   profiling, and optional backbone runs.
 - `run_local_full_experiments.py`: local launcher with compact logging.
 - `hardware_profile.py`: dense/static-2:4/GUDS structural profiling.
+- `nvidia_sparse_benchmark.py`: Level-3 TensorRT FP16 benchmark for trained
+  Dense EDL, Static 2:4, RigL-style 2:4, and DST-EDL checkpoints. It separates
+  network comparison from same-model sparse-kernel ablation and emits a LaTeX
+  table only when the RTX A2000, fair-v2 checkpoint, graph-equivalence, repeat,
+  and sparse-build evidence gates pass.
+- `run_nvidia_hardware_rtx_a2000.ps1`: local Windows launcher for the TensorRT
+  benchmark. It expects `trtexec.exe` on `PATH`, via `TENSORRT_ROOT`, or through
+  the `-TrtExec` argument.
 - `summarize_results.py`: aggregate JSON metric files across seeds.
 - `run_external_validation.py`: unadapted PAD/domain-shift classification,
   validity-aware fairness, and OOD scores. Keep `knn_layer3` as the primary
