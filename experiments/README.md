@@ -4,6 +4,9 @@ This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
 
 ## Notebook Separation
 
+- `HARDWARE_EXPERIMENTS_END_TO_END.md` (repository root) is the complete
+  train-to-TensorRT runbook, including checkpoint transfer, quality gates,
+  troubleshooting, and manuscript handoff.
 - `run_fair_v3_nvidia24_experiments.ipynb` (repository root) contains training,
   ablations, CIFAR-100-LT, OOD evaluation, and metric aggregation only. It does
   not execute hardware profiling or TensorRT.
