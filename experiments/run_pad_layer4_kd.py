@@ -29,10 +29,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.generalization_paper_suite import EvidenceResNet
-from experiments.isic_paper_experiments import json_safe, seed_everything
+from experiments.isic_paper_experiments import PROTOCOL_VERSION, json_safe, seed_everything
 from experiments.run_external_validation import (
     PADUFES20MetadataDataset,
     load_state_with_optional_ood_head,
+    validate_checkpoint_protocol,
 )
 from experiments.run_pad_adaptation import (
     DIAGNOSES,
@@ -201,6 +202,7 @@ def main():
     parser.add_argument("--pad_csv", required=True)
     parser.add_argument("--partition", default="all")
     parser.add_argument("--model_path", help="Checkpoint path; may contain {seed}.")
+    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v2 checkpoints for diagnostic-only runs.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 456])
     parser.add_argument("--split_seed", type=int, default=42)
     parser.add_argument("--outer_folds", type=int, default=5)
@@ -270,6 +272,7 @@ def main():
         cal_logits, test_logits, seed_results = [], [], []
         for seed in args.seeds:
             checkpoint = resolve_checkpoint(args, seed)
+            validate_checkpoint_protocol(checkpoint, args.allow_legacy_checkpoint)
             base = EvidenceResNet(2, "isic", pretrained=False)
             replace_conv2d_with_mdep(base.backbone, learn_permutation=False)
             load_state_with_optional_ood_head(base, checkpoint, device)
@@ -347,6 +350,7 @@ def main():
         y[valid], oof_probability[valid], groups[valid], args.bootstrap_repeats, args.split_seed
     )
     result = {
+        "checkpoint_protocol_version": PROTOCOL_VERSION,
         "protocol": "patient-grouped layer4 adaptation with ISIC calibration-replay KD",
         "target_mode": args.target_mode,
         "seeds": args.seeds,

@@ -39,12 +39,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.generalization_paper_suite import EvidenceResNet
-from experiments.isic_paper_experiments import json_safe, seed_everything
+from experiments.isic_paper_experiments import PROTOCOL_VERSION, json_safe, seed_everything
 from experiments.run_external_validation import (
     PADUFES20MetadataDataset,
     equalized_odds_report,
     extract_all_features_and_logits,
     load_state_with_optional_ood_head,
+    validate_checkpoint_protocol,
 )
 from guds_edl_core import configure_training_runtime, get_imbalanced_dataloaders, replace_conv2d_with_mdep
 
@@ -290,7 +291,7 @@ def resolve_checkpoint(args, seed):
         path = Path(value)
     else:
         root = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
-        path = root / "paper_experiment_outputs" / "isic" / "full_guds" / f"seed_{seed}" / "model_state.pth"
+        path = root / "paper_experiment_outputs" / "isic" / "full_guds_fair_v2" / f"seed_{seed}" / "model_state.pth"
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found for seed {seed}: {path}")
     return path
@@ -318,6 +319,7 @@ def main():
     parser.add_argument("--pad_csv", required=True)
     parser.add_argument("--partition", default="all")
     parser.add_argument("--model_path", help="Checkpoint path; may contain {seed}.")
+    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v2 checkpoints for diagnostic-only runs.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 456])
     parser.add_argument("--split_seed", type=int, default=42)
     parser.add_argument("--outer_folds", type=int, default=5)
@@ -370,6 +372,7 @@ def main():
     loaded_models = []
     for seed in args.seeds:
         checkpoint = resolve_checkpoint(args, seed)
+        validate_checkpoint_protocol(checkpoint, args.allow_legacy_checkpoint)
         print(f"[FEATURES] seed={seed} checkpoint={checkpoint}")
         model, features = load_model_and_features(checkpoint, dataset, args, seed, device)
         seed_features[seed] = features
@@ -570,6 +573,7 @@ def main():
     with (output_dir / "pad_adapter_models.pkl").open("wb") as handle:
         pickle.dump(model_artifacts, handle)
     result = {
+        "checkpoint_protocol_version": PROTOCOL_VERSION,
         "protocol": "patient-grouped nested cross-validation",
         "target_mode": args.target_mode,
         "head": args.head,

@@ -39,6 +39,45 @@ This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
 !python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
+## ISIC Fair-v2 Protocol
+
+The manuscript-facing comparison must be regenerated with the aligned
+`isic_fair_v2_2026_07_09` protocol:
+
+```bash
+MDEP_DETERMINISTIC=1 python -u experiments/isic_paper_experiments.py \
+  --suite main_tables \
+  --epochs 40 \
+  --batch_size 32 \
+  --lr 4e-5 \
+  --seeds 42 123 456 \
+  --split_seed 42 \
+  --subsample_scope train \
+  --subsample_ratio 20 \
+  --structural_proxy_batches 4 \
+  --checkpoint_selection last \
+  --run_suffix _fair_v2
+```
+
+Do not mix archived metrics or checkpoints with fair-v2 results. External OOD
+evaluation is post-hoc and must consume the three new
+`full_guds_fair_v2/seed_{42,123,456}` checkpoints; it must not select or tune
+the ISIC model.
+
+```bash
+for seed in 42 123 456; do
+  python -u experiments/run_external_validation.py \
+    --model_path "/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v2/seed_${seed}/model_state.pth" \
+    --seed "${seed}" \
+    --split_seed 42 \
+    --custom_image_folder /kaggle/input/datasets/mahdavi1202/skin-cancer \
+    --pad_ufes_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
+    --pad_ufes_partition imgs_part_3 \
+    --knn_primary_layer layer3 \
+    --primary_ood_score knn_layer3
+done
+```
+
 For CIFAR-only runs:
 
 ```bash
@@ -52,7 +91,7 @@ For CIFAR-only runs:
 The zero-shot external-validation result and the adapted PAD result answer
 different questions. Do not replace the former with the latter.
 
-Optionally train validation-selected ISIC checkpoints into a separate output
+Train the fixed final-epoch fair-v2 ISIC checkpoints into a separate output
 folder:
 
 ```bash
@@ -63,10 +102,8 @@ python experiments/isic_paper_experiments.py \
   --split_seed 42 \
   --subsample_scope train \
   --subsample_ratio 20 \
-  --checkpoint_selection pauc_then_ap \
-  --checkpoint_eval_every 5 \
-  --checkpoint_start_epoch 10 \
-  --run_suffix _bestckpt
+  --checkpoint_selection last \
+  --run_suffix _fair_v2
 ```
 
 Then run the leakage-safe PAD adapter. The braces in `--model_path` are
@@ -77,7 +114,7 @@ python experiments/run_pad_adaptation.py \
   --pad_root /kaggle/input/datasets/mahdavi1202/skin-cancer \
   --pad_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
   --partition all \
-  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_bestckpt/seed_{seed}/model_state.pth' \
+  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v2/seed_{seed}/model_state.pth' \
   --seeds 42 123 456 \
   --target_mode diagnosis6 \
   --feature_layer auto \
@@ -103,7 +140,7 @@ python experiments/run_pad_layer4_kd.py \
   --pad_root /kaggle/input/datasets/mahdavi1202/skin-cancer \
   --pad_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
   --partition all \
-  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_bestckpt/seed_{seed}/model_state.pth' \
+  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v2/seed_{seed}/model_state.pth' \
   --seeds 42 123 456 \
   --target_mode diagnosis6 \
   --outer_folds 5 \
@@ -126,8 +163,10 @@ sweeps to avoid filling Kaggle storage.
 
 ## Fairness Notes
 
-All in-repo baselines share the same splits, backbone family, seeds, epoch
-budget, calibration/evaluation surface, and output format. Proxy baselines such
-as Fisher EDL, Flexible EDL, R-EDL, MiSLAS-style LAS+cRT, and RigL-style 2:4
-should be described as controlled in-repo implementations rather than official
-external-code reproductions.
+The main evidential/sparse comparison shares the same split, ResNet-18
+backbone, seeds, 40-epoch budget, learning-rate/loss-scale warmup, FP32
+objective path, calibration/evaluation surface, and deterministic runtime.
+Static 2:4 uses one fixed magnitude mask; RigL-style 2:4 uses magnitude pruning
+and task-gradient regrowth. Proxy baselines such as Fisher EDL, Flexible EDL,
+R-EDL, MiSLAS-style LAS+cRT, and RigL-style 2:4 must be described as controlled
+in-repo implementations rather than official external-code reproductions.

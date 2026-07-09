@@ -57,12 +57,21 @@ def _env_int(name, default):
 
 
 def configure_training_runtime():
-    """Enable safe CUDA speed defaults for fixed-size image training."""
+    """Configure a reproducible CUDA runtime unless explicitly opted out."""
     if not torch.cuda.is_available():
         return
-    torch.backends.cudnn.benchmark = os.environ.get("MDEP_CUDNN_BENCHMARK", "1") != "0"
+    deterministic = os.environ.get("MDEP_DETERMINISTIC", "1") != "0"
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    else:
+        torch.backends.cudnn.benchmark = os.environ.get("MDEP_CUDNN_BENCHMARK", "1") != "0"
+        torch.backends.cudnn.deterministic = False
     try:
-        torch.set_float32_matmul_precision(os.environ.get("MDEP_MATMUL_PRECISION", "high"))
+        default_precision = "highest" if deterministic else "high"
+        torch.set_float32_matmul_precision(os.environ.get("MDEP_MATMUL_PRECISION", default_precision))
     except Exception:
         pass
 
@@ -392,6 +401,31 @@ def valid_2_4_block_stats(mask):
     return valid, int(blocks.shape[0])
 
 
+def positive_percentile_rank(values):
+    """Layer-wise percentile ranks with exact zeros excluded and ties preserved."""
+    flat = values.reshape(-1)
+    result = torch.zeros_like(flat, dtype=torch.float32)
+    positive = flat > 0
+    positive_values = flat[positive]
+    count = positive_values.numel()
+    if count == 0:
+        return result.reshape_as(values)
+    if count == 1:
+        result[positive] = 1.0
+        return result.reshape_as(values)
+
+    sorted_values, order = torch.sort(positive_values)
+    _, counts = torch.unique_consecutive(sorted_values, return_counts=True)
+    ends = torch.cumsum(counts, dim=0)
+    starts = ends - counts
+    average_ranks = (starts + ends - 1).to(torch.float32) * 0.5
+    sorted_ranks = torch.repeat_interleave(average_ranks, counts)
+    ranked_positive = torch.empty_like(sorted_ranks)
+    ranked_positive[order] = sorted_ranks / float(count - 1)
+    result[positive] = ranked_positive
+    return result.reshape_as(values)
+
+
 class MDEPLinear(nn.Linear):
     """Drop-in replacement for nn.Linear with MDEP dynamic sparsity."""
     def __init__(self, in_features, out_features, bias=True, learn_permutation=False):
@@ -561,13 +595,28 @@ def update_scores_agents(
         print("-" * 75)
     for name, module in model.named_modules():
         if isinstance(module, (MDEPLinear, MDEPConv2d)):
-            if not hasattr(module, 'grad_microglia_w'):
+            needs_microglia = (
+                not disable_pruner
+                and pruner_type in {'signed_first_order', 'absolute_grad'}
+            )
+            needs_astrocyte = (
+                not disable_regrower
+                and regrower_type not in {'gradient', 'random'}
+            )
+            needs_task_gradient = (
+                not disable_regrower and regrower_type == 'gradient'
+            )
+            if (
+                (needs_microglia and not hasattr(module, 'grad_microglia_w'))
+                or (needs_astrocyte and not hasattr(module, 'grad_astrocyte_w'))
+                or (needs_task_gradient and not hasattr(module, 'grad_L_w'))
+            ):
                 if verbose:
                     print(f"  Layer {name}: ⚠️ Missing grad_microglia_w")
                 continue
 
             # Capture old mask before score update
-            old_mask = generate_2_4_mask(module.scores.data)
+            old_mask = module.mask.detach().clone()
 
             w_val = module.weight.data
 
@@ -587,11 +636,7 @@ def update_scores_agents(
                     
                 c1_min = c1.min().item()
                 c1_max = c1.max().item()
-                if c1_max - c1_min > 1e-8:
-                    c1_flat = c1.view(-1)
-                    C_ij = (c1_flat.argsort().argsort().float() / (c1_flat.numel() - 1)).view_as(c1)
-                else:
-                    C_ij = torch.zeros_like(c1)
+                C_ij = positive_percentile_rank(c1)
 
             # --- Astrocyte agent: growing score (§5.3) ---
             if disable_regrower:
@@ -606,11 +651,7 @@ def update_scores_agents(
                     g2 = torch.abs(module.grad_astrocyte_w)
                 g2_min = g2.min().item()
                 g2_max = g2.max().item()
-                if g2_max - g2_min > 1e-8:
-                    g2_flat = g2.view(-1)
-                    G_ij = (g2_flat.argsort().argsort().float() / (g2_flat.numel() - 1)).view_as(g2)
-                else:
-                    G_ij = torch.zeros_like(g2)
+                G_ij = positive_percentile_rank(g2)
 
             # Khắc phục hiện tượng kết tinh Astrocyte (Phase 4 Action 2):
             exploration_noise = torch.zeros_like(G_ij)
@@ -887,6 +928,33 @@ class MDEPTrainer:
                 if hasattr(m, 'effective_weight') and m.effective_weight is not None:
                     m.effective_weight.grad = None
 
+    @torch.no_grad()
+    def apply_active_weight_decay(self, weight_decay=1e-4):
+        """Apply AdamW-style decay only to active sparse coordinates."""
+        sparse_weights = {}
+        for module in self.model.modules():
+            if isinstance(module, (MDEPLinear, MDEPConv2d)):
+                sparse_weights[id(module.weight)] = module
+
+        for group in self.optimizer.param_groups:
+            decay = float(group.get("lr", 0.0)) * float(weight_decay)
+            if decay == 0.0:
+                continue
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                sparse_module = sparse_weights.get(id(parameter))
+                if sparse_module is None or sparse_module.warmup:
+                    parameter.mul_(1.0 - decay)
+                else:
+                    parameter.grad.mul_(sparse_module.mask)
+                    state = self.optimizer.state.get(parameter, {})
+                    for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                        buffer = state.get(key)
+                        if isinstance(buffer, torch.Tensor) and buffer.shape == sparse_module.mask.shape:
+                            buffer.mul_(sparse_module.mask)
+                    parameter.add_(parameter * sparse_module.mask, alpha=-decay)
+
     def compute_amortized_gradients(self, inputs, targets=None):
         """
         Amortized backward passes that compute:
@@ -895,7 +963,11 @@ class MDEPTrainer:
           • ∂u_e / ∂a^(l)     → signal for the Astrocyte agent (per-neuron anti-crystallization)
         Called only once per epoch to keep FLOPs low.
         """
-        self.model.train()
+        module_training_states = {
+            module: module.training for module in self.model.modules()
+        }
+        # Structural probing must not mutate BatchNorm running statistics.
+        self.model.eval()
 
         # Register forward hooks to capture layer activations for Astrocyte anti-crystallization
         activations = {}
@@ -993,6 +1065,8 @@ class MDEPTrainer:
         # Clean up hooks
         for h in hooks:
             h.remove()
+        for module, training in module_training_states.items():
+            module.train(training)
         self.model.zero_grad()
         self.reset_effective_weight_grads()
 
@@ -1039,18 +1113,59 @@ class MDEPTrainer:
         warmup_period = 1
         base_lr = self.base_lr
 
-        ema_loss = None
-        ema_grad = None
-        num_batches = len(dataloader)
-
         disable_topology_cache = getattr(self.args, 'disable_topology_cache', False) if self.args else False
-        proxy_inputs_buf = []
-        proxy_targets_buf = []
-        proxy_has_run = False
         max_proxy_batches = getattr(self.args, 'structural_proxy_batches', 4) if self.args else 4
         max_proxy_batches = max(1, int(max_proxy_batches))
         min_proxy_classes = getattr(self.args, 'structural_proxy_min_classes', 2) if self.args else 2
         min_proxy_classes = max(2, int(min_proxy_classes))
+        pruner_type = getattr(self.args, 'pruner_type', 'signed_first_order') if self.args else 'signed_first_order'
+        regrower_type = getattr(self.args, 'regrower_type', 'kl_uniform') if self.args else 'kl_uniform'
+        is_rigl_style = pruner_type == 'magnitude' and regrower_type == 'gradient'
+        verbose_structural_logs = getattr(self.args, 'verbose_structural_logs', False) if self.args else False
+
+        def refresh_topology(proxy_inputs=None, proxy_targets=None):
+            if not is_rigl_style:
+                self.compute_amortized_gradients(proxy_inputs, proxy_targets)
+            update_scores_agents(
+                self.model,
+                epoch=epoch,
+                disable_pruner=getattr(self.args, 'disable_pruner', False) if self.args else False,
+                disable_regrower=getattr(self.args, 'disable_regrower', False) if self.args else False,
+                pruner_type=pruner_type,
+                regrower_type=regrower_type,
+                pruning_strength=getattr(self.args, 'pruning_strength', 0.5) if self.args else 0.5,
+                use_anticryst=getattr(self.args, 'use_anticryst', True) if self.args else True,
+                verbose=verbose_structural_logs,
+            )
+
+        # Refresh the cached topology before the prediction loop. DST-EDL uses
+        # a BN-frozen proxy sample; RigL uses the previous task-gradient cache.
+        if not is_warmup and not disable_topology_cache:
+            if is_rigl_style:
+                refresh_topology()
+            else:
+                proxy_inputs_buf = []
+                proxy_targets_buf = []
+                for proxy_batch_idx, (proxy_inputs, proxy_targets) in enumerate(dataloader):
+                    proxy_inputs, proxy_targets = move_batch_to_device(proxy_inputs, proxy_targets, device)
+                    proxy_inputs_buf.append(proxy_inputs.detach())
+                    proxy_targets_buf.append(proxy_targets.detach().view(-1))
+                    if proxy_batch_idx + 1 >= max_proxy_batches:
+                        break
+                stacked_targets = torch.cat(proxy_targets_buf, dim=0)
+                if torch.unique(stacked_targets).numel() < min_proxy_classes:
+                    print(
+                        "[WARN] Structural proxy did not contain the requested "
+                        f"{min_proxy_classes} classes; using the fixed random proxy sample."
+                    )
+                refresh_topology(
+                    torch.cat(proxy_inputs_buf, dim=0),
+                    stacked_targets,
+                )
+
+        ema_loss = None
+        ema_grad = None
+        num_batches = len(dataloader)
 
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             # Smooth per-batch LR Warmup
@@ -1075,35 +1190,9 @@ class MDEPTrainer:
 
             inputs, targets = move_batch_to_device(inputs, targets, device)
 
-            # Amortized uncertainty-gradient pass. The default caches one structural
-            # pass per epoch; the no-cache ablation recomputes it for each batch.
-            # For rare-event ISIC, avoid letting an all-negative first batch define
-            # the cached topology signal for a whole epoch.
-            structural_probe_batch = False
-            proxy_inputs = inputs
-            proxy_targets = targets
-            should_probe = not is_warmup or epoch < 2
-            if should_probe:
-                if disable_topology_cache and not is_warmup:
-                    structural_probe_batch = True
-                elif not proxy_has_run:
-                    proxy_inputs_buf.append(inputs.detach())
-                    proxy_targets_buf.append(targets.detach().view(-1))
-                    stacked_targets = torch.cat(proxy_targets_buf, dim=0)
-                    has_enough_classes = torch.unique(stacked_targets).numel() >= min_proxy_classes
-                    reached_proxy_budget = (
-                        len(proxy_targets_buf) >= max_proxy_batches
-                        or batch_idx == num_batches - 1
-                    )
-                    if has_enough_classes or reached_proxy_budget:
-                        proxy_inputs = torch.cat(proxy_inputs_buf, dim=0)
-                        proxy_targets = stacked_targets
-                        structural_probe_batch = True
-                        proxy_has_run = True
-                        proxy_inputs_buf = []
-                        proxy_targets_buf = []
-            if (not is_warmup or epoch < 2) and structural_probe_batch:
-                self.compute_amortized_gradients(proxy_inputs, proxy_targets)
+            # The no-cache ablation refreshes immediately before each task update.
+            if not is_warmup and disable_topology_cache:
+                refresh_topology(inputs.detach(), targets.detach())
 
             self.model.zero_grad()
             self.reset_effective_weight_grads()
@@ -1183,41 +1272,26 @@ class MDEPTrainer:
             else:
                 ema_loss = 0.95 * ema_loss + 0.05 * current_loss
 
-            # Cache primary weight gradient for structural updates
-            if not is_warmup or epoch < 2:
-                inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
-                for m in self.model.modules():
-                    if isinstance(m, (MDEPLinear, MDEPConv2d)):
-                        if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
-                            m.grad_L_w = m.effective_weight.grad.clone().detach() * inv_scale
-                        else:
-                            m.grad_L_w = torch.zeros_like(m.weight)
-
-            verbose_structural_logs = getattr(self.args, 'verbose_structural_logs', False) if self.args else False
+            # Cache the current task gradient for the next RigL-style refresh.
+            inv_scale = 1.0 / (self.scaler.get_scale() + 1e-8)
+            for m in self.model.modules():
+                if isinstance(m, (MDEPLinear, MDEPConv2d)):
+                    if hasattr(m, 'effective_weight') and m.effective_weight.grad is not None:
+                        task_grad = m.effective_weight.grad.clone().detach()
+                        # Leaf parameter grads were already unscaled by
+                        # GradScaler.unscale_; retained intermediate grads were not.
+                        if not m.effective_weight.is_leaf:
+                            task_grad.mul_(inv_scale)
+                        m.grad_L_w = task_grad
+                    else:
+                        m.grad_L_w = torch.zeros_like(m.weight)
 
             if not is_warmup and batch_idx == 0 and verbose_structural_logs:
                 self.check_gradient_flow(epoch)
 
+            self.apply_active_weight_decay(weight_decay=1e-4)
             self.scaler.step(self.optimizer)
             self.scaler.update()
-
-            # Multi-agent structure optimization (once per epoch)
-            if not is_warmup and structural_probe_batch:
-                disable_pruner = getattr(self.args, 'disable_pruner', False) if self.args else False
-                disable_regrower = getattr(self.args, 'disable_regrower', False) if self.args else False
-                pruner_type = getattr(self.args, 'pruner_type', 'signed_first_order') if self.args else 'signed_first_order'
-                use_anticryst = getattr(self.args, 'use_anticryst', True) if self.args else True
-                
-                update_scores_agents(
-                    self.model, epoch=epoch if batch_idx == 0 else None,
-                    disable_pruner=disable_pruner,
-                    disable_regrower=disable_regrower,
-                    pruner_type=pruner_type,
-                    regrower_type=getattr(self.args, 'regrower_type', 'kl_uniform') if self.args else 'kl_uniform',
-                    pruning_strength=getattr(self.args, 'pruning_strength', 0.5) if self.args else 0.5,
-                    use_anticryst=use_anticryst,
-                    verbose=verbose_structural_logs,
-                )
 
         if self.scheduler is not None:
             self.scheduler.step()

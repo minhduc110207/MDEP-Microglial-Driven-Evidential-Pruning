@@ -64,6 +64,7 @@ except ImportError:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PROTOCOL_VERSION = "isic_fair_v2_2026_07_09"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -84,6 +85,7 @@ from guds_edl_core import (  # noqa: E402
     compute_uncertainties,
     evaluate,
     evaluate_adaptive_modes,
+    generate_2_4_mask,
     get_imbalanced_dataloaders,
     dataloader_runtime_kwargs,
     make_grad_scaler,
@@ -213,11 +215,11 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
     "rigl_style_24": ExperimentSpec(
         name="rigl_style_24",
         family="dynamic_sparse_baseline",
-        description="RigL-style 2:4 proxy using absolute-gradient pruning and gradient regrowth.",
+        description="RigL-style 2:4 baseline using magnitude pruning and task-gradient regrowth.",
         sparse=True,
         use_mdep_trainer=True,
         loss_name="edl",
-        pruner_type="absolute_grad",
+        pruner_type="magnitude",
         regrower_type="gradient",
         kl_scaling="symmetric",
         disable_efl=True,
@@ -532,6 +534,8 @@ def set_static_sparse_mode(model: nn.Module) -> None:
             module.warmup = False
             module.gamma = 0.15
             module.static_24_baseline = True
+            with torch.no_grad():
+                module.mask.copy_(generate_2_4_mask(module.scores))
 
 
 def model_head(model: nn.Module) -> tuple[nn.Module, nn.Module]:
@@ -1188,6 +1192,8 @@ def train_standard(
         criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
 
     total_samples = len(train_loader.dataset) if hasattr(train_loader, "dataset") else 10000
+    num_batches = max(1, len(train_loader))
+    base_lr = float(lr)
 
     for epoch in range(total_epochs):
         model.train()
@@ -1195,18 +1201,42 @@ def train_standard(
             set_static_sparse_mode(model)
         losses = []
         start = time.time()
-        for inputs, targets in train_loader:
+        for batch_idx, (inputs, targets) in enumerate(train_loader):
+            if epoch == 0:
+                warmup_fraction = batch_idx / num_batches
+                current_lr = 1e-6 + (base_lr - 1e-6) * warmup_fraction
+                current_loss_scale = 4.0 - 3.0 * warmup_fraction
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = current_lr
+            else:
+                current_loss_scale = 1.0
+
             inputs, targets = move_batch_to_device(inputs, targets, device)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', enabled=device.type == "cuda"):
                 if spec.loss_name in DISCRIMINATIVE_LOSS_NAMES:
                     logits = logits_from_model(model, inputs)
-                    loss = ce_or_focal_loss(logits, targets, spec, class_weights, p_true, p_train, epoch, total_epochs, total_samples=total_samples)
                 else:
                     evidence = model(inputs)
-                    loss = criterion(evidence, targets, epoch=epoch)
-            
-            scaler.scale(loss).backward()
+
+            # All objectives use FP32; AMP is restricted to the forward pass.
+            with torch.amp.autocast('cuda', enabled=False):
+                if spec.loss_name in DISCRIMINATIVE_LOSS_NAMES:
+                    loss = ce_or_focal_loss(
+                        logits.float(),
+                        targets,
+                        spec,
+                        class_weights,
+                        p_true,
+                        p_train,
+                        epoch,
+                        total_epochs,
+                        total_samples=total_samples,
+                    )
+                else:
+                    loss = criterion(evidence.float(), targets, epoch=epoch)
+
+            scaler.scale(loss * current_loss_scale).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
             scaler.step(optimizer)
@@ -1266,7 +1296,9 @@ def train_guds(
         efl_gamma_final=efl_gamma_final,
     )
     params = [p for name, p in model.named_parameters() if "scores" not in name]
-    optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    # Sparse coordinates receive explicit active-only AdamW-style decay in
+    # MDEPTrainer; setting optimizer decay to zero avoids decaying dormant links.
+    optimizer = optim.AdamW(params, lr=lr, weight_decay=0.0)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     trainer_args = SimpleNamespace(
         disable_pruner=spec.disable_pruner,
@@ -1779,6 +1811,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     experiment_record["run_suffix"] = args.run_suffix
 
     result = {
+        "protocol_version": PROTOCOL_VERSION,
         "experiment": experiment_record,
         "seed": seed,
         "model_seed": seed,
@@ -1803,8 +1836,22 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "metrics": metrics,
         "quality_gate": quality_metrics,
         "evaluator": "softmax" if uses_softmax_evaluation(spec) else "evidential",
+        "runtime": {
+            "deterministic": os.environ.get("MDEP_DETERMINISTIC", "1") != "0",
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "device": str(device),
+        },
     }
-    (run_dir / "run_config.json").write_text(json.dumps(json_safe(experiment_record), indent=2), encoding="utf-8")
+    run_config = {
+        "protocol_version": PROTOCOL_VERSION,
+        "experiment": experiment_record,
+        "model_seed": seed,
+        "split_seed": args.split_seed,
+        "arguments": vars(args),
+        "runtime": result["runtime"],
+    }
+    (run_dir / "run_config.json").write_text(json.dumps(json_safe(run_config), indent=2), encoding="utf-8")
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
     if not args.no_save_model:
         torch.save(model.state_dict(), run_dir / "model_state.pth")

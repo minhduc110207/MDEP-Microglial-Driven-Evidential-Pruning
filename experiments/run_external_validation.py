@@ -33,12 +33,38 @@ from guds_edl_core import (
 )
 from experiments.generalization_paper_suite import EvidenceResNet
 from experiments.isic_paper_experiments import (
+    PROTOCOL_VERSION,
     attach_ood_projection_head,
     seed_everything,
     collect_evidential_outputs,
     json_safe,
 )
 from experiments.metrics_ext import binary_image_anomaly_metrics
+
+
+def validate_checkpoint_protocol(checkpoint_path, allow_legacy=False):
+    """Reject checkpoints that were not produced by the aligned fair protocol."""
+    checkpoint_path = Path(checkpoint_path)
+    metrics_path = checkpoint_path.parent / "metrics.json"
+    found = None
+    if metrics_path.exists():
+        try:
+            found = json.loads(metrics_path.read_text(encoding="utf-8")).get("protocol_version")
+        except (OSError, ValueError, TypeError):
+            found = None
+    if found != PROTOCOL_VERSION:
+        message = (
+            f"Checkpoint {checkpoint_path} has protocol_version={found!r}; "
+            f"expected {PROTOCOL_VERSION!r}."
+        )
+        if allow_legacy:
+            print(f"[WARN] {message} Legacy checkpoint explicitly allowed.")
+        else:
+            raise RuntimeError(
+                message + " Retrain the three fair-v2 seeds or pass "
+                "--allow_legacy_checkpoint for diagnostic-only use."
+            )
+    return found
 
 
 class DummyDomainShiftDataset(Dataset):
@@ -798,6 +824,7 @@ def load_state_with_optional_ood_head(model, checkpoint_path, device):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Domain Shift & Fairness.")
     parser.add_argument("--model_path", type=str, help="Path to trained model model_state.pth (optional)")
+    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v2 checkpoints for diagnostic-only runs.")
     parser.add_argument("--fitzpatrick_csv", type=str, help="Path to Fitzpatrick17k metadata (optional)")
     parser.add_argument("--pad_ufes_csv", type=str, help="Path to PAD-UFES-20 metadata (optional)")
     parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")
@@ -838,12 +865,15 @@ def main():
     replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     
     out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
-    default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds" / f"seed_{args.seed}" / "model_state.pth"
+    default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds_fair_v2" / f"seed_{args.seed}" / "model_state.pth"
     
+    checkpoint_protocol = None
     if args.model_path and os.path.exists(args.model_path):
+        checkpoint_protocol = validate_checkpoint_protocol(args.model_path, args.allow_legacy_checkpoint)
         load_state_with_optional_ood_head(model, args.model_path, device)
         print(f"Loaded trained checkpoint from: {args.model_path}")
     elif default_ckpt.exists():
+        checkpoint_protocol = validate_checkpoint_protocol(default_ckpt, args.allow_legacy_checkpoint)
         load_state_with_optional_ood_head(model, default_ckpt, device)
         print(f"Loaded trained checkpoint from default path: {default_ckpt}")
     else:
@@ -1320,6 +1350,7 @@ def main():
     print("="*80)
     
     results = {
+        "checkpoint_protocol_version": checkpoint_protocol,
         "seed": int(args.seed),
         "split_seed": int(args.split_seed),
         "classification": metrics if is_binary_skin else "N/A",
