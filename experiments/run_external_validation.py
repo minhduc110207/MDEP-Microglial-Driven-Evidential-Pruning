@@ -865,7 +865,7 @@ def main():
     replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
     
     out_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
-    default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds_fair_v2" / f"seed_{args.seed}" / "model_state.pth"
+    default_ckpt = out_dir / "paper_experiment_outputs" / "isic" / "full_guds_fair_v3_nvidia24" / f"seed_{args.seed}" / "model_state.pth"
     
     checkpoint_protocol = None
     if args.model_path and os.path.exists(args.model_path):

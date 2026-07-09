@@ -363,15 +363,39 @@ class EvidentialFocalLoss(nn.Module):
 
 def generate_2_4_mask(scores):
     """
-    Generates an NVIDIA 2:4 structured sparsity mask.
-    For every complete row-wise block of 4 entries along the flattened inner
-    dimension, the top-2 entries by score survive. Trailing coordinates that
-    do not form a complete block are kept dense and excluded from the 2:4
-    validity fraction, matching the paper's "complete valid block" wording.
+    Generate a backend-compatible NVIDIA 2:4 structured sparsity mask.
+
+    TensorRT checks convolution weights in KCRS layout along the input-channel
+    axis C independently for every (K, R, S). Linear weights are checked along
+    their reduction/input axis. The previous implementation flattened C, R,
+    and S together; that preserved an internal 2:4 count but was not sufficient
+    for TensorRT sparse-convolution eligibility.
+
+    Trailing input channels that do not form a complete group of four remain
+    dense and are excluded from the exact-block denominator. The ISIC ResNet
+    sparse layers have C divisible by four; the RGB stem is intentionally dense.
     """
     if scores.ndim < 2:
         return torch.ones_like(scores)
 
+    if scores.ndim == 4:
+        # KCRS -> KRSC so groups of four are formed strictly along C.
+        grouped_scores = scores.permute(0, 2, 3, 1).contiguous()
+        inner_dim = grouped_scores.shape[-1]
+        complete_dim = (inner_dim // 4) * 4
+        mask_grouped = torch.ones_like(grouped_scores)
+        if complete_dim == 0:
+            return mask_grouped.permute(0, 3, 1, 2).contiguous()
+        complete_scores = grouped_scores[..., :complete_dim].reshape(-1, 4)
+        _, indices = torch.topk(complete_scores, 2, dim=-1)
+        complete_mask = torch.zeros_like(complete_scores)
+        complete_mask.scatter_(1, indices, 1.0)
+        mask_grouped[..., :complete_dim] = complete_mask.reshape(
+            *grouped_scores.shape[:-1], complete_dim
+        )
+        return mask_grouped.permute(0, 3, 1, 2).contiguous()
+
+    # Matrix/linear weights: group along the reduction/input dimension.
     shape = scores.shape
     scores_rows = scores.reshape(shape[0], -1)
     inner_dim = scores_rows.shape[1]
@@ -389,9 +413,17 @@ def generate_2_4_mask(scores):
 
 
 def valid_2_4_block_stats(mask):
-    """Return (valid_blocks, total_complete_blocks) for row-wise valid 2:4 blocks."""
+    """Return NVIDIA-layout exact-2:4 valid and total complete block counts."""
     if mask.ndim < 2:
         return 0, 0
+    if mask.ndim == 4:
+        grouped = mask.permute(0, 2, 3, 1).contiguous()
+        complete_dim = (grouped.shape[-1] // 4) * 4
+        if complete_dim == 0:
+            return 0, 0
+        blocks = grouped[..., :complete_dim].reshape(-1, 4)
+        valid = int((blocks.sum(dim=1) == 2).sum().item())
+        return valid, int(blocks.shape[0])
     rows = mask.reshape(mask.shape[0], -1)
     complete_dim = (rows.shape[1] // 4) * 4
     if complete_dim == 0:

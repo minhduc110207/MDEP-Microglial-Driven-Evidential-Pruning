@@ -103,7 +103,7 @@ def default_checkpoint(model_name: str, seed: int) -> Path:
         REPO_ROOT
         / "paper_experiment_outputs"
         / "isic"
-        / f"{model_name}_fair_v2"
+        / f"{model_name}_fair_v3_nvidia24"
         / f"seed_{seed}"
         / "model_state.pth"
     )
@@ -786,7 +786,7 @@ def main() -> int:
         "paper_ready": paper_ready,
         "quality_gates": {
             "rtx_a2000_verified": metadata["is_rtx_a2000"],
-            "fair_v2_checkpoints": checkpoints_current,
+            "fair_v3_nvidia24_checkpoints": checkpoints_current,
             "frozen_graph_equivalence": all(
                 record["frozen_equivalence"]["passed"] for record in checkpoint_records.values()
             ),

@@ -14,10 +14,10 @@ MAC/FLOP lý thuyết và masked-PyTorch diagnostics.
 - Bốn checkpoint fair-v2 đã huấn luyện:
 
 ```text
-paper_experiment_outputs/isic/dense_edl_fair_v2/seed_42/model_state.pth
-paper_experiment_outputs/isic/static_24_edl_fair_v2/seed_42/model_state.pth
-paper_experiment_outputs/isic/rigl_style_24_fair_v2/seed_42/model_state.pth
-paper_experiment_outputs/isic/full_guds_fair_v2/seed_42/model_state.pth
+paper_experiment_outputs/isic/dense_edl_fair_v3_nvidia24/seed_42/model_state.pth
+paper_experiment_outputs/isic/static_24_edl_fair_v3_nvidia24/seed_42/model_state.pth
+paper_experiment_outputs/isic/rigl_style_24_fair_v3_nvidia24/seed_42/model_state.pth
+paper_experiment_outputs/isic/full_guds_fair_v3_nvidia24/seed_42/model_state.pth
 ```
 
 Không dùng `--allow_legacy_checkpoint` cho số liệu đưa vào bài báo.
@@ -76,7 +76,7 @@ Runner tạo hai phép so sánh độc lập:
 
 Mỗi checkpoint được:
 
-- kiểm tra `isic_fair_v2_2026_07_09`;
+- kiểm tra `isic_fair_v3_nvidia24_2026_07_09`;
 - xác nhận exact 2:4;
 - đóng băng mask đúng một lần;
 - loại controller MDEP và mask multiplication khỏi inference graph;

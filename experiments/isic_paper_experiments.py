@@ -64,7 +64,7 @@ except ImportError:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PROTOCOL_VERSION = "isic_fair_v2_2026_07_09"
+PROTOCOL_VERSION = "isic_fair_v3_nvidia24_2026_07_09"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 

@@ -291,7 +291,7 @@ def resolve_checkpoint(args, seed):
         path = Path(value)
     else:
         root = Path("/kaggle/working") if Path("/kaggle/working").exists() else REPO_ROOT
-        path = root / "paper_experiment_outputs" / "isic" / "full_guds_fair_v2" / f"seed_{seed}" / "model_state.pth"
+        path = root / "paper_experiment_outputs" / "isic" / "full_guds_fair_v3_nvidia24" / f"seed_{seed}" / "model_state.pth"
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found for seed {seed}: {path}")
     return path
