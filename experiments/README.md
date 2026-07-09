@@ -20,7 +20,7 @@ This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
 - `nvidia_sparse_benchmark.py`: Level-3 TensorRT FP16 benchmark for trained
   Dense EDL, Static 2:4, RigL-style 2:4, and DST-EDL checkpoints. It separates
   network comparison from same-model sparse-kernel ablation and emits a LaTeX
-  table only when the RTX A2000, fair-v2 checkpoint, graph-equivalence, repeat,
+  table only when the RTX A2000, fair-v3 NVIDIA-layout checkpoint, graph-equivalence, repeat,
   and sparse-build evidence gates pass.
 - `run_nvidia_hardware_rtx_a2000.ps1`: local Windows launcher for the TensorRT
   benchmark. It expects `trtexec.exe` on `PATH`, via `TENSORRT_ROOT`, or through
@@ -47,10 +47,10 @@ This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
 !python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
-## ISIC Fair-v2 Protocol
+## ISIC Fair-v3 NVIDIA-layout Protocol
 
 The manuscript-facing comparison must be regenerated with the aligned
-`isic_fair_v2_2026_07_09` protocol:
+`isic_fair_v3_nvidia24_2026_07_09` protocol:
 
 ```bash
 MDEP_DETERMINISTIC=1 python -u experiments/isic_paper_experiments.py \
@@ -64,18 +64,18 @@ MDEP_DETERMINISTIC=1 python -u experiments/isic_paper_experiments.py \
   --subsample_ratio 20 \
   --structural_proxy_batches 4 \
   --checkpoint_selection last \
-  --run_suffix _fair_v2
+  --run_suffix _fair_v3_nvidia24
 ```
 
-Do not mix archived metrics or checkpoints with fair-v2 results. External OOD
+Do not mix archived metrics or checkpoints with fair-v3 results. External OOD
 evaluation is post-hoc and must consume the three new
-`full_guds_fair_v2/seed_{42,123,456}` checkpoints; it must not select or tune
+`full_guds_fair_v3_nvidia24/seed_{42,123,456}` checkpoints; it must not select or tune
 the ISIC model.
 
 ```bash
 for seed in 42 123 456; do
   python -u experiments/run_external_validation.py \
-    --model_path "/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v2/seed_${seed}/model_state.pth" \
+    --model_path "/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v3_nvidia24/seed_${seed}/model_state.pth" \
     --seed "${seed}" \
     --split_seed 42 \
     --custom_image_folder /kaggle/input/datasets/mahdavi1202/skin-cancer \
@@ -99,7 +99,7 @@ For CIFAR-only runs:
 The zero-shot external-validation result and the adapted PAD result answer
 different questions. Do not replace the former with the latter.
 
-Train the fixed final-epoch fair-v2 ISIC checkpoints into a separate output
+Train the fixed final-epoch fair-v3 ISIC checkpoints into a separate output
 folder:
 
 ```bash
@@ -111,7 +111,7 @@ python experiments/isic_paper_experiments.py \
   --subsample_scope train \
   --subsample_ratio 20 \
   --checkpoint_selection last \
-  --run_suffix _fair_v2
+  --run_suffix _fair_v3_nvidia24
 ```
 
 Then run the leakage-safe PAD adapter. The braces in `--model_path` are
@@ -122,7 +122,7 @@ python experiments/run_pad_adaptation.py \
   --pad_root /kaggle/input/datasets/mahdavi1202/skin-cancer \
   --pad_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
   --partition all \
-  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v2/seed_{seed}/model_state.pth' \
+  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v3_nvidia24/seed_{seed}/model_state.pth' \
   --seeds 42 123 456 \
   --target_mode diagnosis6 \
   --feature_layer auto \
@@ -148,7 +148,7 @@ python experiments/run_pad_layer4_kd.py \
   --pad_root /kaggle/input/datasets/mahdavi1202/skin-cancer \
   --pad_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
   --partition all \
-  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v2/seed_{seed}/model_state.pth' \
+  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v3_nvidia24/seed_{seed}/model_state.pth' \
   --seeds 42 123 456 \
   --target_mode diagnosis6 \
   --outer_folds 5 \

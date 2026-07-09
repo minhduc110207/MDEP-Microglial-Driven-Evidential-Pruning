@@ -61,7 +61,7 @@ def validate_checkpoint_protocol(checkpoint_path, allow_legacy=False):
             print(f"[WARN] {message} Legacy checkpoint explicitly allowed.")
         else:
             raise RuntimeError(
-                message + " Retrain the three fair-v2 seeds or pass "
+                message + " Retrain the three fair-v3 NVIDIA-layout seeds or pass "
                 "--allow_legacy_checkpoint for diagnostic-only use."
             )
     return found
@@ -824,7 +824,7 @@ def load_state_with_optional_ood_head(model, checkpoint_path, device):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Domain Shift & Fairness.")
     parser.add_argument("--model_path", type=str, help="Path to trained model model_state.pth (optional)")
-    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v2 checkpoints for diagnostic-only runs.")
+    parser.add_argument("--allow_legacy_checkpoint", action="store_true", help="Allow pre-fair-v3 checkpoints for diagnostic-only runs.")
     parser.add_argument("--fitzpatrick_csv", type=str, help="Path to Fitzpatrick17k metadata (optional)")
     parser.add_argument("--pad_ufes_csv", type=str, help="Path to PAD-UFES-20 metadata (optional)")
     parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")

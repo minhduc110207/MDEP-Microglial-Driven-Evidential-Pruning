@@ -1,5 +1,5 @@
 """
-Reproducible NVIDIA TensorRT Level-3 benchmark for the ISIC fair-v2 models.
+Reproducible NVIDIA TensorRT Level-3 benchmark for fair-v3 NVIDIA-layout models.
 
 This runner is deliberately separate from ``hardware_profile.py``:
 
@@ -128,7 +128,7 @@ def checkpoint_protocol(checkpoint: Path, allow_legacy: bool) -> str | None:
         raise FileNotFoundError(
             f"Missing checkpoint: {checkpoint}\n"
             "Hardware comparison requires saved trained checkpoints. Re-run the corresponding "
-            "fair-v2 experiment without --no_save_model, or pass --checkpoint MODEL=PATH."
+            "fair-v3 NVIDIA-layout experiment without --no_save_model, or pass --checkpoint MODEL=PATH."
         )
     found = None
     if metrics_path.exists():
@@ -192,7 +192,7 @@ def assert_identity_permutations(model: nn.Module) -> None:
         actual = module.perm_indices.detach().cpu()
         if not torch.equal(actual, expected):
             raise RuntimeError(
-                f"{name} uses a non-identity channel permutation. The paper fair-v2 deployment "
+                f"{name} uses a non-identity channel permutation. The paper fair-v3 deployment "
                 "protocol requires frozen identity order; refusing to export a mismatched graph."
             )
 
@@ -526,7 +526,7 @@ def write_latex_table(rows: list[dict[str, Any]], path: Path, seed: int) -> None
     lines = [
         r"\begin{table*}[t]",
         r"\centering",
-        r"\caption{TensorRT FP16 inference on an NVIDIA RTX A2000. Results use trained fair-v2 "
+        r"\caption{TensorRT FP16 inference on an NVIDIA RTX A2000. Results use trained fair-v3 "
         r"checkpoints, CUDA Graph execution, disabled host--device transfers, and repeated timed runs.}",
         r"\label{tab:rtx_a2000_level3}",
         r"\begin{tabular}{llrrrr}",
@@ -547,7 +547,7 @@ def write_latex_table(rows: list[dict[str, Any]], path: Path, seed: int) -> None
         [
             r"\bottomrule",
             r"\end{tabular}",
-            f"% fair-v2 checkpoint seed: {seed}",
+            f"% fair-v3 NVIDIA-layout checkpoint seed: {seed}",
             r"\end{table*}",
             "",
         ]
@@ -821,7 +821,7 @@ def main() -> int:
         "raw_results": raw_results,
         "reporting_scope": {
             "network_comparison": (
-                "Compares separately trained fair-v2 networks under their intended TensorRT path."
+                "Compares separately trained fair-v3 networks under their intended TensorRT path."
             ),
             "kernel_ablation": (
                 "Compares the same frozen DST-EDL graph with TensorRT sparsity disabled/enabled; "

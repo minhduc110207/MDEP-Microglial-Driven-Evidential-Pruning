@@ -11,7 +11,7 @@ MAC/FLOP lý thuyết và masked-PyTorch diagnostics.
 - PyTorch CUDA dùng được.
 - TensorRT có `trtexec.exe`/`trtexec`.
 - Python packages: `torch`, `torchvision`, `onnx`.
-- Bốn checkpoint fair-v2 đã huấn luyện:
+- Bốn checkpoint fair-v3 NVIDIA-layout đã huấn luyện:
 
 ```text
 paper_experiment_outputs/isic/dense_edl_fair_v3_nvidia24/seed_42/model_state.pth
@@ -100,7 +100,7 @@ TensorRT chỉ được coi là dùng sparse path khi verbose build log có dạ
 File `paper_table.tex` chỉ được sinh khi:
 
 - GPU đúng RTX A2000;
-- cả bốn checkpoint đúng fair-v2;
+- cả bốn checkpoint đúng fair-v3 NVIDIA-layout;
 - graph trước/sau đóng băng tương đương;
 - đủ số repeat;
 - mọi sparse engine được báo cáo thực sự chọn ít nhất một sparse tactic.
