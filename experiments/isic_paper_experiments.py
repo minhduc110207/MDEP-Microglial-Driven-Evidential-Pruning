@@ -1357,6 +1357,88 @@ def print_metrics_table(spec_name: str, metrics: dict[str, float]):
     print(f"{'='*70}\n")
 
 
+def make_ranking_checkpoint_callback(
+    model: nn.Module,
+    val_loader,
+    device: torch.device,
+    args: argparse.Namespace,
+    spec: ExperimentSpec,
+):
+    """Track a validation-only ranking checkpoint without touching calibration/test data."""
+    tracker = {
+        "enabled": args.checkpoint_selection != "last",
+        "metric": args.checkpoint_selection,
+        "best_epoch": None,
+        "best_score": -float("inf"),
+        "best_pauc": None,
+        "best_ap": None,
+        "state_dict": None,
+        "evaluations": [],
+    }
+    if not tracker["enabled"]:
+        return None, tracker
+    if spec.classifier_retrain:
+        print("[CHECKPOINT] Disabled for classifier-retraining baselines because cRT has a separate epoch schedule.")
+        tracker["enabled"] = False
+        return None, tracker
+
+    @torch.no_grad()
+    def callback(epoch: int, stage: str = "train"):
+        if stage != "train":
+            return {}
+        if epoch < args.checkpoint_start_epoch:
+            return {}
+        if epoch % args.checkpoint_eval_every != 0 and epoch != args.epochs:
+            return {}
+        model.eval()
+        labels_all, scores_all = [], []
+        for inputs, labels in val_loader:
+            inputs = inputs.to(device, non_blocking=True)
+            logits = logits_from_model(model, inputs)
+            evidence = model_head(model)[1](logits)
+            unc = compute_uncertainties(evidence)
+            probability = (unc["alpha"] / unc["S"])[:, 1]
+            labels_all.append(labels.detach().cpu().numpy())
+            scores_all.append(probability.detach().cpu().numpy())
+        y_true = np.concatenate(labels_all)
+        y_score = np.concatenate(scores_all)
+        if len(np.unique(y_true)) < 2:
+            print("[CHECKPOINT] Validation split has one class; retaining final epoch.")
+            tracker["enabled"] = False
+            return {}
+        pauc = float(compute_isic_pauc(y_true, y_score, min_tpr=0.80))
+        ap = float(average_precision_score(y_true, y_score))
+        if args.checkpoint_selection == "pauc":
+            score = pauc
+        elif args.checkpoint_selection == "ap":
+            score = ap
+        else:
+            # pAUC remains primary; AP only resolves near-ties.
+            score = pauc + 1e-3 * ap
+        tracker["evaluations"].append({
+            "epoch": int(epoch),
+            "pauc": pauc,
+            "average_precision": ap,
+            "selection_score": score,
+        })
+        if score > tracker["best_score"]:
+            tracker["best_score"] = score
+            tracker["best_epoch"] = int(epoch)
+            tracker["best_pauc"] = pauc
+            tracker["best_ap"] = ap
+            tracker["state_dict"] = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+            print(
+                f"[CHECKPOINT] new best epoch={epoch} metric={args.checkpoint_selection} "
+                f"pAUC={pauc:.4f} AP={ap:.4f}"
+            )
+        return {"val_pauc": pauc, "val_average_precision": ap}
+
+    return callback, tracker
+
+
 def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
@@ -1534,6 +1616,13 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             "backbone, classifier, and sparse topology are protected from OE gradients."
         )
 
+    checkpoint_callback, checkpoint_tracker = make_ranking_checkpoint_callback(
+        model,
+        val_loader,
+        device,
+        args,
+        spec,
+    )
     if spec.use_mdep_trainer:
         history = train_guds(
             model,
@@ -1552,6 +1641,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             lambda_ood=args.lambda_ood,
             ood_start_epoch=args.ood_start_epoch,
             ood_loss_target=args.ood_loss_target,
+            validation_callback=checkpoint_callback,
         )
     else:
         history = train_standard(
@@ -1565,7 +1655,19 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             args.epochs,
             args.lr,
             log_every=args.log_every,
+            validation_callback=checkpoint_callback,
         )
+
+    if checkpoint_tracker["enabled"] and checkpoint_tracker["state_dict"] is not None:
+        model.load_state_dict(checkpoint_tracker["state_dict"], strict=True)
+        print(
+            f"[CHECKPOINT] restored epoch={checkpoint_tracker['best_epoch']} "
+            f"before calibration and held-out evaluation."
+        )
+    checkpoint_record = {
+        key: value for key, value in checkpoint_tracker.items()
+        if key != "state_dict"
+    }
 
     quality_metrics = {}
 
@@ -1697,6 +1799,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "p_true": p_true,
         "p_train": p_train,
         "history": history,
+        "checkpoint_selection": checkpoint_record,
         "metrics": metrics,
         "quality_gate": quality_metrics,
         "evaluator": "softmax" if uses_softmax_evaluation(spec) else "evidential",
@@ -1752,6 +1855,14 @@ def main() -> int:
     parser.add_argument("--structural_proxy_min_classes", type=int, default=2, help="Minimum distinct target classes requested before caching a GUDS structural proxy batch.")
     parser.add_argument("--efl_gamma_final", type=float, default=0.0, help="Final EFL focal gamma after cosine decay; keep 0.0 for the reported clean default.")
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
+    parser.add_argument(
+        "--checkpoint_selection",
+        choices=["last", "pauc", "ap", "pauc_then_ap"],
+        default="last",
+        help="Validation-only checkpoint rule. 'last' preserves the reported baseline; other modes restore the best validation ranking epoch before calibration/test.",
+    )
+    parser.add_argument("--checkpoint_eval_every", type=int, default=5, help="Evaluate the validation ranking checkpoint every N training epochs.")
+    parser.add_argument("--checkpoint_start_epoch", type=int, default=10, help="First epoch eligible for validation-only checkpoint selection.")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--outlier_exposure", type=str, nargs="?", const="auto", default=None, help="Enable Outlier Exposure. Pass path to custom folder, or leave blank/'auto' to auto-detect skin-cancer folder.")
     parser.add_argument("--lambda_ood", type=float, default=0.003, help="OOD loss scaling weight when Outlier Exposure is enabled.")

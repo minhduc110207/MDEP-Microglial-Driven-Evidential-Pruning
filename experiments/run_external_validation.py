@@ -23,6 +23,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from guds_edl_core import (
+    MDEPConv2d,
+    MDEPLinear,
+    generate_2_4_mask,
     replace_conv2d_with_mdep,
     get_imbalanced_dataloaders,
     configure_training_runtime,
@@ -80,6 +83,22 @@ class PADUFES20MetadataDataset(Dataset):
         "sek", "seborrheic keratosis", "benign"
     }
     UNKNOWN_VALUES = {"", "unk", "unknown", "nan", "none", "null"}
+    DIAGNOSTIC_ALIASES = {
+        "nev": "NEV",
+        "nevus": "NEV",
+        "nevi": "NEV",
+        "bcc": "BCC",
+        "basal cell carcinoma": "BCC",
+        "ack": "ACK",
+        "akiec": "ACK",
+        "actinic keratosis": "ACK",
+        "sek": "SEK",
+        "seborrheic keratosis": "SEK",
+        "scc": "SCC",
+        "squamous cell carcinoma": "SCC",
+        "mel": "MEL",
+        "melanoma": "MEL",
+    }
 
     def __init__(
         self,
@@ -117,6 +136,10 @@ class PADUFES20MetadataDataset(Dataset):
 
         self.targets = np.array([s[1] for s in self.samples], dtype=np.int64)
         self.subgroups = np.array([s[2] for s in self.samples], dtype=object)
+        self.patient_ids = np.array([r["patient_id"] for r in self.sample_records], dtype=object)
+        self.lesion_ids = np.array([r["lesion_id"] for r in self.sample_records], dtype=object)
+        self.diagnostics = np.array([r["diagnostic"] for r in self.sample_records], dtype=object)
+        self.sample_paths = np.array([str(r["path"]) for r in self.sample_records], dtype=object)
         self.matched_diagnostic_counts = dict(self._count_matched_diagnostics())
         self.metadata_diagnostic_counts = dict(self._count_metadata_diagnostics())
 
@@ -241,6 +264,52 @@ class PADUFES20MetadataDataset(Dataset):
             return 0
         return None
 
+    def _normalize_diagnostic(self, value) -> str | None:
+        if pd.isna(value):
+            return None
+        text = str(value).strip().lower()
+        if text in self.DIAGNOSTIC_ALIASES:
+            return self.DIAGNOSTIC_ALIASES[text]
+        for alias, canonical in self.DIAGNOSTIC_ALIASES.items():
+            if alias in text:
+                return canonical
+        return None
+
+    def _group_identity(self, row, img_path: Path) -> tuple[str, str]:
+        """Return leakage-safe patient and lesion identifiers with stable fallbacks."""
+        by_lower = {c.lower(): c for c in self.df.columns}
+
+        def clean(column_name: str) -> str:
+            column = by_lower.get(column_name)
+            if column is None or pd.isna(row[column]):
+                return ""
+            value = str(row[column]).strip()
+            return "" if value.lower() in self.UNKNOWN_VALUES else value
+
+        patient = clean("patient_id")
+        lesion = clean("lesion_id")
+        image_key = img_path.stem
+        lesion_id = lesion or f"image:{image_key}"
+        patient_id = patient or (f"lesion:{lesion}" if lesion else f"image:{image_key}")
+        return patient_id, lesion_id
+
+    def subgroup_values(self, requested: str) -> np.ndarray:
+        """Format any metadata subgroup for the already matched sample order."""
+        by_lower = {c.lower(): c for c in self.df.columns}
+        column = by_lower.get(str(requested).lower())
+        if column is None:
+            raise ValueError(
+                f"Requested subgroup '{requested}' not found. "
+                f"Available columns: {list(self.df.columns)}"
+            )
+        old_column = self.subgroup_col
+        self.subgroup_col = column
+        try:
+            values = [self._format_subgroup(self.df.loc[r["row_index"]]) for r in self.sample_records]
+        finally:
+            self.subgroup_col = old_column
+        return np.asarray(values, dtype=object)
+
     def _count_metadata_diagnostics(self):
         counts = {}
         for value in self.df[self.diagnostic_col].fillna("unknown"):
@@ -310,20 +379,34 @@ class PADUFES20MetadataDataset(Dataset):
 
     def _build_samples(self):
         samples = []
+        records = []
         skipped_missing_file = 0
         skipped_unknown_label = 0
-        for _, row in self.df.iterrows():
+        for row_index, row in self.df.iterrows():
             img_path = self._match_row_image_path(row)
             if img_path is None:
                 skipped_missing_file += 1
                 continue
             target = self._diagnostic_to_binary(row[self.diagnostic_col])
-            if target is None:
+            diagnostic = self._normalize_diagnostic(row[self.diagnostic_col])
+            if target is None or diagnostic is None:
                 skipped_unknown_label += 1
                 continue
-            samples.append((img_path, target, self._format_subgroup(row)))
+            subgroup = self._format_subgroup(row)
+            patient_id, lesion_id = self._group_identity(row, img_path)
+            samples.append((img_path, target, subgroup))
+            records.append({
+                "row_index": row_index,
+                "path": img_path,
+                "target": int(target),
+                "diagnostic": diagnostic,
+                "patient_id": patient_id,
+                "lesion_id": lesion_id,
+                "subgroup": subgroup,
+            })
         self.skipped_missing_file = skipped_missing_file
         self.skipped_unknown_label = skipped_unknown_label
+        self.sample_records = records
         return samples
 
     def __len__(self):
@@ -337,12 +420,19 @@ class PADUFES20MetadataDataset(Dataset):
         return image, target, subgroup
 
 
-def equalized_odds_report(y_true, y_pred, subgroups, min_group_size: int = 1) -> dict:
+def equalized_odds_report(
+    y_true,
+    y_pred,
+    subgroups,
+    min_group_size: int = 1,
+    min_class_size: int = 1,
+) -> dict:
     """Compute Equalized Odds only when subgroup/class support is valid."""
     y_true = np.asarray(y_true).astype(int)
     y_pred = np.asarray(y_pred).astype(int)
     subgroups = np.asarray(subgroups).astype(str)
     min_group_size = max(1, int(min_group_size))
+    min_class_size = max(1, int(min_class_size))
 
     group_stats = {}
     for g in sorted(np.unique(subgroups)):
@@ -373,6 +463,7 @@ def equalized_odds_report(y_true, y_pred, subgroups, min_group_size: int = 1) ->
         "status": "ok",
         "class_counts": counts,
         "min_group_size": min_group_size,
+        "min_class_size": min_class_size,
         "group_stats": group_stats,
         "eligible_groups": [],
     }
@@ -386,11 +477,15 @@ def equalized_odds_report(y_true, y_pred, subgroups, min_group_size: int = 1) ->
 
     eligible = {
         g: s for g, s in non_unknown_groups.items()
-        if s["positive"] > 0 and s["negative"] > 0
+        if s["positive"] >= min_class_size and s["negative"] >= min_class_size
     }
     report["eligible_groups"] = sorted(eligible)
     if len(eligible) < 2:
-        report["status"] = "undefined_missing_positive_or_negative_by_subgroup"
+        report["status"] = (
+            "undefined_missing_positive_or_negative_by_subgroup"
+            if min_class_size == 1
+            else "undefined_insufficient_class_support_by_subgroup"
+        )
         return report
 
     tpr_vals = [s["tpr"] for s in eligible.values()]
@@ -673,6 +768,31 @@ def load_state_with_optional_ood_head(model, checkpoint_path, device):
     missing = [k for k in missing if not k.startswith("ood_projection_head.")]
     if missing:
         print(f"[WARN] Missing checkpoint keys: {missing}")
+    sparse_layers = 0
+    valid_blocks = 0
+    total_blocks = 0
+    with torch.no_grad():
+        for module in model.modules():
+            if not isinstance(module, (MDEPConv2d, MDEPLinear)):
+                continue
+            module.warmup = False
+            module.mask.copy_(generate_2_4_mask(module.scores))
+            rows = module.mask.reshape(module.mask.shape[0], -1)
+            complete = (rows.shape[1] // 4) * 4
+            if complete:
+                blocks = rows[:, :complete].reshape(-1, 4)
+                valid_blocks += int((blocks.sum(dim=1) == 2).sum().item())
+                total_blocks += int(blocks.shape[0])
+            sparse_layers += 1
+    if sparse_layers:
+        if valid_blocks != total_blocks:
+            raise RuntimeError(
+                f"Invalid sparse checkpoint reconstruction: {valid_blocks}/{total_blocks} valid 2:4 blocks."
+            )
+        print(
+            f"[INFO] Restored sparse inference state: layers={sparse_layers}, "
+            f"valid_2:4_blocks={valid_blocks}/{total_blocks}."
+        )
 
 
 def main():
@@ -683,7 +803,9 @@ def main():
     parser.add_argument("--custom_image_folder", type=str, help="Path to a custom image folder dataset for OOD testing (optional)")
     parser.add_argument("--pad_ufes_partition", type=str, default="imgs_part_3", help="PAD-UFES-20 image partition used for external testing")
     parser.add_argument("--fairness_group", type=str, default="auto", help="PAD-UFES-20 subgroup column for Equalized Odds, or 'auto'")
+    parser.add_argument("--fairness_groups", nargs="+", help="Additional PAD metadata subgroups evaluated from the same predictions.")
     parser.add_argument("--fairness_min_group_size", type=int, default=1, help="Minimum non-unknown samples required for a subgroup to be considered in Equalized Odds.")
+    parser.add_argument("--fairness_min_class_size", type=int, default=1, help="Minimum positive and negative samples required inside every subgroup used for Equalized Odds.")
     parser.add_argument("--knn_primary_layer", choices=["layer3", "layer4", "penultimate"], default="layer3", help="Fixed feature layer used for the primary KNN OOD score.")
     parser.add_argument("--primary_ood_score", default="knn_layer3", help="Metric key treated as the primary OOD result in the JSON summary; use 'auto' for the fixed KNN primary layer.")
     parser.add_argument("--seed", type=int, default=42, help="Model checkpoint seed folder")
@@ -929,9 +1051,21 @@ def main():
             y_pred,
             subgroups,
             min_group_size=args.fairness_min_group_size,
+            min_class_size=args.fairness_min_class_size,
         )
         eom_gap = fairness_report["eom_gap"]
         eom_status = fairness_report["status"]
+        fairness_by_group = {
+            str(getattr(external_ds, "subgroup_col", args.fairness_group) or args.fairness_group): fairness_report
+        }
+        for group_name in args.fairness_groups or []:
+            fairness_by_group[group_name] = equalized_odds_report(
+                y_true,
+                y_pred,
+                external_ds.subgroup_values(group_name),
+                min_group_size=args.fairness_min_group_size,
+                min_class_size=args.fairness_min_class_size,
+            )
         if not external_has_both_classes:
             print(
                 "[WARN] External classification labels contain only one class: "
@@ -950,6 +1084,7 @@ def main():
             "group_stats": {},
             "eligible_groups": [],
         }
+        fairness_by_group = {}
     
     # 5. Advanced Out-of-Distribution (OOD) Detection Evaluation
     print("\nEvaluating Out-of-Distribution (OOD) Detection using various uncertainty scores...")
@@ -1166,6 +1301,10 @@ def main():
         print(f"  - Equalized Odds (EOM) Gap: N/A ({eom_status})")
     else:
         print(f"  - Equalized Odds (EOM) Gap: N/A (Skipped - non-binary/partition external dataset)")
+    for group_name, group_report in fairness_by_group.items():
+        group_eom = group_report.get("eom_gap")
+        value = f"{group_eom:.4f}" if group_eom is not None else f"N/A ({group_report.get('status')})"
+        print(f"  - {group_name}: {value}")
         
     print(f"\nOOD Detection Performance (Full vs Balanced):")
     print(
@@ -1190,6 +1329,7 @@ def main():
             "eom_gap": eom_gap if is_binary_skin else None,
             "status": eom_status,
         },
+        "fairness_by_group": fairness_by_group,
         "primary_ood": {
             "score": primary_ood_score,
             "result": primary_ood_result,
@@ -1207,6 +1347,7 @@ def main():
             "matched_diagnostic_counts": getattr(external_ds, "matched_diagnostic_counts", None),
             "fairness_group_column": getattr(external_ds, "subgroup_col", None),
             "num_external_samples": len(external_ds),
+            "num_external_patients": int(len(np.unique(getattr(external_ds, "patient_ids", [])))) if isinstance(external_ds, PADUFES20MetadataDataset) else None,
             "class_counts": external_class_counts if is_binary_skin else None,
         },
         "best_hyperparams": {
