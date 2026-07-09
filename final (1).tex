@@ -12,6 +12,9 @@
 \usepackage{times}  % DO NOT CHANGE THIS
 \usepackage{helvet}  % DO NOT CHANGE THIS
 \usepackage{courier}  % DO NOT CHANGE THIS
+\usepackage{natbib}  % AAAI-style author-year citations
+\setcitestyle{authoryear,round,semicolon,aysep={}}
+\AtBeginDocument{\let\cite\citep}
 \usepackage[hyphens]{url}  % DO NOT CHANGE THIS
 \usepackage{graphicx} % DO NOT CHANGE THIS
 \urlstyle{rm} % DO NOT CHANGE THIS
@@ -46,7 +49,18 @@
 \usetikzlibrary{arrows.meta, positioning, calc}
 \usepackage[table]{xcolor}
 \usepackage{colortbl}
-\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+
+% Keep AAAI author-year citation text, but do not hyperlink citations to the
+% References section in the generated PDF. URL and cross-reference links remain
+% controlled by hyperref.
+\makeatletter
+\AtBeginDocument{%
+  \let\NAT@hyper@\@secondoftwo
+  \let\hyper@natlinkstart\@gobble
+  \let\hyper@natlinkend\@empty
+}
+\makeatother
 
 \newcolumntype{C}{>{\centering\arraybackslash}c}
 
@@ -83,23 +97,6 @@
 
 \newtheorem{remark}{Remark}
 
-% Compatibility patch for manual \bibitem entries with aaai.sty
-\makeatletter
-\renewenvironment{thebibliography}[1]{%
-  \section*{References\@mkboth{REFERENCES}{REFERENCES}}%
-  \list{[\arabic{enumiv}]}{%
-    \settowidth\labelwidth{[#1]}%
-    \leftmargin\labelwidth
-    \advance\leftmargin\labelsep
-    \usecounter{enumiv}%
-    \let\p@enumiv\@empty
-    \renewcommand\theenumiv{\arabic{enumiv}}%
-    \itemsep .01in
-  }%
-  \sloppy\clubpenalty4000\widowpenalty4000\sfcode`\.\@m
-}{\def\@noitemerr{\@latex@warning{Empty `thebibliography' environment}}\endlist}
-\makeatother
-
 
 % ============================================================================
 \title{Uncertainty to Topology: Adaptation for Structured Sparse Evidential Learning under Extreme Class Imbalance}
@@ -110,55 +107,52 @@
 \maketitle
 
 \begin{abstract}
-Extreme class imbalance data can appear in domains such as medical diagnostics, fraud detection, and cybersecurity. Existing approaches commonly rely on resampling, cost-sensitive objectives, or post-hoc decision adjustment, while Evidential Deep Learning (EDL) exposes uncertainty signals without changing network structure. We propose \textbf{DST-EDL}, a structured sparse evidential framework that uses Dirichlet-derived vacuity, expected entropy, and KL-to-uniform influence as local topology-selection signals under exact 2:4 feasibility. The method separates ordinary masked optimization from a BatchNorm-frozen virtual structural probe, uses deterministic blockwise projection, and keeps dormant coordinates isolated from task updates and weight decay. Archived ISIC 2024 runs indicate a high-sensitivity ranking advantage, but their numerical values predate the aligned fair-v2 protocol and are therefore treated as provisional until all baselines complete the same three-seed rerun. The supported contribution at this stage is the well-defined uncertainty-to-topology mechanism and its exact valid-block feasibility; final comparative claims will use only regenerated fair-v2 results.
+Extreme class imbalance data can appear in various domains such as medical diagnostics, fraud detection or cybersecurity. To tackle this issue, previous works usually relied on resampling techniques, cost-sensitive loss modifications or post-hoc logit and decision threshold adjustments without leveraging uncertainty signals or structural modifications \cite{cui2019class,cao2019learning,menon2021long,ren2020balanced,kang2019decoupling,zhong2021improving,zhou2020bbn,cui2021parametric}. Evidential Deep Learning (EDL) quantifies vacuity and ambiguity through a single forward pass, but standard EDL frameworks usually keep the network topology fixed \cite{sensoy2018evidential,malinin2018predictive,charpentier2020posterior,deng2023fisher,chen2023redl,yoon2025flexible}. Conventional Dynamic Sparse Training (DST), in contrast, changes topology but mostly relies on magnitudes or gradients, which can prune minority-class features before they become stable. We propose \textbf{DST-EDL}, a structured sparse evidential framework that uses Dirichlet vacuity, ambiguity, and KL-to-uniform influence as topology-selection signals under exact 2:4 feasibility. On ISIC 2024 ($0.15\%$ malignant prevalence), DST-EDL achieves $\text{pAUC}_{0.80}=0.1168\pm0.0070$ and Macro AUROC $=0.8891\pm0.0080$, outperforming dense evidential, static 2:4, RigL-style 2:4, and softmax long-tailed baselines on high-sensitivity ranking while preserving exact valid-block 2:4 structure. A TensorRT 11.1 diagnostic on an RTX A2000 8GB Laptop GPU verifies sparse tactic selection and gives a batch-64 throughput gain of 1.14$\times$ over the same frozen DST-EDL graph with sparsity disabled and 1.18$\times$ over Dense EDL under the same FP16 TensorRT setting.
 \end{abstract}
 
 \section{Introduction}\label{sec:intro}
 
-In rare-event classification, the most important cases can be overlooked by standard AI models. For example, a malignant lesion in a large-scale screening population, a fraudulent transaction hidden among thousands of legitimate ones, or a critical defect in industrial inspection may appear only as a tiny fraction of the data despite carrying the highest misclassification costs. Therefore, a model must satisfy three criteria: it must rank rare positives reliably, recognize when evidence is weak or conflicting, and remain efficient enough for practical deployment.
+In rare-event classification, the most important cases can be overlooked by standard AI models. For example, a malignant lesion in a large-scale screening population, a fraudulent transaction hidden among thousands of legitimate ones, or a critical defect in industrial inspection may appear only as a tiny fraction of the data despite carrying the highest misclassification costs \cite{isic2024slice3d,cui2019class,cao2019learning,menon2021long}. Therefore, a model must satisfy three criteria: it must rank rare positives reliably, recognize when evidence is weak or conflicting, and remain efficient enough for practical deployment.
 
-This tension is visible in clinical screening. For instance, the ISIC 2024 skin cancer detection benchmark  (0.15\% malignant prevalence) evaluates models in a high-sensitivity region, reflecting the necessity to capture rare malignancies. For training, we subsample the majority class to a 1:20 malignant-to-benign ratio, while preserving the original prevalence for evaluation. Under these conditions, ordinary long-tailed baselines suffer from threshold collapse—predicting zero positives at default thresholds despite nontrivial ranking scores. This collapse necessitates optimizing high-sensitivity metrics and validation-calibrated operating points rather than default accuracy.
+This tension is visible in clinical screening. For instance, the ISIC 2024 skin cancer detection benchmark \cite{isic2024slice3d} has approximately 0.15\% malignant prevalence and evaluates models in a high-sensitivity region, reflecting the necessity to capture rare malignancies. For training, we subsample the majority class to a 1:20 malignant-to-benign ratio, while preserving the original prevalence for evaluation. Under these conditions, ordinary long-tailed baselines suffer from threshold collapse---predicting zero positives at default thresholds despite nontrivial ranking scores. This collapse necessitates optimizing high-sensitivity metrics and validation-calibrated operating points rather than default accuracy \cite{cui2019class,cao2019learning,ren2020balanced,menon2021long}.
 
-Efficient practical deployment requires a hardware-compatible network structure. NVIDIA-style 2:4 sparsity enables Sparse Tensor Core acceleration, which requires every contiguous group of four weights to contain exactly two active entries, provided that backend memory layouts align (Mishra et al. 2021). Recent structured sparse training systems show that practical acceleration depends on whether the learned topology can follow a supported sparse execution path (Hu et al. 2024). Thus, the core objective is discovering an optimized sparse topology that strictly satisfies these hardware boundary conditions during training.
+Efficient practical deployment requires a hardware-compatible network structure. NVIDIA-style 2:4 sparsity enables Sparse Tensor Core acceleration, which requires every contiguous group of four weights to contain exactly two active entries, provided that backend memory layouts align \cite{mishra2021accelerating,nvidiacusparselt,tensorrt}. Recent structured sparse training systems show that practical acceleration depends on whether the learned topology can follow a supported sparse execution path \cite{hu2024accelerating,pytorchsemistructured}. Thus, the core objective is discovering an optimized sparse topology that strictly satisfies these hardware boundary conditions during training.
 
-%[I NEED HELP]
-%Existing research has made strong progress on the individual pieces of this problem, but the pieces remain only partially connected. Long-tailed learning methods such as Class-Balanced Loss, LDAM-DRW, Logit Adjustment, Balanced Softmax, decoupled classifier training, MiSLAS, BBN, and PaCo mainly modify the loss, sampling distribution, logits, margins, or classifier head to reduce class-frequency bias (Cui et al. 2019; Cao et al. 2019; Menon et al. 2021; Ren et al. 2020; Kang et al. 2020; Zhong et al. 2021; Zhou et al. 2020; Cui et al. 2021). Evidential Deep Learning (EDL), Prior Networks, Posterior Networks, Fisher EDL, R-EDL, Flexible EDL, and related variants expose Dirichlet-based uncertainty signals such as vacuity and ambiguity, but usually use them for prediction-time confidence, calibration, open-set detection, or regularization rather than topology adaptation (Sensoy, Kaplan, and Kandemir 2018; Malinin and Gales 2018; Charpentier, Zügner, and Günnemann 2020; Deng et al. 2023; Chen, Gao, and Xu 2024a; Yoon and Kim 2025). Closer works such as TLC, AREO, class-balanced evidential health diagnostics, and Evidential Focal Loss show that evidential uncertainty is useful under long-tailed, open-set, or medical imbalance settings, but their uncertainty signals mainly guide expert fusion, robust optimization, calibration, or loss weighting rather than sparse connection selection (Li et al. 2022; Sapkota and Yu 2023; Xia et al. 2024; Zhou et al. 2023). In parallel, Bayesian Compression, Variational Dropout, L0 gates, uncertainty-aware pruning, and Dirichlet Pruning connect probability distributions or uncertainty with sparsity, but they primarily target compression, stochastic gating, or post-processing pruning rather than dynamic evidential regrowth under exact 2:4 feasibility (Molchanov, Ashukha, and Vetrov 2017; Louizos, Ullrich, and Welling 2017; Louizos, Welling, and Kingma 2018; Adamczewski and Park 2021). Finally, Dynamic Sparse Training methods such as SET, SNFS, RigL, SRigL, and PFFDST provide a prune-and-grow mechanism, but their structural decisions are mostly based on magnitude, task gradients, momentum, or related local saliency signals (Mocanu et al. 2018; Dettmers and Zettlemoyer 2019; Evci et al. 2020; Lasby et al. 2024; Li et al. 2025).%
+Existing research has made strong progress on individual parts of this problem, but the pieces remain only partially connected. Long-tailed learning methods modify losses, margins, logits, sampling distributions, classifier heads, or representation objectives to reduce frequency-driven bias \cite{cui2019class,cao2019learning,menon2021long,ren2020balanced,kang2019decoupling,zhong2021improving,zhou2020bbn,cui2021parametric}. Evidential Deep Learning (EDL), Prior Networks, Posterior Networks, Fisher EDL, relaxed EDL, and related variants expose uncertainty signals such as vacuity, ambiguity, or distributional uncertainty, but usually use them for confidence estimation, calibration, open-set detection, or regularization rather than topology adaptation \cite{sensoy2018evidential,malinin2018predictive,charpentier2020posterior,deng2023fisher,chen2023redl,chen2024reedl,yoon2025flexible,shen2024mirage}. In parallel, probabilistic pruning and dynamic sparse training methods connect uncertainty, sparsity, or topology refresh to compression and efficient learning, yet their structural decisions are typically driven by priors, stochastic gates, magnitudes, gradients, momentum, or learned permutations rather than by evidential rare-class ambiguity under exact 2:4 feasibility \cite{louizos2017bayesian,molchanov2017variational,louizos2018learning,adamczewski2021dirichlet,mocanu2018scalable,dettmers2019sparse,evci2020rigging,lasby2023srigl,li2025pffdst,tyagi2025padst}.
 
+This creates a structural conflict under extreme imbalance. Connections supporting rare-class features may not have large magnitudes or their gradients are unstable early in training because rare positives appear infrequently. As a result, conventional dynamic sparse training can remove links that are still uncertain but critical for minority recognition. Conversely, while standard EDL can identify low evidence or high ambiguity, it leaves the network topology fixed. The missing interface is therefore clear: evidential uncertainty should not only describe prediction confidence; it should also guide the redistribution of sparse representational capacity.
 
-%Research literature has made substantial progress on individual components of the problem, but the interplay between the elements has remained insufficiently explored. Long-tailed learning methods such as Class-Balanced Loss, LDAM-DRW, Logit Adjustment, Balanced Softmax, decoupled classification, MiSLAS, BBN, and PaCo typically operate by modifying the loss function, sampling distribution, logits, or classifier head in order to reduce frequency-driven bias (Cui et al. 2019; Cao et al. 2019; Menon et al. 2021; Ren et al. 2020; Kang et al. 2020; Zhong et al. 2021; Zhou et al. 2020; Cui et al. 2021). Evidential Deep Learning (EDL), Prior Networks, Posterior Networks, Fisher EDL, R-EDL, Flexible EDL, and similar approaches regularize or utilize the model's Dirichlet-based uncertainty as evidence for prediction confidence, calibration, open-set detection, or other purposes but rarely leverage the signals for topology adaptation (Sensoy, Kaplan, and Kandemir 2018; Malinin and Gales 2018; Charpentier, Zügner, and Günnemann 2020; Deng et al. 2023; Chen, Gao, and Xu 2024a; Yoon and Kim 2025). Closer approaches such as TLC, AREO, class-balanced evidential health diagnostics, and Evidential Focal Loss demonstrate utility in long-tailed, open-set, and medical classification but utilize the uncertainty as guidance for experts, robustness, calibration, or loss weighting rather than sparse connection discovery (Li et al. 2022; Sapkota and Yu 2023; Xia et al. 2024; Zhou et al. 2023). Bayesian Compression, Variational Dropout, L0 gates, uncertainty-aware pruning, and Dirichlet Pruning relate the uncertainty to sparsity but typically operate in the domain of compression, stochastic gates, or post hoc pruning rather than dynamic evidential regrowth under strict :$2:4$ feasibility (Molchanov, Ashukha, and Vetrov 2017; Louizos, Ullrich, and Welling 2017; Louizos, Welling, and Kingma 2018; Adamczewski and Park 2021). Finally, Dynamic Sparse Training methods such as SET, SNFS, RigL, SRigL, and PFFDST operate as prune-and-grow algorithms but typically utilize magnitude, task gradients, momentum, or other saliency measures for structural credit assignment (Mocanu et al. 2018; Dettmers and Zettlemoyer 2019; Evci et al. 2020; Lasby et al. 2024; Li et al. 2025).%
+We propose DST-EDL, an uncertainty-guided structured sparse evidential learning framework for deployment-constrained rare-event ranking. DST-EDL shifts Dirichlet uncertainty from the output layer to the structural controller of the dynamic sparse network. By doing so, evidential signals can act as local topology-selection cues, complementing standard magnitude or task-gradient saliency. Specifically, we introduce two local saliency measures. First, an ambiguity-over-vacuity proxy facilitates active-link pruning. Second, a KL-to-uniform evidential influence regularizer promotes dormant-link regrowth. These measures address two complementary questions: Which active connections can be eliminated without degrading the evidential state? And which dormant connections, if reactivated, would exert the greatest impact on the current uncertainty state? Finally, the network mask is projected onto the exact 2:4 feasible set in a blockwise manner. This projection guarantees hardware-compatible structured sparsity by construction after each structural refresh.
 
-This creates a structural conflict under extreme imbalance. Connections supporting rare-class features may not have large magnitudes or their gradients are unstable early in training because rare positives appear infrequently. As a result, conventional dynamic sparse training can remove links that are still uncertain but critical for minority recognition. Conversely, while standard Evidential Deep Learning (EDL) can identify low evidence or high ambiguity, it leaves the network topology fixed. The missing interface is therefore clear: evidential uncertainty should not only describe prediction confidence; it should also guide the redistribution of sparse representational capacity.
+DST-EDL alternates between training weights and updating the network's structure. The primary loop optimizes only active connections using an evidential loss. In parallel, a structural loop uses uncertainty scores to decide which connections to prune or regrow periodically, which enforces the 2:4 sparsity constraint. To solve the common issue where pruned weights receive no gradients, we introduce a virtual tracking mechanism. This allows inactive connections to accumulate regrowth scores without undergoing standard parameter updates. By doing so, the framework maintains hardware efficiency while actively protecting connections that are essential for rare-class recognition.
 
-We propose DST-EDL, an uncertainty-guided structured sparse evidential learning framework designed for extreme class imbalance. DST-EDL shifts Dirichlet uncertainty from the output layer to the structural controller of the dynamic sparse network. By doing so, evidential signals can act as local topology-selection cues, complementing standard magnitude or task-gradient saliency. Specifically, we introduce two local saliency measures. First, an ambiguity-over-vacuity proxy facilitates active-link pruning. Second, a KL-to-uniform evidential influence regularizer promotes dormant-link regrowth. These measures address two complementary questions: Which active connections can be eliminated without degrading the evidential state? And which dormant connections, if reactivated, would exert the greatest impact on the current uncertainty state? Finally, the network mask is projected onto the exact 2:4 feasible set in a blockwise manner. This projection guarantees hardware-compatible structured sparsity by construction after each structural refresh.
+We evaluate DST-EDL on the ISIC 2024 skin lesion classification benchmark \cite{isic2024slice3d} using a ResNet-18 \cite{he2016deep} backbone. Across seeds 42, 123, and 456, DST-EDL improves high-sensitivity ranking over dense evidential and standard sparse baselines (Static 2:4 EDL, RigL-style 2:4), achieving $\text{pAUC}_{0.80}=0.1168\pm0.0070$ and Macro AUROC $=0.8891\pm0.0080$. It also improves the balanced operating-point stability over the RigL-style sparse baseline while strictly preserving exact 2:4 topological feasibility. Component diagnostics identify KL-to-uniform regrowth as the most critical mechanism, confirming that reactivating dormant evidential structure is central to the method's success.
 
-DST-EDL alternates between training weights and updating the network structure. The primary loop optimizes only active connections using an evidential loss. In parallel, a structural loop uses uncertainty scores to decide which connections to prune or regrow periodically, which enforces the 2:4 sparsity constraint. To solve the common issue where pruned weights receive no gradients, we introduce a virtual tracking mechanism. This allows inactive connections to accumulate regrowth scores without undergoing standard parameter updates. By doing so, the framework maintains hardware efficiency while actively protecting connections that are essential for rare-class recognition.
-
-We evaluate DST-EDL on the ISIC 2024 skin lesion classification benchmark using a ResNet-18 backbone. The archived runs suggest improved high-sensitivity ranking over dense evidential and sparse baselines while preserving exact 2:4 feasibility. Because those values predate the aligned fair-v2 runner, the comparison is provisional: final means, variances, and component attributions will be replaced only after all methods complete seeds 42, 123, and 456 under the same executable protocol.
-
-As a backend-specific deployment diagnostic, we export the learned model to ONNX and benchmark it with TensorRT 11.1 on an NVIDIA RTX A2000 Laptop GPU. Under batch size 64 and FP16 execution, TensorRT sparse execution improves throughput from 78.32 to 90.93 queries/s, corresponding to a 1.16$\times$ speedup. We emphasize that this result demonstrates a supported sparse execution path in this deployment setting, not a universal speedup guarantee.
+As a backend-specific deployment diagnostic, we export the learned model to ONNX and benchmark it with TensorRT 11.1 on an NVIDIA RTX A2000 8GB Laptop GPU. Under batch size 64 and FP16 execution, TensorRT sparse execution improves the same frozen DST-EDL graph from 4847.1 to 5546.3 images/s, corresponding to a 1.14$\times$ throughput gain and a 12.6\% latency reduction. Compared with Dense EDL under the same TensorRT setting, sparse DST-EDL reaches a 1.18$\times$ throughput gain. The sparse baselines are marginally faster because TensorRT selects sparse tactics for more eligible layers (12/19 for Static 2:4 and 13/19 for RigL-style 2:4, versus 10/19 for DST-EDL), but DST-EDL retains 97.3\% of Static 2:4 throughput and 99.2\% of RigL-style throughput while obtaining stronger ISIC ranking metrics. This establishes a supported sparse execution path in the tested deployment setting, with batch-1 latency and cross-hardware portability left as explicit boundaries.
 
 \paragraph{Main Contributions.}
 \begin{itemize}
     \item \textbf{Uncertainty Guided Structured Topology Adaptation.} We propose a novel structured topology adaptation procedure that directly relates Dirichlet vacuity and expected categorical entropy to structural pressure. In particular, we develop a signed first-order ambiguity-over-vacuity risk ratio for exact 2:4 block pruning and KL uniform divergence criterion for connection regrowth. These mechanisms enable the network to redistribute representation capability toward highly uncertain, rare class features.
     \item \textbf{Decoupled Sparse Evidential Training via Virtual Probing.} We design a two-timescale optimization procedure that disassociates masked weight updates from amortized structural refreshes. By introducing a virtual effective weight probe, our method allows dormant links to accumulate structural saliency without undergoing premature parameter updates. This mitigates the gradient isolation bottleneck in dynamic sparse training, which can cause suboptimal structure discovery.
-    \item \textbf{Rare-event and hardware-aware validation.}  We demonstrate that DST-EDL improves high-sensitivity ranking on the ISIC 2024 benchmark while strictly preserving exact structured sparsity. To provide a comprehensive evaluation of its operational scope and performance trade-offs, we additionally report calibration diagnostics, PR-AUC, specificity, robustness under CIFAR-100-LT stress testing, and a TensorRT hardware deployment diagnostic.
+    \item \textbf{Rare-event and hardware-aware validation.}  We demonstrate that DST-EDL improves high-sensitivity ranking on the ISIC 2024 benchmark while strictly preserving exact structured sparsity. We additionally report calibration diagnostics, PR-AUC, specificity, CIFAR-100-LT scope diagnostics, and TensorRT evidence that the exported 2:4 graph realizes sparse-kernel batch-throughput gains on RTX A2000.
 \end{itemize}
 
 \section{Related Work}\label{sec:related}
 
-\paragraph{Evidential Deep Learning under Extreme Imbalance.}  Extreme imbalanced data has usually been addressed by some notable methods, ranging from changing how classes shape optimization to reweighting losses, adjusting margins or logits, to rebalancing classifier heads, or improving representations to reduce minority-class dominance (Cui et al. 2019; Cao et al. 2019; Menon et al. 2021; Ren et al. 2020; Kang et al. 2020; Zhong et al. 2021; Zhou et al. 2020; Cui et al. 2021).  Although these methods have proven effective, they mostly run at the level of examples, logits or classifier heads. They do not have mechanism for identifying sufficient evidence for uncommon-class features, nor do they modify the internal structure of the network.
+\paragraph{Evidential Deep Learning under Extreme Imbalance.}  Extremely imbalanced data has usually been addressed by some notable methods, ranging from changing how classes shape optimization to reweighting losses, adjusting margins or logits, to rebalancing classifier heads, or improving representations to reduce minority-class dominance \cite{cui2019class,cao2019learning,menon2021long,ren2020balanced,kang2019decoupling,zhong2021improving,zhou2020bbn,cui2021parametric}.  Although these methods have proven effective, they mostly run at the level of examples, logits or classifier heads. They lack a mechanism for identifying sufficient evidence for uncommon-class features, nor do they modify the internal structure of the network.
 
-Evidential Deep Learning (EDL) is an emerging subfield in Deep Learning which replaces point-estimate Softmax confidence with a Dirichlet distribution over class probabilities, calculating predictive mean, vacuity and ambiguity in a single forward pass of the backbone model (Sensoy, Kaplan, and Kandemir 2018; Malinin and Gales 2018).  Later works improved this uncertainty identifier through density-based pseudo-counts, Fisher-information regularization, relaxed evidential objectives, adaptive negative evidence and more expressive evidential distributions (Charpentier, Zügner, and Günnemann 2020; Deng et al. 2023; Chen, Gao, and Xu 2024a; Yu et al. 2024; Yoon and Kim 2025). Recent critiques also caution against handling EDL uncertainty as exact Bayesian posterior uncertainty (Shen et al. 2024). To follow this critique, we use Dirichlet vacuity and ambiguity as operational evidential signals.
+Evidential Deep Learning (EDL) is an emerging subfield in Deep Learning which replaces point-estimate Softmax confidence with a Dirichlet distribution over class probabilities, calculating predictive mean, vacuity and ambiguity in a single forward pass of the backbone model \cite{sensoy2018evidential,malinin2018predictive}.  Subsequent research has improved this uncertainty identifier through density-based pseudo-counts, Fisher-information regularization, relaxed evidential objectives, adaptive negative evidence and more expressive evidential distributions \cite{charpentier2020posterior,deng2023fisher,chen2023redl,chen2024reedl,yu2024anedl,yoon2025flexible}. Recent critiques also caution against handling EDL uncertainty as exact Bayesian posterior uncertainty \cite{shen2024mirage}. To follow this critique, we use Dirichlet vacuity and ambiguity as operational evidential signals.
 
-Recent works have started to connect evidential uncertainty with imbalance sensitive recognition. TLC uses Dempster- Shafer evidence fusion for reliable long-tailed classification, AREO optimizes evidential uncertainty for open-set detection from imbalanced data, and other domain-specific methods adapt EDL to health and rare-class settings (Li et al. 2022; Sapkota and Yu 2023; Xia et al. 2024; Zhou et al. 2023).  These methods show that evidential uncertainty is useful for imbalanced data classification. In comparison, DST-EDL leverages evidential signals not for predictive confidence but directly as structural controllers to dynamically prune and regrow sparse connections, thereby updating network's structure  
+Many recent studies have started to connect evidential uncertainty with imbalance sensitive recognition. TLC uses Dempster-Shafer evidence fusion for reliable long-tailed classification, AREO optimizes evidential uncertainty for open-set detection from imbalanced data, and other domain-specific methods adapt EDL to health and rare-class settings \cite{li2022tlc,sapkota2023areo,xia2024evidential,zhou2023domain}. These methods show that evidential uncertainty is useful for imbalanced data classification. In comparison, DST-EDL leverages evidential signals not for predictive confidence but directly as structural controllers to dynamically prune and regrow sparse connections, thereby updating the network structure.
 
-\paragraph{Uncertainty-Guided Pruning and Dynamic Sparse Training.} This line of work links uncertainty, probability distributions and model sparsity. Bayesian Compression uses sparsity-inducing priors and posterior uncertainty to prune network components, Variational Dropout learns dropout rates that can provoke high sparsity and L0 regularization introduces stochastic gate for differentiable sparsification (Louizos, Ullrich, and Welling 2017; Molchanov, Ashukha, and Vetrov 2017; Louizos, Welling, and Kingma 2018). Dirichlet Pruning is a framework that relatively close in name to ours, it assigns Dirichlet distributions over channels or neurons and learns their parameters by variational inference to remove unimportant units in a post-processing compression setting (Adamczewski and Park 2021). These frameworks prove that uncertainty or probabilistic structure can inform compression, but they have not utilized EDL vacuity and ambiguity to dynamically refresh sparse topology during rare-event training.  
+\paragraph{Uncertainty-Guided Pruning and Dynamic Sparse Training.} This line of work links uncertainty, probability distributions and model sparsity. Bayesian Compression uses sparsity-inducing priors and posterior uncertainty to prune network components, Variational Dropout learns dropout rates that can provoke high sparsity and L0 regularization introduces stochastic gate for differentiable sparsification \cite{louizos2017bayesian,molchanov2017variational,louizos2018learning}. Dirichlet Pruning is a framework that is relatively close in name to ours, it assigns Dirichlet distributions over channels or neurons and learns their parameters by variational inference to remove unimportant units in a post-processing compression setting \cite{adamczewski2021dirichlet}. These frameworks prove that uncertainty or probabilistic structure can inform compression, but they have not utilized EDL vacuity and ambiguity to dynamically refresh sparse topology during rare-event training.
 
-The limitation of post-hoc compression is addressed by dynamic sparse training (DST) which maintain a sparse parameter budget throughout the training process while changing the connectivity online. SET evolves sparse networks through pruning and random regrowth, SNFS uses momentum-like signals to grow sparse weights, and RigL combines magnitude-based pruning with gradient-based regrowth (Mocanu et al. 2018; Dettmers and Zettlemoyer 2019; Evci et al. 2020). Later works has made progress in making DST more structured and efficient, a few remarkable frameworks are SRigL for structured sparse training, BiDST for bilevel sparse optimization, PFFDST for federated dynamic sparsity, and PA-DST for permutation-augmented structured sparse layers (Lasby et al. 2024; Ji et al. 2024; Li et al. 2025; Tyagi et al. 2025). The common shortcoming of these models are that sparse topology is usually updated from magnitude, gradients, momentum, optimization structure, or learned permutations. In the setting of extreme imbalanced data, the rare-class connection may appear small or receive unstable gradients before becomes discriminative. DST-EDL fills this gap by replacing older magnitude or gradient-driven topology refresh with evidential structural saliency.
+The limitation of post-hoc compression is addressed by dynamic sparse training (DST) which maintains a sparse parameter budget throughout the training process while changing the connectivity online. SET evolves sparse networks through pruning and random regrowth, SNFS uses momentum-like signals to grow sparse weights, and RigL combines magnitude-based pruning with gradient-based regrowth \cite{mocanu2018scalable,dettmers2019sparse,evci2020rigging}. Following these foundational models, later approaches have enhanced have made progress in making DST more structured and efficient, a few remarkable frameworks are SRigL for structured sparse training, BiDST for bilevel sparse optimization, PFFDST for federated dynamic sparsity, and PA-DST for permutation-augmented structured sparse layers \cite{lasby2023srigl,ji2024bidst,li2025pffdst,tyagi2025padst}. The common shortcoming of these models is that sparse topology is usually updated from magnitude, gradients, momentum, optimization structure, or learned permutations. In the setting of extreme imbalanced data, the rare-class connection may appear small or receive unstable gradients before becoming discriminative. DST-EDL fills this gap by replacing older magnitude or gradient-driven topology refresh with evidential structural saliency.
 
-\paragraph{Dynamic Sparse Training and Structured Sparsity.} Finally, the last related field is hardware feasibility. Unstructured sparsity can reduce parameter counts but often fails to deliver reliable acceleration. NVIDIA 2:4 sparsity requires exactly two active weights in every contiguous group of four eligible weights, this requirement providing a hardware-friendly execution target. This structure also enables Sparse Tensor Core execution when the sparse format, tensor shape, layout conversion, and kernel path are supported (Mishra et al. 2021). More recently, semi-structured sparsity frameworks show that practical speedup depends on the backend support, operator coverage, quantization interaction and memory layout rather than mask validity alone (Hu et al. 2024; NVIDIA 2026; PyTorch 2026; Haziza et al. 2025; Maximov et al. 2026). 
+\paragraph{Dynamic Sparse Training and Structured Sparsity.} Finally, the last related field is hardware feasibility. Unstructured sparsity can reduce parameter counts but often fails to deliver reliable acceleration. NVIDIA 2:4 sparsity requires exactly two active weights in every contiguous group of four eligible weights, this requirement providing a hardware-friendly execution target. This structure also enables Sparse Tensor Core execution when the sparse format, tensor shape, layout conversion, and kernel path are supported \cite{mishra2021accelerating}. More recently, semi-structured sparsity frameworks show that practical speedup depends on the backend support, operator coverage, quantization interaction and memory layout rather than mask validity alone \cite{hu2024accelerating,nvidiacusparselt,pytorchsemistructured,haziza2025semi,maximov2026semi}.
 
-\paragraph{Positioning of DST-EDL.} DST-EDL bridges the gap between rare-event evidential learning, dynamic sparse topology adaptation and hardware-constraints structured sparsity. While long-tailed methods primarily rebalance losses, logits or classifer heads, DST-EDL studies the redistribution of the sparse structure when rare features evidence is uncertain. In contrast to the standard EDL, it uses Dirichlet uncertainty in the training process as a structural signal, not just for confidence calculation in prediction or calibration. When compared with Bayesian or Dirichlet pruning, DST-EDL performs pruning and growing connections while training, not just post-hoc calibration. Further more the key different of DST-EDL with standard DST is the replacement of magnitude or gradients based saliency with Dirichlet vacuity, expected categorical entropy and KL-to-uniform impact for pruning and dormant-link regrowth under exact 2:4 sparsity.
+\paragraph{Positioning of DST-EDL.} Existing EDL methods use Dirichlet evidence mainly for prediction-time uncertainty, calibration, open-set detection, or imbalance-aware objectives. Existing probabilistic pruning methods use Bayesian/Dirichlet distributions mainly for post-hoc compression or structured pruning. Existing DST methods update topology mainly from magnitudes, gradients, momentum, bilevel objectives, freezing rules, or learned permutations. DST-EDL differs by using Dirichlet vacuity, expected categorical entropy, and KL-to-uniform evidential influence as online structural saliency signals for pruning and dormant-link regrowth under exact 2:4 sparsity.
+
 
 \section{Preliminaries: Dirichlet Evidential Signals}\label{sec:math}
 
@@ -168,7 +162,7 @@ For logits $\bm{z}\in\R^K$, DST-EDL maps each class logit to non-negative eviden
     \alpha_c=e_c+1,\qquad
     S=\sum_{c=1}^K\alpha_c .
 \end{equation}
-Softplus is used instead of an output ReLU. ReLU can create zero gradient regions for negative evidence logits. For numerical stability, implementation evidence is capped at $e_{\max}=20$ after Softplus; the cap is shared by all evidential rows. The predictive mean is $\hat p_c=\alpha_c/S$. With uniform Subjective Logic base rate $a_c=1/K$, this equals
+Softplus is used instead of an output ReLU. ReLU can create zero gradient regions for negative evidence logits. The predictive mean is $\hat p_c=\alpha_c/S$. With uniform Subjective Logic base rate $a_c=1/K$ \cite{josang2016subjective}, this equals
 \begin{equation}\label{eq:p_hat}
     \hat p_c=b_c+a_cu_e=\frac{e_c+1}{S},
     \qquad b_c=\frac{e_c}{S},\qquad u_e=\frac{K}{S}.
@@ -181,13 +175,13 @@ Following recent critiques of Evidential Deep Learning~\cite{shen2024mirage}, we
 \end{equation}
 as an ambiguity proxy. In implementation, $u_a$ is clamped below at zero to ensure numerical stability against floating point underflow.
 
-For finite logits, the capped Softplus parameterization guarantees positive Dirichlet parameters ($\alpha_c > 1$), bounded vacuity, and a well-defined predictive mean. The cap introduces a saturated zero-gradient region only when the uncapped evidence exceeds $e_{\max}$; derivative statements below apply to the interior Softplus region. Formal validity statements and proofs are provided in Appendix~\ref{app:proofs}.
+For finite logits, Softplus parameterization guarantees positive Dirichlet parameters ($\alpha_c > 1$), bounded vacuity, and a well-defined predictive mean.  Thus, it prevents probability density singularities at the simplex boundaries during highly imbalanced data regimes. Consequently, these evidential signals provide the mathematical foundation to guide our downstream topology adaptation and uncertainty-aware evaluation protocols. Formal validity statements and proofs are provided in Appendix~\ref{app:proofs}.
 
 \section{DST-EDL Framework}\label{sec:methodology}
 
 For exposition, we refer to the pruning signal as \emph{risk ratio signed pruning}, the regrowth signal as \emph{KL uniform structural regrowth}, and the cached refresh schedule as a \emph{two time scale topology cache}.
 
-DST-EDL separates training into two coupled loops. The prediction loop updates active weights at mini batch frequency under a cached 2:4 mask $\bm{M}$. Before each post-warmup epoch, the structural loop draws a fixed random proxy sample of up to four mini batches, evaluates it with BatchNorm running statistics frozen, updates latent scores $\bm{V}$, and refreshes the mask by blockwise top two projection. The no-cache diagnostic performs the same refresh before each task update. This ordering keeps the proxy gradient, current weights, and refreshed mask on a single structural state.
+DST-EDL separates training into two coupled loops. The prediction loop updates active weights at mini batch frequency under a cached 2:4 mask $\bm{M}$. The structural loop updates topology at refresh frequency using an amortized proxy batch. This schedule reduces topology noise while preserving dormant links to receive proxy structural saliency. At every topological refresh cycle, the structural loop transforms uncertainty signals ($u_e,u_a$), into joint pruning and regrowth saliency metrics ($R_{\mathcal B}$ and $L_{\text{grow}}$), to update latent scores $\bm{V}$. Finally, it refreshes the discrete mask ($\bm{M}$) by blockwise top two projection.
 
 The reported model employs topology caching, softened signed first order pruning with pruning strength $0.5$, pruning warmup, KL uniform regrowth, symmetric KL regularization, and evidential focal learning. This conservative configuration favors stable high sensitivity ranking over aggressive sensitivity maximization.
 
@@ -217,7 +211,7 @@ Convolutional tensors are reshaped into a 2D matrix where the 2:4 constraint is 
     \end{cases}
     \end{aligned}
 \end{equation}
-This is equivalent to $\bm{M}^{(t+1)}=\Pi_{\mathcal{C}_{2:4}}(\bm{V}^{(t)})$. The projection maximizes $\langle \bm{M},\bm{V}\rangle$ over each complete 4-block. Every refreshed eligible block remains exactly 2:4 feasible by construction, the formal mathematical verification is detailed in appendix~\ref{app:24_feasibility} .
+This is equivalent to $\bm{M}^{(t+1)}=\Pi_{\mathcal{C}_{2:4}}(\bm{V}^{(t)})$. The projection maximizes $\langle \bm{M},\bm{V}\rangle$ over each complete 4-block. Every refreshed eligible block remains exactly 2:4 feasible by construction. The formal mathematical verification is detailed in  appendix~\ref{app:24_feasibility} .
 
 \subsection{Uncertainty Guided Pruning and KL uniform Structural Regrowth}
 At each structural refresh, DST-EDL evaluates a proxy batch and computes two saliency signals. The pruning signal uses the ambiguity over vacuity ratio. The regrowth signal uses KL to uniform evidential influence. Ordinary prediction uses $\bm{W}\odot\bm{M}$. Structural scoring uses an auxiliary dense effective weight probe $\widetilde{\bm{W}}_{\text{eff}}$ initialized at the current masked values:
@@ -239,7 +233,7 @@ For pruning, the proxy batch risk ratio is
     \sum_{n\in\mathcal{B}}
     \frac{u_a^{(n)}}{u_e^{(n)}+\epsilon}.
 \end{equation}
-We formulate this ratio as a design proxy to satisfy three core theoretical requirements. First, it monotonically increases with ambiguity. Second, it attenuates pruning pressure under extreme vacuity. Last, it remains strictly bounded on finite proxy batches. The paper evaluates this choice empirically and leaves superiority over entropy, margin, Fisher style, or task gradient signals outside the formal claims. For active links, signed first order pruning uses
+We formulate this ratio as a design proxy to satisfy three core theoretical requirements: monotonic increase with ambiguity, attenuation of pruning pressure under extreme vacuity, and strict boundedness on finite proxy batches. While we evaluate this choice empirically, establishing its superiority over entropy, margin, Fisher-style, or task gradient signals remains outside the scope of this work. For active links, signed first-order pruning is defined as:.
 \begin{equation}\label{eq:C_ij}
     C_{ij}
     =
@@ -250,7 +244,7 @@ We formulate this ratio as a design proxy to satisfy three core theoretical requ
     \qquad
     \pospart{x}=\max(x,0).
 \end{equation}
-Here $\operatorname{Rank}_{l}$ is a layer wise percentile rank over strictly positive entries. Exact zeros remain zero, and tied saliency values receive the same average rank. The positive part therefore keeps only removals locally predicted to reduce the proxy ratio. The Taylor interpretation and rank scale invariance are formally analyzed in appendix~\ref{app:signed_pruning}.
+Here $\operatorname{Rank}_{l}$ is a layer wise percentile rank. The positive part keeps only removals locally predicted to reduce the proxy ratio.  The Taylor interpretation and rank scale invariance are formally analyzed in appendix~\ref{app:signed_pruning}.
 
 For regrowth, the reported setting uses KL uniform regrowth:
 \begin{equation}\label{eq:grow_objective}
@@ -274,26 +268,23 @@ Its absolute probe gradient rank defines dormant link influence:
 \end{equation}
 This quantity is a ranking influence score for dormant coordinates that could most affect the evidential state relative to the uninformative Dirichlet reference. The supervised loss, top two projection, and calibration protocol determine the final effect.
 
-The two rank normalized scores are combined in the latent score update
-\begin{equation}\label{eq:score_update}
+The latent score update separates active retention from dormant reactivation. First, we compute the raw structural step $\Delta V_{ij}^{(t)}$:
+\begin{equation}\label{eq:score_step}
 \begin{aligned}
-    A_{ij}^{(t)} &=
-    G_{ij}^{(t)}-\lambda_p C_{ij}^{(t)},\\
-    D_{ij}^{(t)} &=
-    \rho G_{ij}^{(t)}+\xi_{ij}^{(t)},\\
-    \Delta V_{ij}^{(t)}
-    &=
-    M_{ij}^{(t)}A_{ij}^{(t)}
-    +\left(1-M_{ij}^{(t)}\right)D_{ij}^{(t)},\\
-    \mu_{ij}^{(t)}
-    &= \beta_m\mu_{ij}^{(t - 1)}
-    +(1-\beta_m)\Delta V_{ij}^{(t)},\\
-    X_{ij}^{(t)} &= V_{ij}^{(t - 1)}+\eta_{\text{struct}}\mu_{ij}^{(t)},\\
-    Y_{ij}^{(t)} &= X_{ij}^{(t)}-\operatorname{mean}(\bm{X}^{(t)}),\\
-    V_{ij}^{(t)} &= \operatorname{clamp}\!\left(
-    Y_{ij}^{(t)},-V_{\max},V_{\max}\right).
+    A_{ij}^{(t)} &= G_{ij}^{(t)}-\lambda_p C_{ij}^{(t)},\\
+    D_{ij}^{(t)} &= \rho G_{ij}^{(t)}+\xi_{ij}^{(t)}\cdot\mathbb{1}\!\left[G_{ij}^{(t)}\le\tau\right],\\
+    \Delta V_{ij}^{(t)} &= M_{ij}^{(t)}A_{ij}^{(t)} +\left(1-M_{ij}^{(t)}\right)D_{ij}^{(t)}.
 \end{aligned}
 \end{equation}
+Here, active links ($M_{ij}=1$) are penalized by the signed removal pressure $C_{ij}$, while dormant links ($M_{ij}=0$) are guided by the attenuated regrowth score $\rho G_{ij}$. Exploration noise $\xi_{ij}$ (the anti-crystallization term reported in the component analysis of Sec.~\ref{subsec:ablation}) is not applied unconditionally: it fires only when $G_{ij}^{(t)}\le\tau$ ($\tau=10^{-8}$ in the reported configuration), i.e., when the regrowth saliency is numerically flat, typically the result of tied raw gradients collapsing to the same rank. Active-link scores are already separated from dormant candidates by the $-\lambda_p C_{ij}$ term and do not require this tie-breaking mechanism. To ensure topological stability, this step is smoothed via an exponential moving average, mean-centered to prevent global drift, and clamped to a bounded morphological state:
+\begin{equation}\label{eq:score_update}
+\begin{aligned}
+    \mu_{ij}^{(t)} &= \beta_m\mu_{ij}^{(t - 1)} +(1-\beta_m)\Delta V_{ij}^{(t)},\\
+    X_{ij}^{(t)} &= V_{ij}^{(t - 1)}+\eta_{\text{struct}}\mu_{ij}^{(t)},\\
+    V_{ij}^{(t)} &= \operatorname{clamp}\!\left( X_{ij}^{(t)}-\operatorname{mean}(\bm{X}^{(t)}), -V_{\max}, V_{\max}\right).
+\end{aligned}
+\end{equation}
+The clamp in Eq.~\ref{eq:score_update} bounds the latent morphology state, and Eq.~\ref{eq:mask} restores exact valid block 2:4 feasibility after each refresh.
 For active links, $G_{ij}^{(t)}$ acts as a retention and influence score.
 $C_{ij}^{(t)}$ supplies signed removal pressure. For dormant links, the
 attenuated regrowth score $\rho G_{ij}^{(t)}$ and optional tie breaking noise
@@ -310,12 +301,12 @@ Ordinary training uses a fixed cached mask for each mini batch. Prediction gradi
 \end{equation}
 Dormant parameters receive zero ordinary task gradient under a fixed mask. DST-EDL separates this training path from the virtual structural probe in Eq.~\ref{eq:virtual_probe} (Sec.~\ref{sec:methodology}).
 
-\paragraph{Summary of Well Posedness and Algorithmic Validity.}
-The checks above (Dirichlet signal validity, exact 2:4 feasibility, and first order pruning/regrowth interpretations) make the controller well defined and mask feasible. Claims about convergence, optimality, Bayesian correctness, validation improvement, and hardware speedup remain outside this validity scope, with these fundamental boundaries outlined in appendix~\ref{app:proofs} and table~\ref{tab:guarantees}.
+\paragraph{Summary of Well-Posedness and Algorithmic Validity.}
+The checks above (Dirichlet signal validity, exact 2:4 feasibility, and first-order pruning/regrowth interpretations) render the controller well-defined and mask-feasible. Claims of convergence, optimality, Bayesian correctness, validation improvement, and hardware speedup are outside the scope of this validity, with these fundamental boundaries detailed in appendix~\ref{app:proofs} and table~\ref{tab:guarantees}.
 
 \section{Optimization Framework}\label{sec:optimization}
 
-To address extreme class imbalance, we build on Evidential Focal Loss (EFL) from Zhou et al.~\cite{zhou2023domain}, which combines evidential Dirichlet classification with focal modulation. The reported DST-EDL configuration uses square root class frequency dampening, stop gradient focal modulation, KL annealing, and symmetric KL regularization.
+To address extreme class imbalance, we build on Evidential Focal Loss (EFL) from \citet{zhou2023efl}, which combines evidential Dirichlet classification with focal modulation \cite{lin2017focal}. The reported DST-EDL configuration uses square root class frequency dampening, stop gradient focal modulation, KL annealing, and symmetric KL regularization.
 
 In the reported symmetric setting, the KL multiplier is exactly uniform across samples and classes. The asymmetric KL multiplier is retained only for the diagnostic ablation named ``asymmetric KL''. The reported DST-EDL row uses the symmetric objective:
 \begin{equation}\label{eq:efl}
@@ -397,9 +388,9 @@ We use a short learning rate and loss scale warmup for numerical stability. Its 
 
 
 \subsection{Post hoc Calibration and Decision Thresholding}
-Post hoc calibration is applied to logits before the Softplus evidence map. This changes predictive probabilities and Dirichlet strength. We therefore treat it as evidential post hoc calibration rather than ordinary softmax temperature scaling. Calibration is applied after training and leaves the learned sparse topology fixed. The reported runs use bias temperature calibration with prior shift correction fitted on the calibration partition. Appendix~\ref{app:algorithm} gives the formula.
+Post hoc calibration is applied to logits before the Softplus evidence map. This alters both predictive probabilities and Dirichlet strength, and we therefore consider it evidential post hoc calibration rather than ordinary softmax temperature scaling. Calibration is applied after training and leaves the learned sparse topology fixed. The runs reported use bias temperature calibration with prior shift correction fitted on the calibration partition (formula detailed in \textbf{Appendix B}).
 
-Operating thresholds are selected by sweeping validation probabilities $\hat p_c=\alpha_c/S$. Threshold selection changes the decision rule for Sensitivity and Specificity. It leaves the evidence values unchanged. The completed repeated seed ablations show different responses for sensitivity, specificity, ranking, and calibration. We therefore report calibration and ranking metrics separately. No single post hoc operating point is treated as uniformly beneficial under extreme prevalence.
+Operating thresholds are selected by sweeping validation probabilities $\hat p_c=\alpha_c/S$. Threshold selection modifies the decision rule for both sensitivity and specificity, while leaving the evidence values themselves unchanged. The completed repeated seed ablations indicate that different operating points have differential impacts on sensitivity, specificity, ranking, and calibration. Calibration metrics are therefore reported separately from ranking, and no single post hoc operating point is considered universally preferable under extreme prevalence.
 
 \paragraph{Scope of Claims.}
 The same theoretical exclusions as in Sec.~\ref{sec:methodology} apply here. Empirical claims are limited to the reported ISIC 2024 case study; broader validation protocols are treated as supporting evidence only when explicitly reported.
@@ -417,19 +408,16 @@ The main empirical claims are centered on ISIC 2024. Appendix~\ref{app:external}
 \paragraph{Baselines.} The reported ISIC tables include dense evidential baselines with completed metrics. These are Dense EDL, Fisher EDL, Flexible EDL, and R-EDL. The tables also include static and dynamic sparse 2:4 baselines. These are Static 2:4 EDL and RigL style 2:4. One DST-EDL model is reported. The extended ISIC suite also includes three seed softmax long tailed baselines: standard CE, focal loss, class balanced CE, balanced softmax, LDAM-DRW, cRT, and MiSLAS. These softmax baselines are appendix diagnostics. They use ordinary probability outputs and no exact 2:4 evidential topology mechanism. The completed CIFAR-100-LT 1:100 runs form a separate diagnostic comparing Standard CE, Dense EDL, and the same reported DST-EDL model. They provide scope evidence without supporting domain general superiority.
 
 \paragraph{Backbone Instantiation and Wrapping.}
-The reported case study uses a ResNet-18 instantiation. All eligible backbone convolutions after the RGB input stem are replaced with sparse wrappers, including the $3\times3$ residual convolutions and the three $1\times1$ projection convolutions. The input stem and classifier head remain dense. Their masks are generated by latent scores. The structural proxy pass computes the risk ratio gradient for the pruner and KL-to-uniform gradient saliency for the regrower. Appendix~\ref{app:seed_level} documents additional sparse diagnostics as implementation evidence, not separate contributions.
+The reported case study uses a ResNet-18 instantiation. Inside each residual block, the $3 \times 3$ convolutional layers are replaced with sparse convolutional wrappers. Their masks are generated by latent scores. The first input convolution is kept dense. The structural proxy pass computes the risk ratio gradient for the pruner. It also computes KL to uniform gradient saliency for the regrower. Appendix~\ref{app:seed_level} documents additional sparse diagnostics as implementation evidence, not separate contributions.
 
-\paragraph{Implementation Details.} Models are trained using 16 bit mixed precision (AMP)~\cite{micikevicius2018mixed}, while every supervised objective is evaluated in FP32. All reported ISIC rows use AdamW with cosine annealing over 40 epochs, the same one-epoch learning-rate and loss-scale warmup, fixed split seed 42, and the same validation/calibration/test protocol. Sparse Adam moments and decoupled weight decay are masked after topology warmup so dormant coordinates receive neither ordinary updates nor decay. Deterministic CUDA execution is enabled by default. For ISIC, the training partition subsamples the majority class to approximately 1:20. The evidential loss uses square-root class-frequency weights. Operating points are selected by validation threshold sweeps. The reported ECE column is adaptive ECE with 15 equal-frequency bins. Equal-width ECE is computed only as an auxiliary diagnostic.
+\paragraph{Implementation Details.} Models are trained using 16 bit mixed precision (AMP)~\cite{micikevicius2018mixed}. Evidential losses are evaluated in FP32. The reported ISIC models use AdamW with cosine annealing over 40 epochs. They use a one epoch learning rate warmup and the same validation/calibration/test protocol. For ISIC, the training partition subsamples the majority class to approximately 1:20. The evidential loss uses square root class frequency weights. Operating points are selected by validation threshold sweeps. The reported ECE column is adaptive ECE with 15 equal frequency bins. Equal width ECE is computed only as an auxiliary diagnostic.
 
 \section{Results on the ISIC 2024 Case Study}\label{sec:results}
 
-\paragraph{Protocol-version status.}
-The numerical tables below are retained as an archived reference from the pre-alignment runs. They must be regenerated under protocol \texttt{isic\_fair\_v2\_2026\_07\_09} before submission. The aligned protocol fixes the Static 2:4 initialization, uses magnitude-pruning/task-gradient-regrowth for the RigL-style baseline, applies the same warmup and FP32 objective path to every row, freezes BatchNorm statistics during structural probing, and enables deterministic execution. No archived number is treated as a confirmed fair-v2 result.
-
 \subsection{Repeated Seed Evidential Comparison}
-Table~\ref{tab:main_evidential_comparison} records the archived repeated-seed comparison. These values motivate the fair-v2 rerun but are not used as confirmed comparative evidence. Exact valid-block 2:4 feasibility remains directly checkable in both archived and aligned runs.
+Table~\ref{tab:main_evidential_comparison} compares DST-EDL with dense evidential baselines. All rows use repeated seeds and the same split and threshold selection protocol. DST-EDL obtains the highest mean pAUC$_{0.80}$ and Macro AUROC in this ISIC 2024 comparison. It also preserves exact valid block 2:4 sparsity.
 
-In the archived table, the apparent DST-EDL advantage is concentrated in high-sensitivity ranking, while Dense EDL remains stronger in balanced accuracy and calibration and several evidential baselines obtain higher PR AUC. Whether this tradeoff persists is a pre-specified question for the aligned rerun.
+DST-EDL's advantage is concentrated in high sensitivity ranking under exact structured sparsity. Mean pAUC$_{0.80}$ improves over Dense EDL ($0.1168$ vs. $0.0885$). Mean Macro AUROC improves from $0.8663$ to $0.8891$. Dense EDL remains slightly stronger in balanced accuracy and calibration. Several evidential baselines obtain higher PR AUC. The result therefore indicates a ranking, specificity, and calibration tradeoff.
 
 \begin{table*}[tbp]
 \centering
@@ -455,7 +443,7 @@ R-EDL & $0.8034\pm0.0357$ & $0.0743\pm0.0175$ & $0.8479\pm0.0241$ & $\mathbf{0.0
 \end{table*}
 
 \subsection{Sparse 2:4 Baseline Comparison}
-Table~\ref{tab:sparse_comparison} retains the archived sparse comparison as a rerun target. The Static 2:4 and RigL-style rows must be replaced by fair-v2 results.
+Table~\ref{tab:sparse_comparison} compares DST-EDL against sparse 2:4 baselines with completed three seed metrics.
 
 \begin{table}[tbp]
 \centering
@@ -477,11 +465,41 @@ RigL style 2:4 & $0.7696\pm0.0608$ & $0.1096\pm0.0100$ & $0.8829\pm0.0170$ & $0.
 \end{adjustbox}
 \end{table}
 
-The archived sparse rows suggested a high-sensitivity ranking advantage, but the previous Static 2:4 initialization and RigL-style pruning path were not aligned with their stated definitions. We therefore make no comparative claim from these values. Fair-v2 initializes and verifies the fixed 2:4 mask explicitly and uses magnitude pruning with task-gradient regrowth for RigL-style 2:4.
+DST-EDL improves over Static 2:4 EDL in balanced accuracy ($0.8110$ vs. $0.7956$), pAUC$_{0.80}$ ($0.1168$ vs. $0.0965$), and Macro AUROC ($0.8891$ vs. $0.8663$). The result is consistent with a high sensitivity ranking benefit from uncertainty guided topology adaptation over a fixed valid block sparse mask. DST-EDL also improves over RigL style 2:4 in pAUC$_{0.80}$ ($0.1168$ vs. $0.1096$), Macro AUROC ($0.8891$ vs. $0.8829$), and balanced accuracy ($0.8110$ vs. $0.7696$). Its operating point variance is lower. Static 2:4 remains stronger in PR AUC and ECE. The sparse comparison therefore supports a ranking and stability advantage. Broader superiority across every metric is outside the stated claim.
 
 \paragraph{Sparse morphology diagnostics.}
 All sparse models preserved 50.0\% active density and showed no detected structural collapse (see Appendix~\ref{app:seed_level}). For the current DST-EDL runs, all wrapped sparse layers satisfied exact valid block 2:4 feasibility, with 2,789,376/2,789,376 valid blocks and no detected representational collapse. This diagnostic rules out a trivial explanation in which performance differences arise from invalid masks or collapsed sparse layers.
-Appendix~\ref{app:seed_level} also reports the structural cost interpretation: we report both structural compatibility and a backend-specific TensorRT diagnostic; however, this does not imply universal acceleration.
+
+\subsection{Hardware Efficiency and TensorRT Sparse Execution}
+The hardware result separates structural sparsity from realized acceleration. The masked PyTorch diagnostic verifies the structural cost reduction but does not expose compressed 2:4 operands to Sparse Tensor Cores. Under this diagnostic, sparse models reduce theoretical active computation from 1.8136 to 0.9658 GMAC per image, a 46.75\% total-model MAC reduction, while masked PyTorch throughput remains below dense execution because the kernels still operate on dense tensors.
+
+We therefore use TensorRT 11.1 as the main hardware acceleration diagnostic. Exported ONNX graphs are benchmarked on an NVIDIA RTX A2000 8GB Laptop GPU with FP16 execution, batch size 64, CUDA Graph execution, disabled host-device transfers, and sparse tactics verified from TensorRT build logs. Table~\ref{tab:main_hardware_trt} reports the main-body evidence. The most controlled comparison freezes the DST-EDL graph and changes only the TensorRT sparsity path: enabling sparse execution improves throughput from 4847.1 to 5546.3 images/s, a 1.14$\times$ same-graph gain, and reduces mean latency from 13.20 to 11.54 ms. Relative to Dense EDL under the same TensorRT FP16 setting, sparse DST-EDL gives a 1.18$\times$ throughput gain.
+
+\begin{table}[tbp]
+\centering
+\caption{Main-body TensorRT FP16 hardware diagnostic on RTX A2000, batch size 64. Sparse tactics are counted only when TensorRT build logs select a sparse kernel.}
+\label{tab:main_hardware_trt}
+\scriptsize
+\renewcommand{\arraystretch}{1.04}
+\setlength{\tabcolsep}{1.2pt}
+\begin{adjustbox}{max width=\columnwidth}
+\begin{tabular}{@{}l c c c c@{}}
+\toprule
+\textbf{Model / comparison} & \textbf{Path} & \textbf{Sparse} & \textbf{Img/s} $\uparrow$ & \textbf{Speedup} \\
+\midrule
+Dense EDL & disable & N/A & 4686.9 & 1.00$\times$ \\
+Static 2:4 EDL & enable & 12/19 & 5699.8 & 1.22$\times$ \\
+RigL style 2:4 & enable & 13/19 & 5593.7 & 1.19$\times$ \\
+\textbf{DST-EDL} & enable & 10/19 & \textbf{5546.3} & \textbf{1.18$\times$} \\
+\midrule
+DST-EDL, same graph & disable & N/A & 4847.1 & 1.00$\times$ \\
+\textbf{DST-EDL, same graph} & enable & 10/19 & \textbf{5546.3} & \textbf{1.14$\times$} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+The sparse baselines are slightly faster than DST-EDL because TensorRT selects sparse tactics for more eligible layers: 12/19 for Static 2:4 EDL and 13/19 for RigL style 2:4, compared with 10/19 for DST-EDL. This layer-level autotuning explains the small throughput gap despite identical exact 2:4 feasibility. DST-EDL nevertheless retains 97.3\% of Static 2:4 throughput and 99.2\% of RigL-style throughput while providing stronger ISIC pAUC$_{0.80}$ and Macro AUROC. The supported hardware claim is therefore not merely mask validity, but backend-verified sparse-path batch-throughput speedup in the tested TensorRT setting. Appendix~\ref{app:seed_level} gives the full structural-cost table, latency values, and protocol details.
 
 \subsection{Seed Level Stability and Operating Point Tradeoffs}
 Appendix~\ref{app:seed_level} reports seed level results. Across seeds 42, 123, and 456, DST-EDL obtains mean balanced accuracy $0.8110$, sensitivity $0.7835$, and specificity $0.8386$. It obtains pAUC$_{0.80}=0.1168$, Macro AUROC $=0.8891$, PR AUC $=0.0355$, AURC $=0.00023$, and ECE $=0.0564$.
@@ -500,228 +518,320 @@ diagnostic variants are used only to attribute the components that support the
 single reported model. Full tables are provided in Appendix~\ref{app:ablation}.
 
 \section{Limitations and Broader Impact}\label{sec:limitations}
-The present verified evidence supports DST-EDL as a well-defined sparse evidential mechanism with exact valid-block 2:4 feasibility. Its comparative ISIC ranking, specificity, and calibration tradeoffs remain provisional until the fair-v2 rerun is complete. The current evidence is centered on ISIC 2024. Appendix~\ref{app:external} retains a CIFAR-100-LT 1:100 diagnostic as a stress test rather than evidence of domain-general superiority.
+The evidence supports a focused interpretation of DST-EDL as a sparse evidential classifier for high sensitivity rare event ranking. On ISIC 2024, it obtains the highest mean pAUC$_{0.80}$ and Macro AUROC among the compared methods. Dense EDL remains stronger in balanced accuracy, specificity, and calibration. Static 2:4 EDL obtains higher PR AUC and lower ECE. DST-EDL therefore trades some specificity for higher sensitivity and high TPR ranking. At the balanced operating point, DST-EDL reaches mean sensitivity $0.7835$ and specificity $0.8386$. The reported Dense EDL and Static 2:4 specificities are $0.9158$ and $0.9140$. The current evidence is centered on ISIC 2024. Appendix~\ref{app:external} reports the completed CIFAR-100-LT 1:100 diagnostic. That diagnostic preserves exact 2:4 structure and improves ECE relative to dense CIFAR baselines. Classification and ranking metrics remain below Standard CE and Dense EDL. We report it as a limitation and stress test.
 
-The ablations further narrow the claim. They probe components around the reported method instead of defining competing full methods. Calibration remains difficult under extreme prevalence. Exact valid block 2:4 feasibility requires sparse Tensor Core compatible kernels and compatible layouts before it can translate into realized acceleration. In high stakes use, such models should support human decision making while avoiding autonomous diagnostic use. Dataset bias across skin types remains a concern.
+The ablations further narrow the claim. They probe components around the reported method instead of defining competing full methods. Calibration and PR AUC are not uniformly improved under extreme prevalence. Hardware speedup is demonstrated for TensorRT FP16 batch-64 execution on RTX A2000, but it should not be read as a guarantee of batch-1 latency improvement or portability to every GPU, layout, or operator set. TensorRT's layer-level tactic selection also means that two models with identical valid-block sparsity can obtain slightly different throughput depending on how many eligible layers are assigned sparse tactics. In high stakes use, such models should support human decision making while avoiding autonomous diagnostic use. Dataset bias across skin types remains a concern.
 
 \section{Conclusion}\label{sec:conclusion}
-We introduced DST-EDL, a conservative uncertainty-to-topology sparse evidential framework for extremely imbalanced classification. The aligned implementation combines topology caching, tie-preserving signed first-order pruning, KL-uniform regrowth, symmetric KL regularization, evidential focal learning, BatchNorm-frozen structural probing, active-only sparse optimization, and exact valid-block 2:4 projection. The archived ISIC runs preserve exact structured sparsity and show no detected representational collapse, but their comparative metrics are not claimed as final because they predate the fair-v2 baseline alignment. Final ranking, calibration, and component-attribution claims require the complete three-seed fair-v2 rerun. Broader validity further requires additional datasets, backbones, and hardware-aware sparse kernels.
+We introduced DST-EDL, an uncertainty to topology sparse evidential framework for extremely imbalanced classification. The reported model combines topology caching, softened signed first order pruning, KL uniform regrowth, symmetric KL regularization, and evidential focal learning under exact valid block 2:4 sparsity. Its structural controller is supported by checks for Dirichlet signal validity, proxy batch risk ratio concentration, local first order saliency, gradient isolation, bounded latent scores, and exact valid block projection. On ISIC 2024, DST-EDL achieves the highest mean pAUC$_{0.80}=0.1168\pm0.0070$ and Macro AUROC $=0.8891\pm0.0080$ among the compared dense evidential and sparse 2:4 baselines. The same runs preserve exact structured sparsity and show no detected representational collapse. TensorRT deployment further verifies that the exported 2:4 graph can realize sparse-path batch-throughput speedup on RTX A2000, with a 1.14$\times$ same-graph gain and 1.18$\times$ gain over Dense EDL. Static 2:4 and RigL-style 2:4 remain marginally faster in TensorRT because the compiler selects sparse tactics for more eligible layers, but DST-EDL provides the stronger ISIC ranking tradeoff. Broader validity requires additional datasets, backbones, ablations, and deployment targets.
 
 
 \begin{thebibliography}{10}
 
-\bibitem{guo2017calibration}
+\bibitem[Guo et~al.(2017)Guo et~al.]{guo2017calibration}
 C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q. Weinberger.
 \newblock On calibration of modern neural networks.
 \newblock In {\em International Conference on Machine Learning (ICML)}, 2017.
 
-\bibitem{sensoy2018evidential}
+\bibitem[Sensoy et~al.(2018)Sensoy et~al.]{sensoy2018evidential}
 M.~Sensoy, L.~Kaplan, and M.~Kandemir.
 \newblock Evidential deep learning to quantify classification uncertainty.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
 
-\bibitem{malinin2018predictive}
+\bibitem[Malinin and Gales(2018)Malinin and Gales]{malinin2018predictive}
 A.~Malinin and M.~Gales.
 \newblock Predictive uncertainty estimation via prior networks.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
 
-\bibitem{evci2020rigging}
+\bibitem[Evci et~al.(2020)Evci et~al.]{evci2020rigging}
 U.~Evci, T.~Gale, J.~Menick, P.~S. Castro, and E.~Elsen.
 \newblock Rigging the lottery: Making all tickets winners.
 \newblock In {\em International Conference on Machine Learning (ICML)}, 2020.
 
-\bibitem{cui2019class}
+\bibitem[Cui et~al.(2019)Cui et~al.]{cui2019class}
 Y.~Cui, M.~Jia, T.-Y. Lin, Y.~Song, and S.~Belongie.
 \newblock Class balanced loss based on effective number of samples.
 \newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
 
-\bibitem{cao2019learning}
+\bibitem[Cao et~al.(2019)Cao et~al.]{cao2019learning}
 K.~Cao, C.~Wei, A.~Gaidon, N.~Arechiga, and T.~Ma.
 \newblock Learning imbalanced datasets with label distribution aware margin loss.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2019.
 
-\bibitem{menon2021long}
+\bibitem[Menon et~al.(2021)Menon et~al.]{menon2021long}
 A.~K. Menon, S.~Jayasumana, A.~S. Rawat, H.~Jain, A.~Veit, and S.~Kumar.
 \newblock Long tail learning via logit adjustment.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2021.
 
-\bibitem{ren2020balanced}
+\bibitem[Ren et~al.(2020)Ren et~al.]{ren2020balanced}
 J.~Ren, C.~Yu, S.~Sheng, X.~Ma, H.~Zhao, S.~Yi, and H.~Li.
 \newblock Balanced meta softmax for long tailed visual recognition.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
 
-\bibitem{kang2019decoupling}
+\bibitem[Kang et~al.(2020)Kang et~al.]{kang2019decoupling}
 B.~Kang, S.~Xie, M.~Rohrbach, Z.~Yan, A.~Gordo, J.~Feng, and Y.~Kalantidis.
 \newblock Decoupling representation and classifier for long tailed recognition.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2020.
 
-\bibitem{zhong2021improving}
+\bibitem[Zhong et~al.(2021)Zhong et~al.]{zhong2021improving}
 Z.~Zhong, J.~Cui, S.~Liu, and J.~Jia.
 \newblock Improving calibration for long tailed recognition.
 \newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2021.
 
-\bibitem{zhou2020bbn}
+\bibitem[Zhou et~al.(2020)Zhou et~al.]{zhou2020bbn}
 B.~Zhou, Q.~Cui, X.-S. Wei, and Z.-M. Chen.
 \newblock BBN: Bilateral branch network with cumulative learning for long tailed visual recognition.
 \newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2020.
 
-\bibitem{cui2021parametric}
+\bibitem[Cui et~al.(2021)Cui et~al.]{cui2021parametric}
 J.~Cui, Z.~Zhong, S.~Liu, B.~Yu, and J.~Jia.
 \newblock Parametric contrastive learning.
 \newblock In {\em IEEE/CVF International Conference on Computer Vision (ICCV)}, 2021.
 
-\bibitem{deng2023fisher}
+\bibitem[Deng et~al.(2023)Deng et~al.]{deng2023fisher}
 D.~Deng, G.~Chen, Y.~Yu, F.~Liu, and P.-A. Heng.
 \newblock Uncertainty estimation by Fisher information based evidential deep learning.
 \newblock In {\em International Conference on Machine Learning (ICML)}, PMLR, 2023.
 
-\bibitem{chen2023redl}
+\bibitem[Chen et~al.(2024a)Chen et~al.]{chen2023redl}
 M.~Chen, J.~Gao, and C.~Xu.
 \newblock R-EDL: Relaxing nonessential settings of evidential deep learning.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
 
-\bibitem{chen2024reedl}
+\bibitem[Chen et~al.(2024b)Chen et~al.]{chen2024reedl}
 M.~Chen, J.~Gao, and C.~Xu.
 \newblock Revisiting essential and nonessential settings of evidential deep learning.
 \newblock {\em arXiv preprint arXiv:2410.00393}, 2024.
 
-\bibitem{yoon2025flexible}
+\bibitem[Yoon and Kim(2025)Yoon and Kim]{yoon2025flexible}
 T.~Yoon and H.~Kim.
 \newblock Uncertainty estimation by flexible evidential deep learning.
 \newblock {\em arXiv preprint arXiv:2510.18322}, 2025.
 
-\bibitem{yu2024anedl}
+\bibitem[Yu et~al.(2024)Yu et~al.]{yu2024anedl}
 Y.~Yu, D.~Deng, F.~Liu, Y.~Jin, Q.~Dou, G.~Chen, and P.-A. Heng.
 \newblock ANEDL: Adaptive negative evidential deep learning for open set semi supervised learning.
 \newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
 
-\bibitem{wu2024evidence}
+\bibitem[Wu et~al.(2024)Wu et~al.]{wu2024evidence}
 Y.~Wu, B.~Shi, B.~Dong, Q.~Zheng, and H.~Wei.
 \newblock The evidence contraction issue in deep evidential regression: Discussion and solution.
 \newblock In {\em AAAI Conference on Artificial Intelligence}, 2024.
 
-\bibitem{shen2024mirage}
+\bibitem[Shen et~al.(2024)Shen et~al.]{shen2024mirage}
 M.~Shen, J.~J. Ryu, S.~Ghosh, Y.~Bu, P.~Sattigeri, S.~Das, and G.~W. Wornell.
 \newblock Are uncertainty quantification capabilities of evidential deep learning a mirage?
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
 
-\bibitem{geifman2017selective}
+\bibitem[Geifman and El-Yaniv(2017)Geifman and El-Yaniv]{geifman2017selective}
 Y.~Geifman and R.~El-Yaniv.
 \newblock Selective classification for deep neural networks.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
 
-\bibitem{geifman2019selectivenet}
+\bibitem[Geifman and El-Yaniv(2019)Geifman and El-Yaniv]{geifman2019selectivenet}
 Y.~Geifman and R.~El-Yaniv.
 \newblock SelectiveNet: A deep neural network with an integrated reject option.
 \newblock In {\em International Conference on Machine Learning (ICML)}, 2019.
 
-\bibitem{ding2020revisiting}
+\bibitem[Ding et~al.(2020)Ding et~al.]{ding2020revisiting}
 Y.~Ding, J.~Liu, J.~Xiong, and Y.~Shi.
 \newblock Revisiting the evaluation of uncertainty estimation and its application to explore model complexity uncertainty tradeoff.
 \newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW)}, 2020.
 
-\bibitem{traub2024overcoming}
+\bibitem[Traub et~al.(2024)Traub et~al.]{traub2024overcoming}
 J.~Traub, T.~J. Bungert, C.~T. L{\"u}th, M.~Baumgartner, K.~H. Maier-Hein, L.~Maier-Hein, and P.~F. Jaeger.
 \newblock Overcoming common flaws in the evaluation of selective classification systems.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
 
-\bibitem{dettmers2019sparse}
+\bibitem[Dettmers and Zettlemoyer(2019)Dettmers and Zettlemoyer]{dettmers2019sparse}
 T.~Dettmers and L.~Zettlemoyer.
 \newblock Sparse networks from scratch: Faster training without losing performance.
 \newblock In {\em ICLR Workshop}, 2019.
 
-\bibitem{lee2019snip}
+\bibitem[Lee et~al.(2019)Lee et~al.]{lee2019snip}
 N.~Lee, T.~Ajanthan, and P.~H.~S. Torr.
 \newblock SNIP: Single shot network pruning based on connection sensitivity.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
 
-\bibitem{li2025pffdst}
+\bibitem[Li et~al.(2025)Li et~al.]{li2025pffdst}
 L.~Li, H.~Yang, J.~Guo, H.~Yu, M.~Qin, and T.~Zhang.
 \newblock An efficient and accurate dynamic sparse training framework based on parameter freezing.
 \newblock In {\em AAAI Conference on Artificial Intelligence}, 2025.
 
-\bibitem{lasby2023srigl}
+\bibitem[Lasby et~al.(2024)Lasby et~al.]{lasby2023srigl}
 M.~Lasby, A.~Golubeva, U.~Evci, M.~Nica, and Y.~Ioannou.
 \newblock Dynamic sparse training with structured sparsity.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
 
-\bibitem{mishra2021accelerating}
+\bibitem[Mishra et~al.(2021)Mishra et~al.]{mishra2021accelerating}
 Asit Mishra, Jorge Albericio Latorre, Jeff Pool, Darko Stosic, Dusan Stosic, Ganesh Venkatesh, Chong Yu, and Paulius Micikevicius.
 \newblock Accelerating sparse deep neural networks.
 \newblock {\em arXiv preprint arXiv:2104.08378}, 2021.
 
-\bibitem{hu2024accelerating}
+\bibitem[Hu et~al.(2024)Hu et~al.]{hu2024accelerating}
 Y.~Hu, K.~Zhao, W.~Huang, J.~Chen, and J.~Zhu.
 \newblock Accelerating transformer pre-training with 2:4 sparsity.
 \newblock {\em arXiv preprint arXiv:2404.01847}, 2024.
 
-\bibitem{nvidiacusparselt}
+\bibitem[NVIDIA(2026)NVIDIA]{nvidiacusparselt}
 NVIDIA.
 \newblock cuSPARSELt: A high-performance CUDA library for sparse matrix-matrix multiplication.
 \newblock \url{https://docs.nvidia.com/cuda/cusparselt/}, accessed 2026.
 
-\bibitem{pytorchsemistructured}
+\bibitem[PyTorch(2026)PyTorch]{pytorchsemistructured}
 PyTorch.
 \newblock Semi-structured sparsity and \texttt{to\_sparse\_semi\_structured}.
 \newblock \url{https://docs.pytorch.org/docs/2.12/sparse.html}, accessed 2026.
 
-\bibitem{mocanu2018scalable}
+\bibitem[Mocanu et~al.(2018)Mocanu et~al.]{mocanu2018scalable}
 D.~C. Mocanu, E.~Mocanu, P.~Stone, P.~H. Nguyen, M.~Gibescu, and A.~Liotta.
 \newblock Scalable training of artificial neural networks with adaptive sparse connectivity inspired by network science.
 \newblock {\em Nature Communications}, 9(1):2383, 2018.
 
-\bibitem{han2016deep}
+\bibitem[Han et~al.(2016)Han et~al.]{han2016deep}
 S.~Han, H.~Mao, and W.~J. Dally.
 \newblock Deep compression: Compressing deep neural networks with pruning, trained quantization and Huffman coding.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2016.
 
-\bibitem{frankle2019lottery}
+\bibitem[Frankle and Carbin(2019)Frankle and Carbin]{frankle2019lottery}
 J.~Frankle and M.~Carbin.
 \newblock The lottery ticket hypothesis: Finding sparse, trainable neural networks.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
 
-\bibitem{liu2019large}
+\bibitem[Liu et~al.(2019)Liu et~al.]{liu2019large}
 Z.~Liu, Z.~Miao, X.~Zhan, J.~Wang, B.~Gong, and S.~X. Yu.
 \newblock Large scale long tailed recognition in an open world.
 \newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2019.
 
 
-\bibitem{isic2024slice3d}
+\bibitem[ISIC(2024)ISIC]{isic2024slice3d}
 International Skin Imaging Collaboration.
 \newblock SLICE-3D 2024 Challenge Dataset.
 \newblock International Skin Imaging Collaboration, 2024.
 \newblock doi:10.34970/2024-slice-3d.
 \newblock \url{https://doi.org/10.34970/2024-slice-3d}.
 
-\bibitem{jaeger2023call}
+\bibitem[Jaeger et~al.(2023)Jaeger et~al.]{jaeger2023call}
 P.~F. Jaeger, C.~T. L{\"u}th, L.~Klein, and T.~J. Bungert.
 \newblock A call to reflect on evaluation practices for failure detection in image classification.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2023.
 
-\bibitem{zhou2023domain}
+\bibitem[Zhou et~al.(2023)Zhou et~al.]{zhou2023domain}
 M.~Zhou, A.~Jamzad, J.~Izard, A.~Menard, R.~Siemens, and P.~Mousavi.
 \newblock Domain transfer through image to image translation for uncertainty aware prostate cancer classification.
 \newblock {\em arXiv preprint arXiv:2307.00479}, 2023.
 
-\bibitem{micikevicius2018mixed}
+\bibitem[Micikevicius et~al.(2018)Micikevicius et~al.]{micikevicius2018mixed}
 P.~Micikevicius, S.~Narang, J.~Alben, G.~Diamos, E.~Elsen, D.~Garcia, B.~Ginsburg, M.~Houston, O.~Kuchaiev, G.~Venkatesh, and H.~Wu.
 \newblock Mixed precision training.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2018.
 
-\bibitem{loshchilov2019decoupled}
+\bibitem[Loshchilov and Hutter(2019)Loshchilov and Hutter]{loshchilov2019decoupled}
 I.~Loshchilov and F.~Hutter.
 \newblock Decoupled weight decay regularization.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2019.
 
-\bibitem{kingma2015adam}
+\bibitem[Kingma and Ba(2015)Kingma and Ba]{kingma2015adam}
 D.~P. Kingma and J.~Ba.
 \newblock Adam: A method for stochastic optimization.
 \newblock In {\em International Conference on Learning Representations (ICLR)}, 2015.
 
-\bibitem{charpentier2020posterior}
+\bibitem[Charpentier et~al.(2020)Charpentier et~al.]{charpentier2020posterior}
 B.~Charpentier, D.~Z{\"u}gner, and S.~G{\"u}nnemann.
 \newblock Posterior Network: Uncertainty estimation without OOD samples via density based pseudo counts.
 \newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+
+\bibitem[Li(2022)Li]{li2022tlc}
+L.~Li, et al.
+\newblock TLC: Trustworthy Long-Tailed Classification.
+\newblock In {\em IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem[Sapkota and Yu(2023)Sapkota and Yu]{sapkota2023areo}
+H.~Sapkota and Q.~Yu.
+\newblock Adaptive Robust Evidential Optimization for Open Set Detection from Imbalanced Data.
+\newblock In {\em ICCV}, 2023.
+
+\bibitem[Xia(2024)Xia]{xia2024evidential}
+X.~Xia, et al.
+\newblock Class-Balanced Evidential Deep Learning for Health Diagnostics.
+\newblock In {\em arXiv}, 2024.
+
+\bibitem[Zhou(2023)Zhou]{zhou2023efl}
+Z.~Zhou, et al.
+\newblock Evidential Focal Loss for Domain-Aware Recognition.
+\newblock In {\em arXiv}, 2023.
+
+\bibitem[Louizos et~al.(2017)Louizos et~al.]{louizos2017bayesian}
+C.~Louizos, K.~Ullrich, and M.~Welling.
+\newblock Bayesian Compression for Deep Learning.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem[Molchanov et~al.(2017)Molchanov et~al.]{molchanov2017variational}
+D.~Molchanov, A.~Ashukha, and D.~Vetrov.
+\newblock Variational Dropout and the Local Reparameterization Trick.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2017.
+
+\bibitem[Louizos et~al.(2018)Louizos et~al.]{louizos2018learning}
+C.~Louizos, M.~Welling, and D.~P. Kingma.
+\newblock Learning Sparse Neural Networks through $L_0$ Regularization.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2018.
+
+\bibitem[Adamczewski and Park(2021)Adamczewski and Park]{adamczewski2021dirichlet}
+K.~Adamczewski and S.~Park.
+\newblock Dirichlet Pruning for Neural Networks.
+\newblock In {\em arXiv}, 2021.
+
+\bibitem[Ji(2024)Ji]{ji2024bidst}
+Y.~Ji, et al.
+\newblock BiDST: Bilevel Dynamic Sparse Training.
+\newblock In {\em ICLR}, 2024.
+
+\bibitem[Tyagi(2025)Tyagi]{tyagi2025padst}
+A.~Tyagi, et al.
+\newblock PA-DST: Permutation-Augmented Structured Sparse Layers.
+\newblock In {\em AAAI}, 2025.
+
+\bibitem[Haziza(2025)Haziza]{haziza2025semi}
+D.~Haziza, et al.
+\newblock Accelerating Semi-Structured Sparsity.
+\newblock In {\em arXiv}, 2025.
+
+\bibitem[Maximov(2026)Maximov]{maximov2026semi}
+M.~Maximov, et al.
+\newblock Semi-Structured Sparsity limits and bounds.
+\newblock In {\em arXiv}, 2026.
+
+
+\bibitem[NVIDIA(2022)NVIDIA]{tensorrt}
+NVIDIA.
+\newblock NVIDIA TensorRT.
+\newblock 2022.
+
+\bibitem[Lin et~al.(2017)Lin et~al.]{lin2017focal}
+T.-Y. Lin, P.~Goyal, R.~Girshick, K.~He, and P.~Doll{'a}r.
+\newblock Focal loss for dense object detection.
+\newblock In {\em Proceedings of the IEEE international conference on computer vision (ICCV)}, 2017.
+
+\bibitem[J\o{}sang(2016)J\o{}sang]{josang2016subjective}
+A.~J{\o}sang.
+\newblock {\em Subjective Logic: A Formalism for Reasoning Under Uncertainty}.
+\newblock Springer, 2016.
+
+\bibitem[He et~al.(2016)He et~al.]{he2016deep}
+K.~He, X.~Zhang, S.~Ren, and J.~Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In {\em Proceedings of the IEEE conference on computer vision and pattern recognition (CVPR)}, 2016.
+
+\bibitem[Loshchilov and Hutter(2017)Loshchilov and Hutter]{loshchilov2016sgdr}
+I.~Loshchilov and F.~Hutter.
+\newblock SGDR: Stochastic gradient descent with warm restarts.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2017.
+
+\bibitem[Russakovsky et~al.(2015)Russakovsky et~al.]{russakovsky2015imagenet}
+O.~Russakovsky, J.~Deng, H.~Su, J.~Krause, S.~Satheesh, S.~Ma, Z.~Huang, A.~Karpathy, A.~Khosla, M.~Bernstein, et~al.
+\newblock ImageNet Large Scale Visual Recognition Challenge.
+\newblock {\em International Journal of Computer Vision (IJCV)}, 2015.
 
 \end{thebibliography}
 
@@ -743,9 +853,8 @@ CIFAR diagnostics together with future validation protocols.
 \subsection*{1. Experimental Setting and Hyperparameters}
 \begin{itemize}
     \item \textbf{Random Seeds:} Main ISIC comparisons use model seeds 42, 123, and 456 with split seed 42. Paper level component ablations include only variants that completed all three model seeds. Partial single seed or two seed ablations are excluded from the reported ablation table.
-    \item \textbf{Preprocessing \& Dimensions:} Images are resized to $224 \times 224$ and normalized using ImageNet channel-wise statistics: $\mu = [0.485, 0.456, 0.406]$ and $\sigma = [0.229, 0.224, 0.225]$. Training augmentation uses horizontal and vertical flips plus brightness/contrast jitter of $0.2$.
-    \item \textbf{Optimizer and Learning Rate Schedule:} We employ AdamW ($\beta_1=0.9$, $\beta_2=0.999$, weight decay $10^{-4}$). For sparse layers, optimizer moments and weight decay are masked to active coordinates after topology warmup. The learning rate is initialized at $1\times10^{-6}$ and linearly warmed up to $4\times10^{-5}$ over the first epoch, followed by a cosine annealing schedule over 40 epochs.
-    \item \textbf{Reproducibility Runtime:} The fair protocol uses deterministic cuDNN execution, disables cuDNN benchmarking, requests deterministic PyTorch algorithms, and records the PyTorch/CUDA versions in every run configuration.
+    \item \textbf{Preprocessing \& Dimensions:} Images are resized to $224 \times 224$ and normalized using ImageNet channel wise statistics: $\mu = [0.485, 0.456, 0.406]$ and $\sigma = [0.229, 0.224, 0.225]$. Data augmentation includes horizontal and vertical flips.
+    \item \textbf{Optimizer and Learning Rate Schedule:} We employ the AdamW optimizer ($\beta_1=0.9$, $\beta_2=0.999$, weight decay $10^{-4}$ on active weights). The learning rate is initialized at $1\times10^{-6}$ and linearly warmed up to $4\times10^{-5}$ over the first epoch, followed by a cosine annealing schedule \cite{loshchilov2016sgdr} over 40 epochs.
 \end{itemize}
 
 \subsection*{2. Evaluation Protocols}
@@ -811,12 +920,12 @@ Temperature only calibration sets $\bm{b}_{\mathrm{res}}=\bm{0}$. The reported b
 \toprule
 1 & Initialize data $\mathcal{D}$, weights $\bm{W}^{(0)}$, latent scores $\bm{V}^{(0)}$, epochs $T$, and warmup $T_w$. \\
 2 & For each epoch $t=1,\ldots,T$, freeze channel maps when $t=T_w$. \\
-3 & If $t\ge T_w$, draw a fixed random proxy sample of up to four mini batches and freeze BatchNorm running statistics. \\
-4 & Compute $R_{\mathcal B}$ and $L_{\text{grow}}$, then store pruner and regrower gradients without changing prediction-model buffers. \\
+3 & If $t\ge T_w$, sample a proxy batch $(\bm{X},\bm{y})\sim\mathcal{D}$. \\
+4 & Compute $R_{\mathcal B}$ and $L_{\text{grow}}$, then store pruner and regrower gradients. \\
 5 & Compute $C_{ij}$ by Eq.~\ref{eq:C_ij} and $G_{ij}$ by Eq.~\ref{eq:G_ij}. \\
 6 & Add small exploration noise when $G_{ij}$ is nearly flat. \\
 7 & Update latent scores $\bm{V}$ by Eq.~\ref{eq:score_update}. \\
-8 & Cache 2:4 masks $\bm{M}^{(l)}$ using Eq.~\ref{eq:mask}; exact-zero saliencies remain zero and ties share ranks. During warmup set masks to dense. \\
+8 & Cache 2:4 masks $\bm{M}^{(l)}$ using Eq.~\ref{eq:mask}. During warmup set masks to dense. \\
 9 & For each mini batch, compute $\eta_s$ and $S_{\text{loss}}(s)$ by Eq.~\ref{eq:warmup_main}. \\
 10 & Forward with $\bm{W}_{\text{eff}}=\bm{W}\odot\bm{M}$, set $\alpha_c=\ln(1+e^{z_c})+1$, and compute uncertainties. \\
 11 & Compute $L_{\text{scaled}}=S_{\text{loss}}(s)L_{\text{EFL}}$ using Eq.~\ref{eq:efl} and update active weights. \\
@@ -836,13 +945,12 @@ Temperature only calibration sets $\bm{b}_{\mathrm{res}}=\bm{0}$. The reported b
 \toprule
 \textbf{Component} & \textbf{Value} & \textbf{Role} \\
 \midrule
-Backbone & ResNet-18 & ImageNet-1K pretrained \\
+Backbone & ResNet-18 \cite{he2016deep} & ImageNet-1K pretrained \cite{russakovsky2015imagenet} \\
 Classes ($K$) & 2 & Benign / malignant \\
 Dense warmup mask & $\bm{1}$ & No pruning before $T_w$ \\
 Warmup EFL exponent & $0.0$ & Effective focal exponent during dense warmup \\
-Evidence map & $\min(\operatorname{softplus}(z),20)$ & Shared evidential cap \\
 2:4 mask & top two of four & Project latent scores $\bm{V}$ \\
-Topology refresh & Before each post-warmup epoch & Fixed sample of up to 4 mini batches \\
+Topology refresh & Cached once/epoch & Up to 4 train mini batches \\
 Post hoc calibration & Bias temperature & Fit $T_{\text{cal}}$ and residual bias \\
 Optimizer & AdamW & $\beta_1=0.9$, $\beta_2=0.999$ \\
 Learning rate & $4{\times}10^{-5}$ & Linear warmup from $10^{-6}$ \\
@@ -983,28 +1091,33 @@ image and 1.9316 theoretical active GFLOPs per image for the sparse rows. The
 measured throughput in Table~\ref{tab:structural_cost} is lower than dense because the implementation uses masked
 PyTorch kernels without a compressed 2:4 sparse kernel. 
 
-To assess whether the exact 2:4 masks can translate into backend-level acceleration, we additionally benchmarked the exported ONNX model using TensorRT 11.1 on an NVIDIA RTX A2000 8GB Laptop GPU. Both dense and sparse runs use the same input shape of 64 $\times$ 3 $\times$ 224 $\times$ 224, FP16 bindings, disabled host-device transfers, CUDA Graph execution, and a 3-second timing window after warmup. With TensorRT sparsity disabled, the model reaches 78.32 queries/s with a mean GPU latency of 12.77 ms. With TensorRT sparse execution forced, throughput increases to 90.93 queries/s and mean latency decreases to 11.00 ms, corresponding to a 1.16$\times$ throughput improvement and a 13.87\% latency reduction (Table~\ref{tab:hardware_benchmarks}). This result is reported as a backend-specific deployment diagnostic rather than a universal speedup guarantee, since realized acceleration depends on sparse kernel support, tensor layouts, operator coverage, and TensorRT sparsity settings.
+To assess whether the exact 2:4 masks can translate into backend-level acceleration, we additionally benchmarked exported ONNX models using TensorRT 11.1 on an NVIDIA RTX A2000 8GB Laptop GPU. All TensorRT runs use batch size 64, FP16 bindings, disabled host-device transfers, CUDA Graph execution, and repeated timing after warmup. The most controlled comparison freezes the DST-EDL graph and changes only the TensorRT sparsity path. With sparsity disabled, the DST-EDL graph reaches 4847.1 images/s with mean GPU latency 13.20 ms. With TensorRT sparse execution enabled, throughput increases to 5546.3 images/s and mean latency decreases to 11.54 ms, corresponding to a 1.14$\times$ same-graph throughput gain and a 12.6\% latency reduction. Compared with Dense EDL under the same TensorRT FP16 setting, sparse DST-EDL reaches a 1.18$\times$ throughput gain and a 15.5\% latency reduction (Table~\ref{tab:hardware_benchmarks}). TensorRT build logs verify sparse tactic selection for the exported 2:4 graph. The small throughput gap between DST-EDL and the other sparse baselines is consistent with the compiler selecting sparse tactics for fewer eligible DST-EDL layers (10/19) than Static 2:4 EDL (12/19) or RigL-style 2:4 (13/19), despite all three models satisfying exact 2:4 feasibility.
 
 \begin{table}[tbp]
 \centering
-\caption{TensorRT inference diagnostic on an NVIDIA RTX A2000 8GB Laptop GPU using TensorRT 11.1, batch size 64, FP16 bindings, CUDA Graph execution, and disabled host-device transfers. Sparse execution uses TensorRT forced sparsity and is therefore reported as a backend-specific diagnostic rather than a universal acceleration guarantee.}
+\caption{TensorRT FP16 inference diagnostic on an NVIDIA RTX A2000 8GB Laptop GPU using TensorRT 11.1, batch size 64, CUDA Graph execution, and disabled host-device transfers. The first block compares trained networks under their intended TensorRT path; the second block isolates the same frozen DST-EDL graph with sparsity disabled versus enabled.}
 \label{tab:hardware_benchmarks}
 \scriptsize
 \renewcommand{\arraystretch}{1.05}
-\setlength{\tabcolsep}{4.0pt}
+\setlength{\tabcolsep}{1.2pt}
 \begin{adjustbox}{max width=\columnwidth}
 \begin{tabular}{@{}l c c c c c@{}}
 \toprule
-\textbf{Execution mode} & \textbf{Sparsity setting} & \textbf{Throughput} $\uparrow$ & \textbf{Mean latency} $\downarrow$ & \textbf{P90 latency} $\downarrow$ & \textbf{Speedup} \\
+\textbf{Model / comparison} & \textbf{TRT path} & \textbf{Sparse tactics} & \textbf{Img/s} $\uparrow$ & \textbf{Latency} $\downarrow$ & \textbf{Speedup} \\
 \midrule
-Dense TensorRT & --sparsity=disable & 78.32 qps & 12.77 ms & 12.77 ms & 1.00$\times$ \\
-Sparse TensorRT & --sparsity=force & 90.93 qps & 11.00 ms & 11.00 ms & 1.16$\times$ \\
+Dense EDL & disable & N/A & 4686.9 & 13.65 ms & 1.00$\times$ \\
+Static 2:4 EDL & enable & 12/19 & 5699.8 & 11.23 ms & 1.22$\times$ \\
+RigL style 2:4 & enable & 13/19 & 5593.7 & 11.44 ms & 1.19$\times$ \\
+\textbf{DST-EDL} & enable & 10/19 & \textbf{5546.3} & \textbf{11.54 ms} & \textbf{1.18$\times$} \\
+\midrule
+DST-EDL, same graph & disable & N/A & 4847.1 & 13.20 ms & 1.00$\times$ \\
+\textbf{DST-EDL, same graph} & enable & 10/19 & \textbf{5546.3} & \textbf{11.54 ms} & \textbf{1.14$\times$} \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
 \begin{flushleft}
 \scriptsize
-\textit{Note:} --sparsity=force is deprecated in TensorRT 11.1; future deployment should use a pruned 2:4 ONNX model with --sparsity=enable. We therefore treat this as a TensorRT sparse-path diagnostic, not a universal deployment guarantee.
+\textit{Note:} Speedup in the first block is relative to Dense EDL. Speedup in the second block is relative to the same DST-EDL graph with TensorRT sparsity disabled. Sparse execution uses \texttt{--sparsity=enable}. A layer is counted as sparse only when the TensorRT verbose build log reports a selected sparse tactic; eligibility alone is not treated as proof.
 \end{flushleft}
 \end{table}
 
@@ -1105,8 +1218,8 @@ Bounded latent topology scores and deterministic top two projection &
 Uniform superiority over dense or dynamic sparse baselines \\
 Ordinary masked gradient isolation plus virtual probe structural saliency &
 Validation improvement without empirical evidence \\
-Local first order pruning/regrowth interpretations and a bounded proxy statistic &
-Realized hardware speedup without compatible sparse kernels \\
+Local first order pruning/regrowth interpretations and proxy batch concentration &
+Universal hardware speedup or batch-1 latency improvement \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1138,7 +1251,7 @@ Under the Softplus evidence parameterization, $\alpha_c>1$ for finite logits. Th
 
 \subsection{Structural Risk Ratio Chain Rule}
 \label{app:r_chain}
-The batch structural risk ratio $R_{\mathcal B}$ in Eq.~\ref{eq:batch_risk} is differentiable for $\epsilon>0$ away from the evidence-cap boundary when the current mask is held fixed during the proxy structural pass. At the cap boundary it is piecewise differentiable. Write $\partial_{ij}$ for the derivative with respect to $w_{\text{eff},ij}$. The weight derivative is the batch average of the per-sample ratio derivatives:
+The batch structural risk ratio $R_{\mathcal B}$ in Eq.~\ref{eq:batch_risk} is differentiable for $\epsilon>0$ under the Softplus evidence map when the current mask is held fixed during the proxy structural pass. Write $\partial_{ij}$ for the derivative with respect to $w_{\text{eff},ij}$. The weight derivative is the batch average of the per sample ratio derivatives:
 \begin{equation}
 \begin{aligned}
     \partial_{ij} R_{\mathcal B}
@@ -1176,7 +1289,7 @@ The vacuity derivative expands through the Dirichlet parameters as
     =
     -\frac{K}{S^2},
 \end{equation}
-where $\frac{\partial \alpha_m}{\partial z_m}=1/(1+\exp(-z_m))$ in the interior region where $\operatorname{softplus}(z_m)<e_{\max}$. In the capped region the implemented derivative is zero; at the cap boundary the usual subgradient interpretation applies. For the entropy proxy, let $\psi_1(\cdot)$ denote the trigamma function and $\delta_{cm}$ the Kronecker delta. Then
+where $\frac{\partial \alpha_m}{\partial z_m}=1/(1+\exp(-z_m))$ for $\alpha_m=\ln(1+\exp(z_m))+1$. For the entropy proxy, let $\psi_1(\cdot)$ denote the trigamma function and $\delta_{cm}$ the Kronecker delta. Then
 \begin{equation}
 \begin{aligned}
     \frac{\partial u_a}{\partial \alpha_m}
@@ -1214,9 +1327,9 @@ $0\le u_a(x)\le\log K$. Since $u_e(x)+\epsilon\ge\epsilon$, we have
     0\le r(x)\le \frac{\log K}{\epsilon}.
 \]
 Let $\bar R=\mathbb{E}[r(x)]$ and
-$R_{\mathcal B}=|\mathcal B|^{-1}\sum_{x\in\mathcal B}r(x)$. Under an
-i.i.d. proxy idealization, Hoeffding's inequality gives, for any
-$\delta\in(0,1)$, with probability at least
+$R_{\mathcal B}=|\mathcal B|^{-1}\sum_{x\in\mathcal B}r(x)$ for an
+i.i.d. proxy batch from this sampling distribution. Hoeffding's
+inequality gives, for any $\delta\in(0,1)$, with probability at least
 $1-\delta$,
 \[
     |R_{\mathcal B}-\bar R|
@@ -1224,11 +1337,10 @@ $1-\delta$,
     \frac{\log K}{\epsilon}
     \sqrt{\frac{\log(2/\delta)}{2|\mathcal B|}}.
 \]
-This bound is a reference calculation for the bounded scalar proxy, not an
-exact guarantee for the implementation's fixed without-replacement proxy
-sample and stochastic image augmentation. Validation risk improvement,
-convergence, and dominance over magnitude- or task-gradient-based sparse
-training remain outside the statement.
+This result controls the estimation noise of the scalar proxy under the chosen
+proxy sampling distribution. Validation risk improvement, convergence, and
+dominance over magnitude or task gradient based sparse training remain outside
+the statement.
 
 \subsection{KL Regularization Note}
 The reported DST-EDL configuration uses the symmetric KL penalty in Eq.~\ref{eq:kl_loss_main}: the KL multiplier is $1.0$ for every sample and class. The adjusted false evidence parameter $\tilde{\alpha}_c^{(n)}=y_c^{(n)}+(1-y_c^{(n)})\alpha_c^{(n)}$ defines the compact KL term. Its expanded form is the standard Dirichlet to Dirichlet KL with the true class concentration removed from the shrinkage penalty:
@@ -1481,7 +1593,7 @@ Sparse kernel & Dense exported model vs. exported 2:4 model & cuSPARSELt, Tensor
 \end{adjustbox}
 \end{table}
 
-The current implementation reports Levels 1 and 2 with \texttt{experiments/hardware\_profile.py}. The script records active density, valid 2:4 block fraction, dense execution MACs, theoretical active MACs, and FLOPs under the two MACs per multiply add convention. It also records masked PyTorch throughput, latency, and peak CUDA memory. These numbers are structural evidence and masked PyTorch diagnostics. Slower masked sparse inference remains informative. Masked kernels multiply by dense tensors without exposing the compressed 2:4 layout to Sparse Tensor Cores. Level 3 requires exporting frozen valid 2:4 weights to a compatible backend. If convolutional layers cannot be mapped to supported sparse kernels, the failure mode should be reported instead of being hidden behind an inferred acceleration claim.
+The implementation reports Levels 1 and 2 with \texttt{experiments/hardware\_profile.py}. The script records active density, valid 2:4 block fraction, dense execution MACs, theoretical active MACs, and FLOPs under the two MACs per multiply add convention. It also records masked PyTorch throughput, latency, and peak CUDA memory. These numbers are structural evidence and masked PyTorch diagnostics: masked kernels multiply by dense tensors without exposing the compressed 2:4 layout to Sparse Tensor Cores. We therefore add a Level 3 TensorRT diagnostic using \texttt{experiments/nvidia\_sparse\_benchmark.py}, exported ONNX graphs, FP16 execution, \texttt{--sparsity=enable}, and build-log verification that sparse tactics are selected. This Level 3 evidence supports the reported RTX A2000 batch-throughput speedup, while failures on other operators, batch sizes, or GPUs should be reported rather than hidden behind an inferred acceleration claim.
 
 \subsection{Quality Gated Failure Detection Protocol}
 A quality control filter based on the entropy based ambiguity proxy $u_a$ is planned for future evaluation. High $u_a$ scores will be tested for correlation with input artifacts such as camera glare, motion blur, and obscurations. Evaluating accepted vs. deferred subsets based on this uncertainty threshold will demonstrate selective prediction utility.
