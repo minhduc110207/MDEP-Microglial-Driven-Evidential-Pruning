@@ -25,8 +25,8 @@ if str(REPO_ROOT) not in sys.path:
 from guds_edl_core import (
     MDEPConv2d,
     MDEPLinear,
-    generate_2_4_mask,
     replace_conv2d_with_mdep,
+    valid_2_4_block_stats,
     get_imbalanced_dataloaders,
     configure_training_runtime,
     compute_uncertainties,
@@ -806,23 +806,30 @@ def load_state_with_optional_ood_head(model, checkpoint_path, device):
     sparse_layers = 0
     valid_blocks = 0
     total_blocks = 0
+    invalid_layers = []
     with torch.no_grad():
-        for module in model.modules():
+        for name, module in model.named_modules():
             if not isinstance(module, (MDEPConv2d, MDEPLinear)):
                 continue
             module.warmup = False
-            module.mask.copy_(generate_2_4_mask(module.scores))
-            rows = module.mask.reshape(module.mask.shape[0], -1)
-            complete = (rows.shape[1] // 4) * 4
-            if complete:
-                blocks = rows[:, :complete].reshape(-1, 4)
-                valid_blocks += int((blocks.sum(dim=1) == 2).sum().item())
-                total_blocks += int(blocks.shape[0])
+            # Keep the exact mask stored by the checkpoint.  Regenerating it from
+            # scores can change tied ranks, while flattening convolution weights
+            # checks the wrong axis for NVIDIA KCRS 2:4 masks.
+            layout = getattr(module, "mask_layout", "nvidia_kcrs")
+            layer_valid, layer_total = valid_2_4_block_stats(module.mask, layout)
+            valid_blocks += layer_valid
+            total_blocks += layer_total
+            if layer_valid != layer_total:
+                invalid_layers.append(
+                    f"{name} ({layout}: {layer_valid}/{layer_total} valid blocks)"
+                )
             sparse_layers += 1
     if sparse_layers:
-        if valid_blocks != total_blocks:
+        if invalid_layers:
             raise RuntimeError(
-                f"Invalid sparse checkpoint reconstruction: {valid_blocks}/{total_blocks} valid 2:4 blocks."
+                "Invalid sparse checkpoint reconstruction: "
+                f"{valid_blocks}/{total_blocks} valid 2:4 blocks; "
+                f"invalid layers: {', '.join(invalid_layers[:4])}."
             )
         print(
             f"[INFO] Restored sparse inference state: layers={sparse_layers}, "
