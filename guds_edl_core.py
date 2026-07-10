@@ -76,13 +76,25 @@ def configure_training_runtime():
         pass
 
 
-def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
+def dataloader_runtime_kwargs(num_workers=None, pin_memory=None, profile="nvidia_v3"):
+    """Return loader settings for a named, recorded experiment profile.
+
+    ``legacy_v2`` is retained only to reproduce the performance protocol used
+    for the manuscript's original ISIC table.  ``nvidia_v3`` is the current
+    memory-safe Kaggle profile and remains the default.
+    """
+    if profile not in {"legacy_v2", "nvidia_v3"}:
+        raise ValueError(f"Unknown dataloader profile: {profile}")
     is_kaggle = os.path.exists('/kaggle')
     if num_workers is None:
         if os.name == "nt":
             num_workers = 0
         else:
-            default_workers = 2 if is_kaggle else min(4, os.cpu_count() or 4)
+            default_workers = (
+                min(4, os.cpu_count() or 4)
+                if profile == "legacy_v2"
+                else (2 if is_kaggle else min(4, os.cpu_count() or 4))
+            )
             num_workers = _env_int("MDEP_NUM_WORKERS", default_workers)
     num_workers = max(0, int(num_workers))
     if pin_memory is None:
@@ -93,9 +105,12 @@ def dataloader_runtime_kwargs(num_workers=None, pin_memory=None):
         "pin_memory": bool(pin_memory),
     }
     if num_workers > 0:
-        kwargs["persistent_workers"] = not is_kaggle
-        # Reduce prefetch_factor to 2 on Kaggle to prevent RAM bloat from large batches
-        default_prefetch = 2 if is_kaggle else 4
+        kwargs["persistent_workers"] = (
+            True if profile == "legacy_v2" else not is_kaggle
+        )
+        # The legacy profile reproduces the original four-worker/persistent
+        # stream; v3 reduces its Kaggle resident-memory footprint.
+        default_prefetch = 4 if profile == "legacy_v2" else (2 if is_kaggle else 4)
         kwargs["prefetch_factor"] = max(2, _env_int("MDEP_PREFETCH_FACTOR", default_prefetch))
     return kwargs
 
@@ -364,7 +379,15 @@ class EvidentialFocalLoss(nn.Module):
 # ============================================================================
 
 
-def generate_2_4_mask(scores):
+def _normalise_2_4_layout(layout):
+    aliases = {"nvidia": "nvidia_kcrs", "nvidia_kcrs": "nvidia_kcrs", "legacy": "legacy_flattened", "legacy_flattened": "legacy_flattened"}
+    try:
+        return aliases[layout]
+    except KeyError as exc:
+        raise ValueError(f"Unknown 2:4 layout: {layout}") from exc
+
+
+def generate_2_4_mask(scores, layout="nvidia_kcrs"):
     """
     Generate a backend-compatible NVIDIA 2:4 structured sparsity mask.
 
@@ -378,10 +401,11 @@ def generate_2_4_mask(scores):
     dense and are excluded from the exact-block denominator. The ISIC ResNet
     sparse layers have C divisible by four; the RGB stem is intentionally dense.
     """
+    layout = _normalise_2_4_layout(layout)
     if scores.ndim < 2:
         return torch.ones_like(scores)
 
-    if scores.ndim == 4:
+    if scores.ndim == 4 and layout == "nvidia_kcrs":
         # KCRS -> KRSC so groups of four are formed strictly along C.
         grouped_scores = scores.permute(0, 2, 3, 1).contiguous()
         inner_dim = grouped_scores.shape[-1]
@@ -415,11 +439,12 @@ def generate_2_4_mask(scores):
     return mask_rows.reshape(shape)
 
 
-def valid_2_4_block_stats(mask):
+def valid_2_4_block_stats(mask, layout="nvidia_kcrs"):
     """Return NVIDIA-layout exact-2:4 valid and total complete block counts."""
+    layout = _normalise_2_4_layout(layout)
     if mask.ndim < 2:
         return 0, 0
-    if mask.ndim == 4:
+    if mask.ndim == 4 and layout == "nvidia_kcrs":
         grouped = mask.permute(0, 2, 3, 1).contiguous()
         complete_dim = (grouped.shape[-1] // 4) * 4
         if complete_dim == 0:
@@ -463,13 +488,14 @@ def positive_percentile_rank(values):
 
 class MDEPLinear(nn.Linear):
     """Drop-in replacement for nn.Linear with MDEP dynamic sparsity."""
-    def __init__(self, in_features, out_features, bias=True, learn_permutation=False):
+    def __init__(self, in_features, out_features, bias=True, learn_permutation=False, mask_layout="nvidia_kcrs"):
         super(MDEPLinear, self).__init__(in_features, out_features, bias)
         self.scores = nn.Parameter(torch.abs(self.weight.data).clone())
         self.register_buffer('mask', torch.ones_like(self.weight))
         self.register_buffer('scores_momentum', torch.zeros_like(self.weight))
         self.gamma = 1.0
         self.warmup = True
+        self.mask_layout = _normalise_2_4_layout(mask_layout)
         
         # Channel ordering is optional. The paper configuration keeps a static
         # identity ordering so pretrained features are not mixed during warmup.
@@ -531,7 +557,8 @@ class MDEPLinear(nn.Linear):
 class MDEPConv2d(nn.Conv2d):
     """Drop-in replacement for nn.Conv2d with MDEP dynamic sparsity."""
     def __init__(self, in_channels, out_channels, kernel_size,
-                 stride=1, padding=0, dilation=1, groups=1, bias=True, learn_permutation=False):
+                 stride=1, padding=0, dilation=1, groups=1, bias=True, learn_permutation=False,
+                 mask_layout="nvidia_kcrs"):
         super(MDEPConv2d, self).__init__(
             in_channels, out_channels, kernel_size,
             stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias,
@@ -541,6 +568,7 @@ class MDEPConv2d(nn.Conv2d):
         self.register_buffer('scores_momentum', torch.zeros_like(self.weight))
         self.gamma = 1.0
         self.warmup = True
+        self.mask_layout = _normalise_2_4_layout(mask_layout)
         
         # Channel ordering is optional. The paper configuration keeps a static
         # identity ordering so pretrained features are not mixed during warmup.
@@ -751,7 +779,9 @@ def update_scores_agents(
             module.scores.data.clamp_(min=-5.0, max=5.0)
             
             # Compute new mask and count flops
-            new_mask = generate_2_4_mask(module.scores.data)
+            new_mask = generate_2_4_mask(
+                module.scores.data, getattr(module, "mask_layout", "nvidia_kcrs")
+            )
             module.mask.copy_(new_mask)
             flops = (old_mask != new_mask).sum().item()
             total_flops += flops
@@ -954,7 +984,9 @@ class MDEPTrainer:
             if isinstance(module, (MDEPLinear, MDEPConv2d)):
                 module.scores.data.copy_(torch.abs(module.weight.data))
                 module.scores_momentum.zero_()
-                raw_mask = generate_2_4_mask(module.scores.data)
+                raw_mask = generate_2_4_mask(
+                    module.scores.data, getattr(module, "mask_layout", "nvidia_kcrs")
+                )
                 module.mask.copy_(raw_mask)
 
     def reset_effective_weight_grads(self):
@@ -1393,7 +1425,7 @@ class LongTailedDataset(Dataset):
         return image, torch.tensor(target, dtype=torch.long)
 
 
-def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, subsample_scope="train", seed=42, allow_dummy_data=False):
+def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20, subsample_scope="train", seed=42, allow_dummy_data=False, loader_profile="nvidia_v3", eval_batch_size=None):
     """
     Returns (train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train).
     Uses stratified splitting to create train, val, cal, and test sets.
@@ -1643,9 +1675,10 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     cal_ds   = LongTailedDataset(cal_df,   image_dir, transform=test_tf,  hdf5_path=hdf5_path)
     test_ds  = LongTailedDataset(test_df,  image_dir, transform=test_tf,  hdf5_path=hdf5_path)
     
-    loader_kwargs = dataloader_runtime_kwargs()
+    loader_kwargs = dataloader_runtime_kwargs(profile=loader_profile)
 
-    eval_batch_size = 128 if torch.cuda.is_available() else batch_size
+    if eval_batch_size is None:
+        eval_batch_size = 128 if torch.cuda.is_available() else batch_size
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
     val_loader   = DataLoader(val_ds,   batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
     cal_loader   = DataLoader(cal_ds,   batch_size=eval_batch_size, shuffle=False, **loader_kwargs)
@@ -1666,7 +1699,7 @@ def get_imbalanced_dataloaders(batch_size=32, test_ratio=0.2, subsample_ratio=20
     return train_loader, val_loader, cal_loader, test_loader, num_classes, cw, p_true, p_train
 
 
-def replace_conv2d_with_mdep(model, learn_permutation=False):
+def replace_conv2d_with_mdep(model, learn_permutation=False, mask_layout="nvidia_kcrs"):
     """Recursively swap nn.Conv2d / nn.Linear → MDEPConv2d / MDEPLinear."""
     for name, module in model.named_children():
         if isinstance(module, nn.Conv2d):
@@ -1679,6 +1712,7 @@ def replace_conv2d_with_mdep(model, learn_permutation=False):
                 dilation=module.dilation, groups=module.groups,
                 bias=(module.bias is not None),
                 learn_permutation=learn_permutation,
+                mask_layout=mask_layout,
             )
             new.weight.data.copy_(module.weight.data)
             new.scores.data.copy_(torch.abs(module.weight.data))
@@ -1690,6 +1724,7 @@ def replace_conv2d_with_mdep(model, learn_permutation=False):
                 module.in_features, module.out_features,
                 bias=(module.bias is not None),
                 learn_permutation=learn_permutation,
+                mask_layout=mask_layout,
             )
             new.weight.data.copy_(module.weight.data)
             new.scores.data.copy_(torch.abs(module.weight.data))
@@ -1697,7 +1732,9 @@ def replace_conv2d_with_mdep(model, learn_permutation=False):
                 new.bias.data.copy_(module.bias.data)
             setattr(model, name, new)
         else:
-            replace_conv2d_with_mdep(module, learn_permutation=learn_permutation)
+            replace_conv2d_with_mdep(
+                module, learn_permutation=learn_permutation, mask_layout=mask_layout
+            )
 
 
 # ============================================================================
@@ -1946,7 +1983,9 @@ def print_sparsity_report(model, detail=False):
             total_macs_dense += macs_dense
             total_macs_sparse += macs_sparse
             
-            valid_blocks, total_blocks = valid_2_4_block_stats(mask)
+            valid_blocks, total_blocks = valid_2_4_block_stats(
+                mask, getattr(module, "mask_layout", "nvidia_kcrs")
+            )
             if total_blocks > 0:
                 checked_24 += total_blocks
                 valid_24 += valid_blocks

@@ -43,28 +43,37 @@ from experiments.metrics_ext import binary_image_anomaly_metrics
 
 
 def validate_checkpoint_protocol(checkpoint_path, allow_legacy=False):
-    """Reject checkpoints that were not produced by the aligned fair protocol."""
+    """Reject checkpoints incompatible with NVIDIA-layout external validation."""
     checkpoint_path = Path(checkpoint_path)
     metrics_path = checkpoint_path.parent / "metrics.json"
-    found = None
+    found_version = None
+    found_profile = None
     if metrics_path.exists():
         try:
-            found = json.loads(metrics_path.read_text(encoding="utf-8")).get("protocol_version")
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            found_version = payload.get("protocol_version")
+            found_profile = payload.get("protocol_profile")
         except (OSError, ValueError, TypeError):
-            found = None
-    if found != PROTOCOL_VERSION:
+            pass
+    valid = found_version == PROTOCOL_VERSION and found_profile == "nvidia_v3"
+    if not valid:
         message = (
-            f"Checkpoint {checkpoint_path} has protocol_version={found!r}; "
-            f"expected {PROTOCOL_VERSION!r}."
+            f"Checkpoint {checkpoint_path} has protocol_version={found_version!r}, "
+            f"protocol_profile={found_profile!r}; expected version={PROTOCOL_VERSION!r} "
+            "and profile='nvidia_v3'."
         )
         if allow_legacy:
             print(f"[WARN] {message} Legacy checkpoint explicitly allowed.")
         else:
             raise RuntimeError(
-                message + " Retrain the three fair-v3 NVIDIA-layout seeds or pass "
+                message + " Retrain the three NVIDIA-layout seeds or pass "
                 "--allow_legacy_checkpoint for diagnostic-only use."
             )
-    return found
+    return {
+        "protocol_version": found_version,
+        "protocol_profile": found_profile,
+        "nvidia_layout_validated": bool(valid),
+    }
 
 
 class DummyDomainShiftDataset(Dataset):
@@ -1350,7 +1359,7 @@ def main():
     print("="*80)
     
     results = {
-        "checkpoint_protocol_version": checkpoint_protocol,
+        "checkpoint_protocol": checkpoint_protocol,
         "seed": int(args.seed),
         "split_seed": int(args.split_seed),
         "classification": metrics if is_binary_skin else "N/A",

@@ -535,7 +535,31 @@ def set_static_sparse_mode(model: nn.Module) -> None:
             module.gamma = 0.15
             module.static_24_baseline = True
             with torch.no_grad():
-                module.mask.copy_(generate_2_4_mask(module.scores))
+                module.mask.copy_(generate_2_4_mask(
+                    module.scores, getattr(module, "mask_layout", "nvidia_kcrs")
+                ))
+
+
+def resolve_protocol_profile(args: argparse.Namespace) -> dict[str, object]:
+    """Freeze performance-relevant semantics under a named protocol profile.
+
+    The legacy profile is a reproducibility path for the manuscript's v2
+    results, not a TensorRT sparse-convolution profile.  The default v3 path
+    is the only one suitable for NVIDIA-layout structural or hardware claims.
+    """
+    if args.protocol_profile == "legacy_v2":
+        return {
+            "mask_layout": "legacy_flattened",
+            "loader_profile": "legacy_v2",
+            "eval_batch_size": args.batch_size,
+            "hardware_compatible": False,
+        }
+    return {
+        "mask_layout": "nvidia_kcrs",
+        "loader_profile": "nvidia_v3",
+        "eval_batch_size": 128 if torch.cuda.is_available() else args.batch_size,
+        "hardware_compatible": True,
+    }
 
 
 def model_head(model: nn.Module) -> tuple[nn.Module, nn.Module]:
@@ -1474,13 +1498,14 @@ def make_ranking_checkpoint_callback(
 def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    profile = resolve_protocol_profile(args)
     run_experiment_name = f"{spec.name}{args.run_suffix}" if args.run_suffix else spec.name
     run_dir = output_root() / run_experiment_name / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"\n[RUN] dataset=isic experiment={run_experiment_name} family={spec.family} "
         f"evaluator={'softmax' if uses_softmax_evaluation(spec) else 'evidential'} "
-        f"seed={seed} split_seed={args.split_seed} epochs={args.epochs} "
+        f"seed={seed} split_seed={args.split_seed} epochs={args.epochs} profile={args.protocol_profile} "
         f"device={device} output={run_dir}"
     )
 
@@ -1491,6 +1516,8 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         subsample_scope=args.subsample_scope,
         seed=args.split_seed,
         allow_dummy_data=args.allow_dummy_data,
+        loader_profile=str(profile["loader_profile"]),
+        eval_batch_size=int(profile["eval_batch_size"]),
     )
     train_loader, val_loader, cal_loader, test_loader, num_classes, class_weights, p_true, p_train = loaders
 
@@ -1500,8 +1527,16 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         pretrained=not args.no_pretrained,
     )
     if spec.sparse:
-        replace_conv2d_with_mdep(model.backbone, learn_permutation=False)
-        print("[INFO] GUDS-EDL sparse mode: 2:4 backbone convs only; classifier head is unmasked by design; identity channel order is frozen.")
+        replace_conv2d_with_mdep(
+            model.backbone,
+            learn_permutation=False,
+            mask_layout=str(profile["mask_layout"]),
+        )
+        print(
+            "[INFO] GUDS-EDL sparse mode: 2:4 backbone convs only; "
+            f"layout={profile['mask_layout']}; classifier head is unmasked by design; "
+            "identity channel order is frozen."
+        )
     model = model.to(device)
     if False:  # Forced to single GPU execution
         if spec.sparse:
@@ -1852,6 +1887,10 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             "cuda": torch.version.cuda,
             "device": str(device),
         },
+        "protocol_profile": args.protocol_profile,
+        "sparsity_layout": profile["mask_layout"],
+        "loader_profile": profile["loader_profile"],
+        "hardware_compatible_sparsity": profile["hardware_compatible"],
     }
     run_config = {
         "protocol_version": PROTOCOL_VERSION,
@@ -1860,6 +1899,10 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "split_seed": args.split_seed,
         "arguments": vars(args),
         "runtime": result["runtime"],
+        "protocol_profile": args.protocol_profile,
+        "sparsity_layout": profile["mask_layout"],
+        "loader_profile": profile["loader_profile"],
+        "hardware_compatible_sparsity": profile["hardware_compatible"],
     }
     (run_dir / "run_config.json").write_text(json.dumps(json_safe(run_config), indent=2), encoding="utf-8")
     (run_dir / "metrics.json").write_text(json.dumps(json_safe(result), indent=2), encoding="utf-8")
@@ -1911,6 +1954,16 @@ def main() -> int:
     parser.add_argument("--structural_proxy_batches", type=int, default=4, help="Maximum train mini-batches accumulated for one cached GUDS structural proxy batch.")
     parser.add_argument("--structural_proxy_min_classes", type=int, default=2, help="Minimum distinct target classes requested before caching a GUDS structural proxy batch.")
     parser.add_argument("--efl_gamma_final", type=float, default=0.0, help="Final EFL focal gamma after cosine decay; keep 0.0 for the reported clean default.")
+    parser.add_argument(
+        "--protocol_profile",
+        choices=["nvidia_v3", "legacy_v2"],
+        default="legacy_v2",
+        help=(
+            "legacy_v2 reproduces the fixed performance protocol used by the manuscript tables. "
+            "nvidia_v3 uses TensorRT-compatible KCRS 2:4 masks and the memory-safe loader for a separate "
+            "deployment diagnostic; legacy_v2 must not support TensorRT sparse-kernel claims."
+        ),
+    )
     parser.add_argument("--run_suffix", default="", help="Optional suffix for output experiment folders, useful for tuning runs without overwriting reported metrics.")
     parser.add_argument(
         "--checkpoint_selection",
