@@ -1266,16 +1266,15 @@ class MDEPTrainer:
             
             amp_enabled = getattr(device, "type", None) == "cuda"
 
-            # Use Automatic Mixed Precision for Forward Pass
-            with torch.amp.autocast('cuda', enabled=amp_enabled):
-                if use_ood_projection and hasattr(self.model, "backbone") and hasattr(self.model, "fc"):
-                    id_features = self.model.backbone(inputs)
-                    evidence = self.model.fc(id_features)
-                else:
-                    id_features = None
-                    evidence = self.model(inputs)
-                
-            loss_ood = None
+            # Fetch detached OOD features *before* the ID forward.  MDEP layers
+            # cache ``effective_weight`` on every forward for structural-gradient
+            # bookkeeping.  An OOD forward after the ID forward would overwrite
+            # that cache with a no-grad tensor, making the subsequent ID task
+            # gradient look dead.  Run the frozen feature extraction in eval mode
+            # as well: ``torch.no_grad()`` alone does not prevent BatchNorm running
+            # statistics from adapting to the OOD domain.
+            ood_inputs = None
+            ood_features = None
             if use_ood_this_epoch:
                 try:
                     ood_batch = next(ood_iter)
@@ -1283,15 +1282,34 @@ class MDEPTrainer:
                     ood_iter = iter(ood_loader)
                     ood_batch = next(ood_iter)
                 ood_inputs = ood_batch[0] if isinstance(ood_batch, (tuple, list)) else ood_batch
-                
                 ood_inputs = ood_inputs.to(device)
+
                 if use_ood_projection:
                     ood_head = getattr(self.model, "ood_projection_head", None)
                     if ood_head is None:
                         raise AttributeError("ood_loss_target='projection' requires model.ood_projection_head")
-                    with torch.no_grad():
-                        with torch.amp.autocast('cuda', enabled=amp_enabled):
-                            ood_features = self.model.backbone(ood_inputs)
+                    was_training = self.model.training
+                    self.model.eval()
+                    try:
+                        with torch.no_grad():
+                            with torch.amp.autocast('cuda', enabled=amp_enabled):
+                                ood_features = self.model.backbone(ood_inputs)
+                    finally:
+                        self.model.train(was_training)
+
+            # The ID pass intentionally follows detached OOD feature extraction:
+            # it restores the MDEP effective-weight references used by backward.
+            with torch.amp.autocast('cuda', enabled=amp_enabled):
+                if use_ood_projection and hasattr(self.model, "backbone") and hasattr(self.model, "fc"):
+                    id_features = self.model.backbone(inputs)
+                    evidence = self.model.fc(id_features)
+                else:
+                    id_features = None
+                    evidence = self.model(inputs)
+
+            loss_ood = None
+            if use_ood_this_epoch:
+                if use_ood_projection:
                     with torch.amp.autocast('cuda', enabled=False):
                         id_logits = ood_head(id_features.detach().float())
                         ood_logits = ood_head(ood_features.detach().float())
@@ -1322,10 +1340,22 @@ class MDEPTrainer:
             
             self.scaler.scale(scaled_loss).backward()
 
-            # Gradient clipping and norm tracking (only for optimized parameters)
+            # Gradient clipping and norm tracking.  Projection-OE gradients are
+            # detached from the backbone, but a single global clip would still
+            # rescale ID gradients because the auxiliary-head norm is included.
+            # Clip the two parameter groups independently to keep the ID update
+            # trajectory invariant to the auxiliary domain classifier.
             self.scaler.unscale_(self.optimizer)
             params_to_clip = [p for group in self.optimizer.param_groups for p in group['params']]
-            grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
+            if use_ood_projection:
+                ood_param_ids = {id(p) for p in ood_head.parameters()}
+                id_params_to_clip = [p for p in params_to_clip if id(p) not in ood_param_ids]
+                ood_params_to_clip = [p for p in params_to_clip if id(p) in ood_param_ids]
+                grad_norm = torch.nn.utils.clip_grad_norm_(id_params_to_clip, max_norm=1.0)
+                if ood_params_to_clip:
+                    torch.nn.utils.clip_grad_norm_(ood_params_to_clip, max_norm=1.0)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
             
             if not torch.isnan(grad_norm).item() and not torch.isinf(grad_norm).item():
                 if ema_grad is None:

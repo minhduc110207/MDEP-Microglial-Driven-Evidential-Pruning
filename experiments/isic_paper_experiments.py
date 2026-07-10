@@ -65,6 +65,7 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "isic_fair_v3_nvidia24_2026_07_09"
+OOD_PROJECTION_PROTOCOL_VERSION = "detached_eval_before_id_v2"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -1601,6 +1602,10 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
             model = TransparentDataParallel(model)
 
     ood_loader = None
+    # OE must not consume the global RNG used by the ID DataLoader.  This keeps
+    # source-only and projection-OE runs on the same ID shuffle/augmentation path.
+    ood_generator = torch.Generator()
+    ood_generator.manual_seed(int(seed) + 104_729)
     if args.outlier_exposure:
         from torchvision import datasets, transforms
         from torch.utils.data import DataLoader, Subset
@@ -1660,7 +1665,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                     
                     ood_ds = datasets.CIFAR10(root='./data', train=True, download=False, transform=transform_ood)
                     ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
-                    ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                    ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True, generator=ood_generator)
                     print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
                     loaded_pickle = True
                 except Exception as e:
@@ -1685,7 +1690,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                     try:
                         ood_ds = datasets.ImageFolder(root=local_cifar_path, transform=transform_ood)
                         ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
-                        ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                        ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True, generator=ood_generator)
                         print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
                         loaded_pickle = True
                     except Exception as e:
@@ -1697,7 +1702,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                 try:
                     ood_ds = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_ood)
                     ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
-                    ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                    ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True, generator=ood_generator)
                     print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}, Total OOD samples: {len(ood_ds)}")
                 except Exception as e:
                     print(f"[WARNING] Failed to load CIFAR-10: {e}. Outlier Exposure is disabled.")
@@ -1721,18 +1726,27 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
                     print(f"[INFO] Using entire custom folder for Outlier Exposure. Total samples: {len(ood_ds)}")
                 
                 ood_batch_size = max(1, int(args.batch_size * args.ood_batch_ratio))
-                ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True)
+                ood_loader = DataLoader(ood_ds, batch_size=ood_batch_size, shuffle=True, num_workers=2, drop_last=True, generator=ood_generator)
                 print(f"[INFO] Outlier Exposure active. OOD Batch size: {ood_batch_size}")
             except Exception as e:
                 print(f"[WARNING] Failed to load custom OE folder: {e}. Outlier Exposure is disabled.")
                 ood_loader = None
 
+    ood_projection_protocol = None
     if ood_loader is not None and args.ood_loss_target == "projection":
-        attach_ood_projection_head(model)
+        # The auxiliary head is deterministic but must not perturb the global RNG
+        # subsequently used by the ID sampler/augmentations.
+        cuda_devices = [torch.cuda.current_device()] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(int(seed) + 10_007)
+            if device.type == "cuda":
+                torch.cuda.manual_seed_all(int(seed) + 10_007)
+            attach_ood_projection_head(model)
         model.ood_projection_head.to(device)
+        ood_projection_protocol = OOD_PROJECTION_PROTOCOL_VERSION
         print(
-            "[INFO] Low-impact OE active: training detached OOD projection head only; "
-            "backbone, classifier, and sparse topology are protected from OE gradients."
+            "[INFO] Low-impact OE v2 active: detached, eval-mode OOD features are extracted before ID forward; "
+            "BatchNorm statistics, ID gradients, and sparse structural caches are isolated from OE."
         )
 
     checkpoint_callback, checkpoint_tracker = make_ranking_checkpoint_callback(
@@ -1920,6 +1934,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "ood_batch_ratio": args.ood_batch_ratio,
         "ood_start_epoch": args.ood_start_epoch,
         "ood_loss_target": args.ood_loss_target,
+        "ood_projection_protocol": ood_projection_protocol,
         "temperature": float(temperature),
         "bias": bias.tolist() if bias is not None else None,
         "calibration_bias": bias.tolist() if bias is not None else None,
@@ -1943,6 +1958,7 @@ def run_one(spec: ExperimentSpec, args: argparse.Namespace, seed: int) -> dict:
         "sparsity_layout": profile["mask_layout"],
         "loader_profile": profile["loader_profile"],
         "hardware_compatible_sparsity": profile["hardware_compatible"],
+        "ood_projection_protocol": ood_projection_protocol,
     }
     run_config = {
         "protocol_version": PROTOCOL_VERSION,
