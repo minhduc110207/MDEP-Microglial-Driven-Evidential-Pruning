@@ -225,6 +225,13 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         kl_scaling="symmetric",
         disable_efl=True,
     ),
+    "class_balanced_edl": ExperimentSpec(
+        name="class_balanced_edl",
+        family="evidential_baseline",
+        description="Class-Balanced EDL baseline using class pooling loss and a learnable prior.",
+        loss_name="class_balanced_edl",
+        disable_efl=True,
+    ),
     "full_guds": ExperimentSpec(
         name="full_guds",
         family="proposed",
@@ -433,6 +440,10 @@ SUITES: dict[str, list[str]] = {
         "r_edl",
         "static_24_edl",
         "rigl_style_24",
+        "class_balanced_edl",
+        "dense_edl_efl",
+        "static_24_edl_efl",
+        "rigl_style_24_efl",
     ],
     "ablations": [
         "full_guds",
@@ -554,6 +565,64 @@ class RelaxedEDLLoss(nn.Module):
 
     def forward(self, evidence: torch.Tensor, targets: torch.Tensor, epoch: int | None = None) -> torch.Tensor:
         return self.loss(evidence, targets, epoch=epoch)
+
+
+class ClassBalancedEDLLoss(nn.Module):
+    def __init__(self, raw_beta: nn.Parameter, num_classes: int, kl_lambda: float, total_epochs: int):
+        super().__init__()
+        self.raw_beta = raw_beta
+        self.num_classes = num_classes
+        self.kl_lambda = kl_lambda
+        self.total_epochs = total_epochs
+        self.annealing_epochs = max(1, int(0.10 * total_epochs))
+
+    def forward(self, evidence: torch.Tensor, targets: torch.Tensor, epoch: int | None = None) -> torch.Tensor:
+        if targets.dim() == 1:
+            targets = F.one_hot(targets, num_classes=self.num_classes).float()
+            
+        beta = F.softplus(self.raw_beta).clamp_min(1e-4)
+        alpha = evidence + beta.unsqueeze(0)
+        S = torch.sum(alpha, dim=1, keepdim=True)
+        
+        # Expected Cross-Entropy classification loss
+        loss_ce = torch.sum(
+            targets * (torch.digamma(S) - torch.digamma(alpha)),
+            dim=1, keepdim=True
+        )
+        
+        # KL Divergence Regularization (incorrect classes toward prior beta)
+        alpha_tilde = beta.unsqueeze(0) + (1.0 - targets) * evidence
+        
+        alpha_tilde_0 = torch.sum(alpha_tilde, dim=1, keepdim=True)
+        beta_0 = torch.sum(beta)
+        
+        term1 = torch.lgamma(alpha_tilde_0) - torch.sum(torch.lgamma(alpha_tilde), dim=1, keepdim=True)
+        term2 = - torch.lgamma(beta_0) + torch.sum(torch.lgamma(beta))
+        term3 = torch.sum(
+            (alpha_tilde - beta.unsqueeze(0)) * (torch.digamma(alpha_tilde) - torch.digamma(alpha_tilde_0)),
+            dim=1, keepdim=True
+        )
+        loss_kl = term1 + term2 + term3
+        
+        # KL Annealing
+        if epoch is not None and self.annealing_epochs > 0:
+            annealing_coef = min(1.0, epoch / self.annealing_epochs)
+        else:
+            annealing_coef = 1.0
+            
+        loss = loss_ce + self.kl_lambda * annealing_coef * loss_kl
+        
+        # Class pooling loss
+        class_losses = []
+        for c in range(self.num_classes):
+            mask = targets[:, c] == 1
+            if mask.sum() > 0:
+                class_losses.append(loss[mask].mean())
+                
+        if len(class_losses) > 0:
+            return torch.stack(class_losses).mean()
+        else:
+            return torch.mean(loss)
 
 
 def seed_everything(seed: int) -> None:
@@ -1045,9 +1114,20 @@ def make_loss(
     total_epochs: int,
     device: torch.device,
     efl_gamma_final: float = 0.0,
+    model: nn.Module | None = None,
 ) -> nn.Module:
     if spec.loss_name == "r_edl":
         return RelaxedEDLLoss(num_classes, class_weights.to(device), total_epochs)
+
+    if spec.loss_name == "class_balanced_edl":
+        assert model is not None, "model must be supplied for class_balanced_edl to register raw_beta"
+        if not hasattr(model.fc, "cb_raw_beta"):
+            init_raw = math.log(math.exp(1.0) - 1.0)
+            model.fc.register_parameter(
+                "cb_raw_beta",
+                nn.Parameter(torch.full((num_classes,), init_raw, device=device))
+            )
+        return ClassBalancedEDLLoss(model.fc.cb_raw_beta, num_classes, kl_lambda=0.1, total_epochs=total_epochs)
 
     base = EvidentialFocalLoss(
         gamma=5.0,
@@ -1266,7 +1346,7 @@ def train_standard(
 
     criterion = None
     if spec.loss_name not in DISCRIMINATIVE_LOSS_NAMES:
-        criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device)
+        criterion = make_loss(spec, model.fc[0].out_features, class_weights, total_epochs, device, model=model)
 
     total_samples = len(train_loader.dataset) if hasattr(train_loader, "dataset") else 10000
     num_batches = max(1, len(train_loader))
@@ -1371,6 +1451,7 @@ def train_guds(
         total_epochs,
         device,
         efl_gamma_final=efl_gamma_final,
+        model=model,
     )
     params = [p for name, p in model.named_parameters() if "scores" not in name]
     # Sparse coordinates receive explicit active-only AdamW-style decay in
