@@ -1233,7 +1233,7 @@ w/o anti cryst. & $0.7837\pm0.0369$ & $0.6753\pm0.1498$ & $0.8920\pm0.0761$ & $0
 \toprule
 \textbf{Variant} & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro AUROC} $\uparrow$ & \textbf{AP} $\uparrow$ & \textbf{AURC} $\downarrow$ \\
 \midrule
-\textbf{DST-EDL} & $0.1172\pm0.0067$ & $0.8853\pm0.0089$ & $0.0335\pm0.0037$ & $\mathbf{0.00025\pm0.00004}$ \\
+\textbf{DST-EDL} & $0.1172\pm0.0067$ & $0.8853\pm0.0089$ & $0.0335\pm0.0037$ & $\mathbf{0.00023\pm0.00006}$ \\
 w/o pruner & $0.1051\pm0.0057$ & $0.8720\pm0.0069$ & $0.0319\pm0.0029$ & $0.00027\pm0.00006$ \\
 w/o regrower & $0.0640\pm0.0187$ & $0.7663\pm0.0629$ & $0.0077\pm0.0049$ & $0.00057\pm0.00021$ \\
 asymmetric KL & $0.1127\pm0.0141$ & $0.8845\pm0.0159$ & $0.0348\pm0.0042$ & $0.00033\pm0.00006$ \\
@@ -1247,7 +1247,7 @@ w/o anti cryst. & $\mathbf{0.1173\pm0.0098}$ & $\mathbf{0.8857\pm0.0109}$ & $\ma
 Within the implemented DST-EDL system, removing regrowth produces the largest
 observed degradation: pAUC$_{0.80}$ changes from $0.1172$ to $0.0640$, Macro
 AUROC from $0.8853$ to $0.7663$, AP from $0.0335$ to $0.0077$, and AURC
-from $0.00025$ to $0.00057$. This supports the need for dormant-link
+from $0.00023$ to $0.00057$. This supports the need for dormant-link
 reactivation in this controller, but the ablation does not compare KL regrowth
 against every alternative regrowth rule. Removing the pruner yields smaller
 decreases in balanced accuracy, sensitivity, pAUC$_{0.80}$, and Macro AUROC.
