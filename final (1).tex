@@ -467,11 +467,11 @@ RigL-style 2:4 & $0.0982\pm0.0064$ & $0.8630\pm0.0079$ & $0.0371\pm0.0089$ & $0.
 \end{table}
 
 \subsection{Objective and Topology Attribution}
-Under the base evidential objective, the controller without focal modulation reaches pAUC$_{0.80}=0.0898$: above Static 2:4 EDL ($0.0803$) but below RigL-style 2:4 ($0.0982$). The main comparison therefore does not isolate evidential saliency from the objective. Table~\ref{tab:controlled} provides the narrower one-component evidence. Removing regrowth produces the largest observed drop ($-0.0528$), followed by focal modulation ($-0.0270$) and the signed pruner ($-0.0117$). Removing the tie-breaking heuristic slightly raises mean pAUC from $0.1168$ to $0.1173$ in the full supplementary table, so it is not claimed as a ranking contributor. These are within-suite effects, not a factorial interaction estimate or proof that evidential regrowth dominates task-gradient alternatives.
+Under the base evidential objective, the controller without focal modulation reaches pAUC$_{0.80}=0.0898$: above Static 2:4 EDL ($0.0803$) but below RigL-style 2:4 ($0.0982$). The main comparison therefore does not isolate evidential saliency from the objective. Table~\ref{tab:controlled} provides the narrower one-component evidence. Removing regrowth produces the largest observed drop ($-0.0532$), followed by focal modulation ($-0.0274$) and the signed pruner ($-0.0121$). Removing the tie-breaking heuristic slightly raises mean pAUC from $0.1172$ to $0.1173$ in the full supplementary table, so it is not claimed as a ranking contributor. These are within-suite effects, not a factorial interaction estimate or proof that evidential regrowth dominates task-gradient alternatives.
 
 \begin{table}[tbp]
 \centering
-\caption{Means from a separate three-seed component suite; SDs and remaining variants are in the supplement. Its full reference is not the Table~\ref{tab:main_evidential_comparison} checkpoint; $\Delta$ is relative to $0.1168$.}
+\caption{Means from a separate three-seed component suite; SDs and remaining variants are in the supplement. Its full reference is the Table~\ref{tab:main_evidential_comparison} checkpoint; $\Delta$ is relative to $0.1172$.}
 \label{tab:controlled}
 \scriptsize
 \renewcommand{\arraystretch}{1.03}
@@ -481,10 +481,10 @@ Under the base evidential objective, the controller without focal modulation rea
 \toprule
 \textbf{Variant} & \textbf{pAUC$_{0.80}$} & \textbf{M-AUROC} & \textbf{ECE} & \textbf{$\Delta$pAUC} \\
 \midrule
-Full suite reference & $0.1168$ & $0.8891$ & $0.0564$ & --- \\
-w/o signed pruner & $0.1051$ & $0.8720$ & $0.0552$ & $-0.0117$ \\
-w/o regrower & $0.0640$ & $0.7663$ & $0.0556$ & $-0.0528$ \\
-w/o focal modulation & $0.0898$ & $0.8546$ & $0.0544$ & $-0.0270$ \\
+Full suite reference & $0.1172$ & $0.8853$ & $0.0554$ & --- \\
+w/o signed pruner & $0.1051$ & $0.8720$ & $0.0552$ & $-0.0121$ \\
+w/o regrower & $0.0640$ & $0.7663$ & $0.0556$ & $-0.0532$ \\
+w/o focal modulation & $0.0898$ & $0.8546$ & $0.0544$ & $-0.0274$ \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
@@ -1210,10 +1210,10 @@ three runs are omitted from the paper-level ablation table.
 \toprule
 \textbf{Variant} & \textbf{Bal.} $\uparrow$ & \textbf{Sens.} $\uparrow$ & \textbf{Spec.} $\uparrow$ & \textbf{ECE} $\downarrow$ \\
 \midrule
-\textbf{DST-EDL} & $\mathbf{0.8110\pm0.0050}$ & $\mathbf{0.7835\pm0.0418}$ & $0.8386\pm0.0399$ & $0.0564\pm0.0009$ \\
+\textbf{DST-EDL} & $0.7777\pm0.0363$ & $0.6537\pm0.1430$ & $0.9018\pm0.0834$ & $0.0554\pm0.0007$ \\
 w/o pruner & $0.7946\pm0.0077$ & $0.7229\pm0.0492$ & $0.8662\pm0.0394$ & $0.0552\pm0.0007$ \\
 w/o regrower & $0.7046\pm0.0527$ & $0.6753\pm0.0723$ & $0.7339\pm0.0520$ & $0.0556\pm0.0027$ \\
-asymmetric KL & $0.8033\pm0.0116$ & $0.7229\pm0.0715$ & $0.8836\pm0.0485$ & $0.0556\pm0.0003$ \\
+asymmetric KL & $\mathbf{0.8033\pm0.0116}$ & $\mathbf{0.7229\pm0.0715}$ & $0.8836\pm0.0485$ & $0.0556\pm0.0003$ \\
 w/o EFL & $0.7500\pm0.0266$ & $0.5628\pm0.1050$ & $\mathbf{0.9372\pm0.0519}$ & $\mathbf{0.0544\pm0.0003}$ \\
 w/o anti cryst. & $0.7837\pm0.0369$ & $0.6753\pm0.1498$ & $0.8920\pm0.0761$ & $0.0556\pm0.0006$ \\
 \bottomrule
@@ -1233,21 +1233,21 @@ w/o anti cryst. & $0.7837\pm0.0369$ & $0.6753\pm0.1498$ & $0.8920\pm0.0761$ & $0
 \toprule
 \textbf{Variant} & \textbf{pAUC$_{0.80}$} $\uparrow$ & \textbf{Macro AUROC} $\uparrow$ & \textbf{AP} $\uparrow$ & \textbf{AURC} $\downarrow$ \\
 \midrule
-\textbf{DST-EDL} & $0.1168\pm0.0070$ & $\mathbf{0.8891\pm0.0080}$ & $\mathbf{0.0355\pm0.0063}$ & $\mathbf{0.00023\pm0.00006}$ \\
+\textbf{DST-EDL} & $0.1172\pm0.0067$ & $0.8853\pm0.0089$ & $0.0335\pm0.0037$ & $\mathbf{0.00025\pm0.00004}$ \\
 w/o pruner & $0.1051\pm0.0057$ & $0.8720\pm0.0069$ & $0.0319\pm0.0029$ & $0.00027\pm0.00006$ \\
 w/o regrower & $0.0640\pm0.0187$ & $0.7663\pm0.0629$ & $0.0077\pm0.0049$ & $0.00057\pm0.00021$ \\
 asymmetric KL & $0.1127\pm0.0141$ & $0.8845\pm0.0159$ & $0.0348\pm0.0042$ & $0.00033\pm0.00006$ \\
 w/o EFL & $0.0898\pm0.0010$ & $0.8546\pm0.0016$ & $0.0298\pm0.0038$ & $0.00030\pm0.00000$ \\
-w/o anti cryst. & $\mathbf{0.1173\pm0.0098}$ & $0.8857\pm0.0109$ & $0.0352\pm0.0047$ & $0.00030\pm0.00010$ \\
+w/o anti cryst. & $\mathbf{0.1173\pm0.0098}$ & $\mathbf{0.8857\pm0.0109}$ & $\mathbf{0.0352\pm0.0047}$ & $0.00030\pm0.00010$ \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
 \end{table}
 
 Within the implemented DST-EDL system, removing regrowth produces the largest
-observed degradation: pAUC$_{0.80}$ changes from $0.1168$ to $0.0640$, Macro
-AUROC from $0.8891$ to $0.7663$, AP from $0.0355$ to $0.0077$, and AURC
-from $0.00023$ to $0.00057$. This supports the need for dormant-link
+observed degradation: pAUC$_{0.80}$ changes from $0.1172$ to $0.0640$, Macro
+AUROC from $0.8853$ to $0.7663$, AP from $0.0335$ to $0.0077$, and AURC
+from $0.00025$ to $0.00057$. This supports the need for dormant-link
 reactivation in this controller, but the ablation does not compare KL regrowth
 against every alternative regrowth rule. Removing the pruner yields smaller
 decreases in balanced accuracy, sensitivity, pAUC$_{0.80}$, and Macro AUROC.
