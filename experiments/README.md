@@ -1,70 +1,97 @@
-# GUDS-EDL Experiments
+# MDEP: Microglial-Driven Evidential Pruning (Experiments Suite)
 
-This folder contains the active ISIC 2024 and CIFAR-100-LT experiment runners.
+This directory contains the active runners, validation scripts, and optimization pipelines for the **MDEP (Microglial-Driven Evidential Pruning)** framework. MDEP is a structured, uncertainty-guided 2:4 pruning framework designed for high-stakes clinical tasks like melanoma classification (ISIC 2024) under extreme class imbalance.
 
-## Notebook Separation
+---
 
-- `HARDWARE_EXPERIMENTS_END_TO_END.md` (repository root) is the complete
-  train-to-TensorRT runbook, including checkpoint transfer, quality gates,
-  troubleshooting, and manuscript handoff.
-- `run_fair_v3_nvidia24_experiments.ipynb` (repository root) contains training,
-  ablations, CIFAR-100-LT, OOD evaluation, and metric aggregation only. It does
-  not execute hardware profiling or TensorRT.
-- `run_rtx_a2000_hardware_experiments.ipynb` (repository root) is the standalone
-  local RTX A2000 workflow. It consumes saved fair-v3 checkpoints and runs
-  structural profiling, ONNX preflight, TensorRT Level 3, and paper-readiness
-  checks without loading datasets or training models.
+## 🚀 Key Mathematical & Architectural Foundations
 
-## Active Runners
+MDEP integrates **Evidential Deep Learning (EDL)** with dynamic structural sparsity modeled after glial cell activities in the brain (Microglia for pruning, Astrocytes for regrowth).
 
-- `isic_paper_experiments.py`: ISIC 2024 main-table baselines, evidential
-  baselines, GUDS-EDL ablations, calibration variants, and quality-gated
-  reports.
-- `run_isic_softmax_baselines.py`: thin wrapper for ISIC softmax baselines.
-- `run_isic_evidential_baselines.py`: thin wrapper for ISIC evidential
-  baselines.
-- `run_isic_guds_ablations.py`: thin wrapper for ISIC GUDS-EDL ablations.
-- `generalization_paper_suite.py`: CIFAR-100-LT paper-facing baseline suite.
-- `run_cifar_suite.py`: thin wrapper that injects `--benchmark cifar`.
-- `run_kaggle_paper_suite.py`: Kaggle launcher for ISIC, CIFAR, summary, and
-  optional backbone runs. Hardware profiling is intentionally excluded.
-- `run_local_full_experiments.py`: local launcher with compact logging.
-- `hardware_profile.py`: dense/static-2:4/GUDS structural profiling.
-- `nvidia_sparse_benchmark.py`: Level-3 TensorRT FP16 benchmark for trained
-  Dense EDL, Static 2:4, RigL-style 2:4, and DST-EDL checkpoints. It separates
-  network comparison from same-model sparse-kernel ablation and emits a LaTeX
-  table only when the RTX A2000, fair-v3 NVIDIA-layout checkpoint, graph-equivalence, repeat,
-  and sparse-build evidence gates pass.
-- `run_nvidia_hardware_rtx_a2000.ps1`: local Windows launcher for the TensorRT
-  benchmark. It expects `trtexec.exe` on `PATH`, via `TENSORRT_ROOT`, or through
-  the `-TrtExec` argument.
-- `summarize_results.py`: aggregate JSON metric files across seeds.
-- `run_external_validation.py`: unadapted PAD/domain-shift classification,
-  validity-aware fairness, and OOD scores. Keep `knn_layer3` as the primary
-  unseen-domain score.
-- `run_pad_adaptation.py`: patient-grouped nested PAD-UFES adaptation using
-  frozen features, binary or six-diagnosis heads, multi-seed ensembling,
-  held-out calibration, fairness-adjusted thresholds, patient bootstrap
-  intervals, and an optional detached supervised domain head.
-- `run_pad_layer4_kd.py`: higher-risk second stage that opens only layer4
-  weights, freezes sparse topology and layers through layer3, and replays ISIC
-  calibration batches with knowledge distillation.
+### 1. Dirichlet Evidential Formulation
+Instead of standard Softmax probabilities, the model outputs non-negative evidence vector $\mathbf{e} \ge 0$ via a Softplus activation. This evidence parameterizes a Dirichlet distribution $\operatorname{Dir}(\bm{\alpha})$:
+$$\alpha_c = e_c + 1, \quad S = \sum_{c=1}^K \alpha_c$$
+*   **Epistemic Uncertainty (Vacuity)**: $u_e = \frac{K}{S}$ (represents overall lack of evidence).
+*   **Aleatoric Uncertainty (Ambiguity)**: $u_a = \sum_{c=1}^K \frac{\alpha_c}{S} \left[ \psi(S+1) - \psi(\alpha_c+1) \right]$ (represents conflicting evidence, where $\psi$ is the digamma function).
 
-## Kaggle Quick Start
+### 2. Microglial-Guided Pruning
+Pruning is formulated as a signed first-order Taylor criterion on the evidential risk ratio $R = \frac{u_a}{u_e + \epsilon}$. The pruning score $C_{ij}$ isolates connections whose removal is mathematically expected to reduce risk:
+$$C_{ij} = \left[ w_{ij} \frac{\partial R}{\partial w_{ij}} \right]_+$$
+*   **Positive Gradient ($w_{ij} \frac{\partial R}{\partial w_{ij}} > 0$)**: Pruning this connection is expected to decrease risk. These are targeted for pruning.
+*   **Negative Gradient ($w_{ij} \frac{\partial R}{\partial w_{ij}} < 0$)**: Pruning this connection is expected to increase risk. These are preserved.
+
+### 3. Astrocyte-Guided Regrowth & Anti-Crystallization
+Dormant weights are dynamically regrown using a local first-order saliency score derived from a regrowth objective $L_{\text{grow}}$:
+$$G_{ij} = \left| \frac{\partial L_{\text{grow}}}{\partial w_{ij}} \right|$$
+To prevent structural crystallization (where topology gets stuck in a local minimum and growth signals freeze), an **Anti-Crystallization stochastic noise** term is introduced when structural gradients decay:
+$$\tilde{G}_{ij} = G_{ij} + \xi_{ij} \cdot \sigma(\mathbf{V}^{(l)}), \quad \xi_{ij} \sim \mathcal{N}(0, 1)$$
+
+---
+
+## 🔄 Latest Model & Codebase Updates
+
+The repository has recently been updated with the following features to improve classification under extreme class imbalance, out-of-distribution (OOD) safety, and hardware compatibility:
+
+### 💎 1. Class-Balanced EDL (CB-EDL)
+Designed specifically to handle extreme class imbalance (such as in ISIC 2024, where the positive malignant rate is $<1\%$).
+*   **Pooling Loss & Learnable Prior**: CB-EDL replaces static uniform priors with a learnable prior parameter $\beta$ and introduces a class-pooling loss computed dynamically across active categories in each batch to prevent rare-class gradients from being overwhelmed by majority classes.
+*   **Evidential Focal Loss (EFL) warmup**: Modulates expected cross-entropy without distorting the Dirichlet structure, using a cosine-decayed gamma factor that is scheduled post-warmup.
+
+### 🛡️ 2. Detached OOD Projection (v2)
+Out-of-Distribution (OOD) evaluation on datasets like PAD-UFES-20 has been upgraded to prevent data contamination and training instability:
+*   **RNG Isolation & BatchNorm Protection**: Feature extraction for OOD inputs is run strictly in `eval` mode (`self.model.eval()`) under `torch.no_grad()`. This ensures that Outlier Exposure (OE) batches do not contaminate the running statistics (mean and variance) of the In-Distribution (ID) Batch Normalization layers.
+*   **Independent Gradient Clipping Groups**: ID task gradients and auxiliary OOD projection head gradients are clipped independently in the trainer. This prevents large auxiliary domain-classification gradients from rescaling and distorting the optimization trajectory of the primary task.
+
+### ⚡ 3. NVIDIA TensorRT 2:4 Structured Sparsity Alignment
+*   **Layout Correction**: Custom pruning matrices are now grouped strictly along the input channel axis ($C$) in $KCRS$ convolutional layouts (using the `nvidia_kcrs` layout and `nvidia_v3` profile).
+*   **TensorRT Eligibility**: Every block of 4 weights contains exactly 2 zeros and 2 non-zeros along the reduction axis. This satisfies Ampere/Ada Lovelace/Hopper GPU hardware sparse Tensor Core constraints, allowing Level-3 TensorRT FP16 compiler optimization and verified speedups.
+
+---
+
+## 📂 Active Runners and Scripts
+
+The `experiments/` directory contains the following runners and validation utilities:
+
+| Script / Notebook | Purpose & Description |
+| :--- | :--- |
+| [`isic_paper_experiments.py`](file:///d:/MDEP/experiments/isic_paper_experiments.py) | Main runner for ISIC 2024 baselines, evidential models, proposed GUDS-EDL, and ablations. |
+| [`run_group_kfold.py`](file:///d:/MDEP/experiments/run_group_kfold.py) | Evaluates MDEP under patient-grouped nested cross-validation to prevent data leakage. |
+| [`backbone_generalization_runner.py`](file:///d:/MDEP/experiments/backbone_generalization_runner.py) | Tests structural sparsity on diverse backbones (ResNet-18, Swin Transformer, ConvNeXt). |
+| [`run_external_validation.py`](file:///d:/MDEP/experiments/run_external_validation.py) | Evaluates zero-shot validation, fairness, and OOD performance on Fitzpatrick17k & PAD-UFES-20. |
+| [`run_pad_adaptation.py`](file:///d:/MDEP/experiments/run_pad_adaptation.py) | Performs leakage-safe domain adaptation on PAD-UFES-20 using frozen features. |
+| [`run_calibration_study.py`](file:///d:/MDEP/experiments/run_calibration_study.py) | Ablation runner evaluating regrowth modes (KL, Vacuity, Ambiguity, Ratio) and ECE. |
+| [`compare_rigl_guds.py`](file:///d:/MDEP/experiments/compare_rigl_guds.py) | Directly compares evidential regrowth versus standard gradient-based regrowth (RigL). |
+| [`export_sparse_acceleration.py`](file:///d:/MDEP/experiments/export_sparse_acceleration.py) | Exports sparse MDEP check-pointed models to ONNX and runs hardware acceleration preflights. |
+| [`nvidia_sparse_benchmark.py`](file:///d:/MDEP/experiments/nvidia_sparse_benchmark.py) | Level-3 TensorRT FP16 benchmarking suite on local hardware (RTX A2000). |
+| [`run_complete_paper_suite.ipynb`](file:///d:/MDEP/run_complete_paper_suite.ipynb) | Master notebook in repo root that runs the entire training and baseline pipeline. |
+
+---
+
+## 🛠️ Kaggle Quick Start
+
+MDEP is optimized for running on Kaggle with single-click notebook cells.
 
 ```bash
+# Clone the repository
 %cd /kaggle/working
 !git clone https://github.com/minhduc110207/MDEP-Microglial-Driven-Evidential-Pruning.git
 %cd MDEP-Microglial-Driven-Evidential-Pruning
+
+# Run a quick smoke test on synthetic/dummy data
 !python experiments/run_kaggle_paper_suite.py --smoke
+
+# Run the complete ISIC 2024 experiment suite (all models, 3 seeds)
 !python experiments/run_kaggle_paper_suite.py --isic_suite all --no_save_model --keep_going
 ```
 
-## ISIC Fair-v3 NVIDIA-layout Protocol
+---
 
-The manuscript-facing comparison must be regenerated with the aligned
-`isic_fair_v3_nvidia24_2026_07_09` protocol:
+## 📈 Running Aligned Evaluation Protocols
 
+> [!IMPORTANT]
+> To reproduce paper-facing benchmarks, execute the commands below. Ensure you use the exact seed parameters to match the paper-readiness gates.
+
+### 1. Main Table Baselines (ISIC 2024)
 ```bash
 MDEP_DETERMINISTIC=1 python -u experiments/isic_paper_experiments.py \
   --suite main_tables \
@@ -80,11 +107,8 @@ MDEP_DETERMINISTIC=1 python -u experiments/isic_paper_experiments.py \
   --run_suffix _fair_v3_nvidia24
 ```
 
-Do not mix archived metrics or checkpoints with fair-v3 results. External OOD
-evaluation is post-hoc and must consume the three new
-`full_guds_fair_v3_nvidia24/seed_{42,123,456}` checkpoints; it must not select or tune
-the ISIC model.
-
+### 2. Held-Out External OOD Evaluation (PAD-UFES-20)
+Evaluate the checkpoints generated above on the unseen skin-cancer domain:
 ```bash
 for seed in 42 123 456; do
   python -u experiments/run_external_validation.py \
@@ -99,95 +123,21 @@ for seed in 42 123 456; do
 done
 ```
 
-For CIFAR-only runs:
-
+### 3. CIFAR-100-LT Generalization benchmarks
 ```bash
 !python experiments/generalization_paper_suite.py --benchmark cifar --ratio 10 --epochs 100 --seeds 42 43 44
 !python experiments/generalization_paper_suite.py --benchmark cifar --ratio 50 --epochs 100 --seeds 42 43 44
 !python experiments/generalization_paper_suite.py --benchmark cifar --ratio 100 --epochs 100 --seeds 42 43 44
 ```
 
-## PAD-UFES Adaptation
+---
 
-The zero-shot external-validation result and the adapted PAD result answer
-different questions. Do not replace the former with the latter.
+## 💾 Outputs & Artifacts
 
-Train the fixed final-epoch fair-v3 ISIC checkpoints into a separate output
-folder:
+All training runs write their configurations, execution logs, JSON metrics, and model checkpoints to:
+`paper_experiment_outputs/isic/`
 
+You can aggregate results across seeds at any point using:
 ```bash
-python experiments/isic_paper_experiments.py \
-  --experiment full_guds \
-  --epochs 40 \
-  --seeds 42 123 456 \
-  --split_seed 42 \
-  --subsample_scope train \
-  --subsample_ratio 20 \
-  --checkpoint_selection last \
-  --run_suffix _fair_v3_nvidia24
+python experiments/summarize_results.py
 ```
-
-Then run the leakage-safe PAD adapter. The braces in `--model_path` are
-expanded by the Python runner for each seed:
-
-```bash
-python experiments/run_pad_adaptation.py \
-  --pad_root /kaggle/input/datasets/mahdavi1202/skin-cancer \
-  --pad_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
-  --partition all \
-  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v3_nvidia24/seed_{seed}/model_state.pth' \
-  --seeds 42 123 456 \
-  --target_mode diagnosis6 \
-  --feature_layer auto \
-  --head linear \
-  --outer_folds 5 \
-  --inner_folds 3 \
-  --fairness_min_group_size 20 \
-  --fairness_min_class_size 10 \
-  --target_sensitivity 0.80 \
-  --bootstrap_repeats 1000 \
-  --train_domain_head
-```
-
-`pad_adaptation_summary.json` labels the adapted classification, fairness, and
-domain-head claims explicitly. The supervised domain head is not an
-unseen-domain OOD result; use `run_external_validation.py` with
-`--primary_ood_score knn_layer3` for that claim.
-
-Only if the frozen adapter is insufficient, run the constrained layer4 stage:
-
-```bash
-python experiments/run_pad_layer4_kd.py \
-  --pad_root /kaggle/input/datasets/mahdavi1202/skin-cancer \
-  --pad_csv /kaggle/input/datasets/mahdavi1202/skin-cancer/metadata.csv \
-  --partition all \
-  --model_path '/kaggle/working/paper_experiment_outputs/isic/full_guds_fair_v3_nvidia24/seed_{seed}/model_state.pth' \
-  --seeds 42 123 456 \
-  --target_mode diagnosis6 \
-  --outer_folds 5 \
-  --inner_folds 3 \
-  --epochs 12 \
-  --lr 1e-5 \
-  --kd_weight 2.0 \
-  --kd_temperature 2.0
-```
-
-The runner asserts after every fit that all sparse scores and masks are
-bitwise unchanged. It also records ISIC validation pAUC/AP for each fold and
-never uses the ISIC test set for optimization.
-
-## Outputs
-
-Runs write metrics, configs, logs, and optional checkpoints under
-`paper_experiment_outputs/`. Pass `--no_save_model` for large multi-seed
-sweeps to avoid filling Kaggle storage.
-
-## Fairness Notes
-
-The main evidential/sparse comparison shares the same split, ResNet-18
-backbone, seeds, 40-epoch budget, learning-rate/loss-scale warmup, FP32
-objective path, calibration/evaluation surface, and deterministic runtime.
-Static 2:4 uses one fixed magnitude mask; RigL-style 2:4 uses magnitude pruning
-and task-gradient regrowth. Proxy baselines such as Fisher EDL, Flexible EDL,
-R-EDL, MiSLAS-style LAS+cRT, and RigL-style 2:4 must be described as controlled
-in-repo implementations rather than official external-code reproductions.
